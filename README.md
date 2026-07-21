@@ -1,14 +1,31 @@
 # sec-agent: Enclave-Bound Session Agent for Developer Secrets
 
-`sec` is a fully local, offline-first credentials manager designed to protect local developer secrets (such as API keys, database credentials, and tokens) from session takeover vectors (e.g. hijacked terminal sessions, remote SSH attackers, or administrative screen monitoring). 
+[![Platform: macOS Only](https://img.shields.io/badge/Platform-macOS%20Only-blue.svg?style=flat-square&logo=apple)](https://www.apple.com/macos/)
+[![Security: Hardware Enclave](https://img.shields.io/badge/Security-Secure%20Enclave-red.svg?style=flat-square)](https://developer.apple.com/documentation/security)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg?style=flat-square)](LICENSE)
 
-It functions exactly like `ssh-agent` or `gpg-agent` but is tailored specifically for application environment variables and configuration files.
+`sec` is a fully local, offline-first credentials manager designed to protect local developer secrets (such as API keys, database credentials, and cloud tokens) from session takeover vectors (e.g. hijacked terminal sessions, remote SSH shell attackers, or administrative screen monitoring).
+
+It functions similarly to `ssh-agent` or `gpg-agent` but is tailored specifically for application environment variables and dotenv configurations.
+
+> [!WARNING]
+> **macOS Exclusivity**: This tool utilizes macOS-specific APIs, including LocalAuthentication (Touch ID/Apple Watch hardware prompts), Keychain Services (Secure Enclave master key storage), and macOS Hardened Runtime memory protections. It is not compatible with Windows or Linux.
+
+---
+
+## ⚠️ The Problem: Plaintext Dotenv Proliferation
+
+In modern software development, hardcoding credentials in local `.env` files is incredibly common. What starts as a "temporary PoC or pre-prod password" often:
+1.  **Accumulates over the years** across multiple project folders.
+2.  **Leaks into shell history** log files (`.zsh_history`, `.bash_history`).
+3.  **Gets committed accidentally** to public or private Git repositories.
+4.  **Remains completely unencrypted**, leaving credentials accessible to any local process or remote SSH connection active on your machine.
 
 ---
 
 ## 🔒 Security Architecture
 
-`sec` is built on a **secure-by-design** model:
+`sec` is built on a **secure-by-design** model to prevent credential leakage:
 
 ```
                     [ ATTACKER IN SSH SESSION ]
@@ -26,10 +43,11 @@ It functions exactly like `ssh-agent` or `gpg-agent` but is tailored specificall
            [ ACCESS DENIED ]                   [ ACCESS GRANTED ]
 ```
 
-*   **Touch ID Physical Presence validation**: Encryption master keys are stored inside the macOS Secure Enclave (`SecAccessControl`). Decrypting them requires hardware-backed physical user presence contact with the Touch ID sensor, blocking remote attackers.
-*   **Cryptographic Session Isolation**: Sourcing `sec open` generates a temporary random hex token in the shell context (`SEC_SESSION_TOKEN`). The background socket daemon enforces this token on all queries, preventing separate terminal processes or hijacked browsers from querying your secrets.
-*   **Active Hijack Detection**: The daemon walks up the process tree on every connection. If it detects an active SSH session ancestry (`SSH_CLIENT`/`SSH_TTY`) or active screen-sharing (`screensharingd`), it immediately locks the database, flushes all keys from memory, and locks itself.
-*   **Hardened Runtime Isolation**: The daemon executes under macOS Hardened Runtime protections with no debugging entitlements. System Integrity Protection (SIP) blocks standard user-space debuggers and memory readers (even root UID 0) from inspecting its memory.
+*   **Touch ID Physical Presence Gate**: Master encryption keys are stored inside the macOS Secure Enclave (`SecAccessControl`). Decrypting them requires hardware-backed physical user validation (Touch ID contact or Apple Watch click), instantly blocking remote attackers.
+*   **Cryptographic Session Isolation**: Initializing `sec open` generates a temporary random session token in the active shell context (`SEC_SESSION_TOKEN`). The background socket daemon enforces this token on all queries, preventing separate terminal processes or browser processes from querying your secrets.
+*   **Multi-Layer Session Hijacking Intercepts**: On every query request, the daemon walks the caller's process tree to block `sshd` shell parents. In addition, it inspects the client process's active environment variables using BSD `ps e -ww -p <PID>` to detect remote shell variables (`SSH_CLIENT`, `SSH_TTY`, `SSH_CONNECTION`). It also checks for active VNC graphical sharing (`AppleVNCServer`), Xcode remote debugging (`remotepairingd`), and native sharing (`screensharingd`). If detected, the daemon locks itself and wipes all memory cache keys instantly.
+*   **Disaster-Proof Write Transactions**: All filesystem mutations (database saves, dotenv migrations, KeePassXC exports) utilize atomic sibling renames. The payload is written to a temporary file, flushed to storage blocks via `fsync()`, and atomically replaced. Profile-isolated backups of the last 10 database snapshots are rotated automatically under `~/.config/sec/backups/<profile>/`.
+*   **Hardened Runtime Isolation**: The daemon executes under macOS Hardened Runtime protections with no debugging entitlements. System Integrity Protection (SIP) blocks standard user-space debuggers and memory readers (including root UID 0) from inspecting its memory.
 *   **Offline First**: No cloud synchronization, no third-party APIs, and zero SaaS dependency.
 
 ---
@@ -124,3 +142,11 @@ Your database contents belong to you. `sec` supports multiple export formats mat
     ```bash
     sec restore my_backup.kdbx
     ```
+
+---
+
+## 🔍 Diagnostics Version Checks
+The `sec version` command allows you to inspect compiled VCS commit history, build timestamps, and Go modules dependencies, and queries the background daemon to warn you if a client-daemon version mismatch exists:
+```bash
+sec version
+```
