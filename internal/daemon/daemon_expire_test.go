@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"secure_secrets/config"
-	"secure_secrets/store"
+	"secure_secrets/internal/config"
+	"secure_secrets/internal/store"
 )
 
 func TestDaemonExpirationBlock(t *testing.T) {

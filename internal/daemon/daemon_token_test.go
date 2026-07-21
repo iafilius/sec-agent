@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"secure_secrets/config"
+	"secure_secrets/internal/config"
 )
 
 func TestDaemonSessionTokenVerification(t *testing.T) {

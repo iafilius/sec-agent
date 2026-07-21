@@ -15,8 +15,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
-	"secure_secrets/config"
-	"secure_secrets/store"
+	"secure_secrets/internal/config"
+	"secure_secrets/internal/store"
 )
 
 // IPCRequest defines the format for messages sent to the daemon.

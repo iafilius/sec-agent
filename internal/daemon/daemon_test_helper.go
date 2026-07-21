@@ -1,6 +1,6 @@
 package daemon
 
-import "secure_secrets/store"
+import "secure_secrets/internal/store"
 
 // SetMasterKeyForTest is a test helper to inject the master key programmatically.
 func (d *Daemon) SetMasterKeyForTest(key []byte) {

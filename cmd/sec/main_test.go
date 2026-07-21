@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"secure_secrets/config"
-	"secure_secrets/crypto"
-	"secure_secrets/daemon"
-	"secure_secrets/store"
+	"secure_secrets/internal/config"
+	"secure_secrets/internal/crypto"
+	"secure_secrets/internal/daemon"
+	"secure_secrets/internal/store"
 )
 
 func TestMainIntegration(t *testing.T) {

@@ -4,7 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"secure_secrets/store"
+	"secure_secrets/internal/store"
 	"testing"
 	"time"
 )

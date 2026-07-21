@@ -6,7 +6,7 @@ LDFLAGS := -ldflags "-X main.BuildDate=$(BUILD_DATE)"
 all: build codesign
 
 build:
-	go build $(LDFLAGS) -o sec main.go
+	go build $(LDFLAGS) -o sec cmd/sec/main.go
 
 codesign: build
 	@echo "Signing binary with macOS Hardened Runtime..."
@@ -34,9 +34,11 @@ sec-check:
 	@if [ -f $$HOME/go/bin/gosec ]; then $$HOME/go/bin/gosec -exclude=G115 ./...; else gosec -exclude=G115 ./...; fi
 
 sync:
+	@echo "=== Cleaning old root packages in sec-agent/ ==="
+	rm -rf sec-agent/backup sec-agent/biometrics sec-agent/config sec-agent/crypto sec-agent/daemon sec-agent/keychain sec-agent/store sec-agent/main.go sec-agent/main_test.go sec-agent/migration_test.go
 	@echo "=== Syncing core codebase and packages to sec-agent/ ==="
 	mkdir -p sec-agent/docs
-	cp -r backup biometrics config crypto daemon keychain store sec-agent/
-	cp main.go main_test.go migration_test.go go.mod go.sum Makefile sec-agent/
+	cp -r cmd internal sec-agent/
+	cp go.mod go.sum Makefile sec-agent/
 	@echo "=== Running sanity build & tests inside sec-agent/ ==="
 	cd sec-agent && make build codesign && make sec-check && go test -v ./...

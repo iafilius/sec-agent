@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"secure_secrets/store"
+	"secure_secrets/internal/store"
 	"strings"
 	"time"
 
