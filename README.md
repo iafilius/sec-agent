@@ -23,6 +23,18 @@ In modern software development, hardcoding credentials in local `.env` files is 
 
 ---
 
+### 💡 The "Secret Zero" Paradox Solved
+
+Most secret management tools (Vault, Doppler, SOPS, 1Password CLI) suffer from the **"Secret Zero" Paradox**: to pull your encrypted secrets, they require a plaintext **API token**, **private key file**, or **bootstrap certificate** stored on your disk. They simply shift the risk from a database password to a key file.
+
+`sec-agent` breaks this cycle:
+* **No Plaintext Keys on Disk**: Zero secret key files, API tokens, or certificates sit anywhere on your filesystem.
+* **Hardware-Anchored Silicon Storage**: Master keys are generated and sealed inside the **macOS Secure Enclave**. The master key never touches the disk.
+* **Biometric Physical Presence Gate**: Decrypting secrets requires physical Touch ID sensor contact on the laptop console. Software scripts and remote attackers cannot fake physical presence.
+* **Zero-Friction PoC/Dev Adoption**: Drop it into any local development project or PoC in 30 seconds with `sec migrate-local .env`—requiring **zero cloud setup, zero API tokens, and zero codebase modifications.**
+
+---
+
 ## 🔒 Security Architecture
 
 `sec` is built on a **secure-by-design** model to prevent credential leakage:
