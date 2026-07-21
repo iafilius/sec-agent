@@ -25,9 +25,16 @@ In modern software development, hardcoding credentials in local `.env` files is 
 
 ### 💡 The "Secret Zero" Paradox Solved
 
-Most secret management tools (Vault, Doppler, SOPS, 1Password CLI) suffer from the **"Secret Zero" Paradox**: to pull your encrypted secrets, they require a plaintext **API token**, **private key file**, or **bootstrap certificate** stored on your disk. They simply shift the risk from a database password to a key file.
+Most secret management tools (Vault, Doppler, SOPS, 1Password CLI) suffer from the **"Secret Zero" Paradox**: to pull your encrypted secrets, they require a plaintext **API token**, **private key file**, or **bootstrap certificate** stored on your disk. They simply shift the vulnerability from a database password to a key file.
 
-`sec-agent` breaks this cycle:
+```
+TRADITIONAL TOOLS (Vault, Doppler, SOPS, 1Password CLI)
+[ Secret Vault ] ──▶ [ Plaintext Token / Key File on Disk ] ──▶ ❌ STOLEN BY ATTACKER / LOCAL SCRIPT
+
+SEC-AGENT (Secure Enclave Model)
+[ Encrypted Store ] ──▶ [ macOS Secure Enclave Hardware Chip ] ──▶ [ Touch ID Finger Sensor ] ──▶ ✅ HARDWARE LOCKED
+```
+
 * **No Plaintext Keys on Disk**: Zero secret key files, API tokens, or certificates sit anywhere on your filesystem.
 * **Hardware-Anchored Silicon Storage**: Master keys are generated and sealed inside the **macOS Secure Enclave**. The master key never touches the disk.
 * **Biometric Physical Presence Gate**: Decrypting secrets requires physical Touch ID sensor contact on the laptop console. Software scripts and remote attackers cannot fake physical presence.
@@ -172,6 +179,7 @@ sec version
 | **Primary Focus** | Local macOS Developer Session & Workstation Security | Enterprise Privileged Access Management (PAM) | Enterprise / Production Infrastructure Vault | Cloud Team Secret Synchronization | GitOps Repository File Encryption |
 | **Deployment Model** | **100% Offline** (Zero SaaS / Zero Server) | Enterprise Cloud SaaS or On-Prem IIS/SQL | Self-Hosted Cluster or Cloud SaaS | Cloud SaaS Platform | Local CLI (Key Server optional) |
 | **Master Key Protection** | **macOS Secure Enclave** | Enterprise Tenant / Cloud Vault | Server Master Key / AppRole | Cloud Account Token | Local GPG / Age Key File |
+| **"Secret Zero" Disk Dependency** | **✅ Zero Plaintext Files (Hardware Sealed)** | ❌ Plaintext Client ID / Token on Disk | ❌ Plaintext Vault Token / AppRole | ❌ Plaintext Service Token File | ❌ Plaintext GPG / Age Key File |
 | **Biometric Presence Gate** | **Touch ID / Apple Watch Hardware Sensor** | ❌ Software Auth Only | ❌ Software Auth Only | ❌ Software Auth Only | ❌ Software Auth Only |
 | **Remote Session Hijack Intercept** | **Active BSD Process Tree & SSH/VNC Scanner** | ❌ None | ❌ None | ❌ None | ❌ None |
 | **Zero-Codebase Dotenv Injection** | **Automatic `<migrated_to_sec>` Placeholder Override** | SDK / Custom API Scripts | Custom Agent / Template Injection | CLI Secret Ingestion | Manual Decrypt Scripting |
