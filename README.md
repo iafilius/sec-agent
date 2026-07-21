@@ -6,7 +6,7 @@
 
 `sec` is a fully local, offline-first credentials manager designed to protect local developer secrets (such as API keys, database credentials, and cloud tokens) from session takeover vectors (e.g. hijacked terminal sessions, remote SSH shell attackers, or administrative screen monitoring).
 
-It functions similarly to `ssh-agent` or `gpg-agent` but is tailored specifically for application environment variables and dotenv configurations.
+It functions similarly to `ssh-agent` or `gpg-agent`, but is engineered specifically for secure secret, variable, and key-value retrieval—completely eliminating the need for plaintext passwords or stored credentials on disk, even across local development environments.
 
 > [!WARNING]
 > **macOS Exclusivity**: This tool utilizes macOS-specific APIs, including LocalAuthentication (Touch ID/Apple Watch hardware prompts), Keychain Services (Secure Enclave master key storage), and macOS Hardened Runtime memory protections. It is not compatible with Windows or Linux.
