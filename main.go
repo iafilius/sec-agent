@@ -1,0 +1,1212 @@
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"net"
+	"os"
+	"os/exec"
+	"os/signal"
+	"path/filepath"
+	"secure_secrets/backup"
+	"secure_secrets/biometrics"
+	"secure_secrets/config"
+	"secure_secrets/daemon"
+	"secure_secrets/keychain"
+	"secure_secrets/store"
+	"runtime"
+	"runtime/debug"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
+	"golang.org/x/term"
+)
+
+var jsonErrors bool
+var (
+	Version   = "v1.0.0"
+	BuildDate = "unknown"
+)
+
+type JSONErrorResponse struct {
+	Success bool      `json:"success"`
+	Error   JSONError `json:"error"`
+}
+
+type JSONError struct {
+	Code        string `json:"code"`
+	Message     string `json:"message"`
+	Remediation string `json:"remediation,omitempty"`
+}
+
+func mapDaemonError(errStr string) (code string, remediation string) {
+	if strings.Contains(errStr, "Invalid or missing session token") || strings.Contains(errStr, "invalid or missing session token") {
+		return "INVALID_TOKEN", "Run 'eval $(sec open)' to authorize your shell session."
+	}
+	if strings.Contains(errStr, "locked or expired") || strings.Contains(errStr, "locked") {
+		return "SESSION_LOCKED", "Run 'eval $(sec open)' to unlock and authorize your shell session."
+	}
+	if strings.Contains(errStr, "expired") {
+		return "SECRET_EXPIRED", "Pass the '--show-expired' flag to retrieve this secret."
+	}
+	if strings.Contains(errStr, "not found") {
+		return "SECRET_NOT_FOUND", "Verify the path or run 'sec set' to store the key."
+	}
+	if strings.Contains(errStr, "hijacking") || strings.Contains(errStr, "ScreenSharing") {
+		return "ACCESS_DENIED_HIJACK", "Remote connections or active screen sharing are blocked."
+	}
+	return "OPERATION_FAILED", ""
+}
+
+func fail(code string, err error, remediation string) {
+	if jsonErrors {
+		resp := JSONErrorResponse{
+			Success: false,
+			Error: JSONError{
+				Code:        code,
+				Message:     err.Error(),
+				Remediation: remediation,
+			},
+		}
+		jsonBytes, _ := json.Marshal(resp)
+		fmt.Fprintln(os.Stderr, string(jsonBytes))
+	} else {
+		if remediation != "" {
+			fmt.Fprintf(os.Stderr, "Error: %v\nRemediation: %s\n", err, remediation)
+		} else {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		}
+	}
+	os.Exit(1)
+}
+
+func printUsageJSON() {
+	schema := `{
+  "tool": "sec",
+  "version": "1.1.0",
+  "description": "Enclave Session Agent for local developer secrets",
+  "commands": {
+    "open": {
+      "description": "Initialize/unlock the secrets session using Touch ID",
+      "flags": {
+        "--ttl": {"shorthand": "-t", "type": "duration", "default": "8h", "description": "Hard session duration limit"},
+        "--grace": {"shorthand": "-g", "type": "duration", "default": "30m", "description": "Inactivity grace window"}
+      }
+    },
+    "get": {
+      "description": "Retrieve a secret",
+      "args": [{"name": "path", "required": true}],
+      "flags": {
+        "--json": {"type": "boolean", "description": "Output all entry data in JSON format"},
+        "--comment": {"shorthand": "-c", "type": "boolean", "description": "Output only the secret's comment"},
+        "--meta": {"shorthand": "-m", "type": "string", "description": "Output specific metadata key value"},
+        "--show-expired": {"type": "boolean", "description": "Allow retrieval of expired secrets"}
+      }
+    },
+    "set": {
+      "description": "Store a secret",
+      "args": [
+        {"name": "path", "required": true},
+        {"name": "value", "required": true}
+      ],
+      "flags": {
+        "--comment": {"shorthand": "-c", "type": "string", "description": "Add optional comment"},
+        "--meta": {"shorthand": "-m", "type": "string", "description": "Add custom metadata key=value pair"},
+        "--expires": {"shorthand": "-e", "type": "string", "description": "Add expiration time (e.g. 30d, 12h, or RFC3339 datetime)"}
+      }
+    },
+    "run": {
+      "description": "Execute a command with secrets injected into its environment",
+      "args": [{"name": "command", "required": true}]
+    },
+    "env": {
+      "description": "Output shell exports for secrets under prefix",
+      "args": [{"name": "prefix", "required": false}]
+    },
+    "export": {
+      "description": "Output decrypted database contents to stdout",
+      "flags": {
+        "--format": {"type": "string", "default": "json", "choices": ["json", "env", "aws", "doppler"], "description": "Format structure matching target secret vaults"}
+      }
+    },
+    "clear": {
+      "description": "Lock the active session and clear memory cache (aliases: close, lock)"
+    },
+    "close": {
+      "description": "Lock the active session and clear memory cache (alias for clear)"
+    },
+    "lock": {
+      "description": "Lock the active session and clear memory cache (alias for clear)"
+    },
+    "backup": {
+      "description": "Export cached secrets to a portable KeePassXC (.kdbx) file",
+      "args": [{"name": "file", "required": true}],
+      "flags": {
+        "--password": {"shorthand": "-p", "type": "string", "description": "Explicit backup encryption password"}
+      }
+    },
+    "restore": {
+      "description": "Import secrets from a portable KeePassXC (.kdbx) file",
+      "args": [{"name": "file", "required": true}],
+      "flags": {
+        "--password": {"shorthand": "-p", "type": "string", "description": "Explicit backup decryption password"}
+      }
+    },
+    "migrate-local": {
+      "description": "Import local dotenv config and replace values with safe placeholders",
+      "args": [{"name": "file", "required": true}],
+      "flags": {
+        "--prefix": {"type": "string", "description": "Namespace prefix path to store keys under"}
+      }
+    },
+    "version": {
+      "description": "Print CLI and active daemon version and build metadata"
+    }
+  },
+  "error_codes": {
+    "DAEMON_NOT_RUNNING": {
+      "description": "The background socket daemon is inactive.",
+      "remediation": "eval $(sec open)"
+    },
+    "SESSION_LOCKED": {
+      "description": "The session has been cleared/locked or is expired.",
+      "remediation": "eval $(sec open)"
+    },
+    "INVALID_TOKEN": {
+      "description": "The calling session does not present a valid SEC_SESSION_TOKEN.",
+      "remediation": "eval $(sec open)"
+    },
+    "SECRET_NOT_FOUND": {
+      "description": "The requested secret path does not exist."
+    },
+    "SECRET_EXPIRED": {
+      "description": "The secret has expired and --show-expired was not passed.",
+      "remediation": "Append --show-expired flag to retrieve it."
+    },
+    "ACCESS_DENIED_HIJACK": {
+      "description": "Connection blocked due to detected SSH or ScreenSharing remote session."
+    }
+  }
+}`
+	fmt.Println(schema)
+}
+
+func extractGlobalFlags() (string, []string) {
+	profile := os.Getenv("SEC_PROFILE")
+	if profile == "" {
+		profile = "default"
+	}
+
+	args := os.Args
+	var cleanArgs []string
+	cleanArgs = append(cleanArgs, args[0])
+
+	for i := 1; i < len(args); i++ {
+		if args[i] == "--profile" || args[i] == "-P" {
+			if i+1 < len(args) {
+				profile = args[i+1]
+				i++ // skip next arg
+			}
+			continue
+		}
+		if args[i] == "--json-errors" {
+			jsonErrors = true
+			continue
+		}
+		cleanArgs = append(cleanArgs, args[i])
+	}
+	return profile, cleanArgs
+}
+
+func main() {
+	profile, cleanArgs := extractGlobalFlags()
+	os.Args = cleanArgs
+
+	if len(os.Args) >= 2 {
+		cmd := os.Args[1]
+		if cmd == "help" || cmd == "--help" || cmd == "-h" {
+			isJSONFormat := false
+			for i := 0; i < len(os.Args); i++ {
+				if os.Args[i] == "--format" && i+1 < len(os.Args) && os.Args[i+1] == "json" {
+					isJSONFormat = true
+				}
+			}
+			if isJSONFormat {
+				printUsageJSON()
+				os.Exit(0)
+			}
+			printUsage()
+			os.Exit(0)
+		}
+	}
+
+	if len(os.Args) < 2 {
+		printUsage()
+		os.Exit(1)
+	}
+
+	command := os.Args[1]
+	switch command {
+	case "open":
+		handleOpen(profile, os.Args[2:])
+	case "get":
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "Usage: sec get <path> [--json | --comment | --meta <key>]")
+			os.Exit(1)
+		}
+		handleGet(profile, os.Args[2], os.Args[3:])
+	case "set":
+		if len(os.Args) < 4 {
+			fmt.Fprintln(os.Stderr, "Usage: sec set <path> <value> [--comment <comment>] [--meta key=value ...]")
+			os.Exit(1)
+		}
+		handleSet(profile, os.Args[2], os.Args[3], os.Args[4:])
+	case "run":
+		handleRun(profile, os.Args[2:])
+	case "env":
+		handleEnv(profile, os.Args[2:])
+	case "export":
+		handleExport(profile, os.Args[2:])
+	case "clear", "close", "lock":
+		handleClear(profile)
+	case "backup":
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "Usage: sec backup <output-file.kdbx> [--password | -p <password>]")
+			os.Exit(1)
+		}
+		explicitPassword := ""
+		if len(os.Args) >= 5 {
+			if os.Args[3] == "--password" || os.Args[3] == "-p" {
+				explicitPassword = os.Args[4]
+			}
+		}
+		handleBackup(profile, os.Args[2], explicitPassword)
+	case "restore":
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "Usage: sec restore <backup-file.kdbx> [--password | -p <password>]")
+			os.Exit(1)
+		}
+		explicitPassword := ""
+		if len(os.Args) >= 5 {
+			if os.Args[3] == "--password" || os.Args[3] == "-p" {
+				explicitPassword = os.Args[4]
+			}
+		}
+		handleRestore(profile, os.Args[2], explicitPassword)
+	case "daemon":
+		runDaemon(profile)
+	case "migrate-local":
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "Usage: sec migrate-local <dotenv-file> [--prefix <prefix>]")
+			os.Exit(1)
+		}
+		handleMigrateLocal(profile, os.Args[2], os.Args[3:])
+	case "version", "-v", "--version":
+		handleVersion(profile)
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", command)
+		printUsage()
+		os.Exit(1)
+	}
+}
+
+func printUsage() {
+	fmt.Println("Usage: sec [--profile <name> | -P <name>] <command> [args]")
+	fmt.Println("Commands:")
+	fmt.Println("  open [--ttl <duration>] [--grace <duration>] Initialize/unlock the secrets session using Touch ID")
+	fmt.Println("  get <path> [--json | --comment | --meta <key>] Retrieve a secret")
+	fmt.Println("  set <path> <val> [--comment <comment>] [--meta key=value ...] Store a secret")
+	fmt.Println("  run [-- <command> [args...]]     Execute a command with secrets injected into its environment")
+	fmt.Println("  env [<prefix>]                   Output shell exports for secrets under prefix")
+	fmt.Println("  export [--format <json|env|aws|doppler>] Output decrypted database contents to stdout")
+	fmt.Println("  clear            Lock the active session and clear memory cache (aliases: close, lock)")
+	fmt.Println("  backup <file> [--password | -p <password>] Export cached secrets to a portable KeePassXC (.kdbx) file")
+	fmt.Println("  restore <file> [--password | -p <password>] Import secrets from a portable KeePassXC (.kdbx) file")
+	fmt.Println("  migrate-local <file> [--prefix <prefix>] Import dotenv file and sanitize it")
+	fmt.Println("  version          Print CLI and active daemon version and build metadata")
+}
+
+func queryDaemon(profile string, req daemon.IPCRequest) (*daemon.IPCResponse, error) {
+	if req.Action != "open" && req.Action != "ping" {
+		if req.Token == "" {
+			req.Token = os.Getenv("SEC_SESSION_TOKEN")
+		}
+	}
+
+	socketPath, err := config.GetSocketPath(profile)
+	if err != nil {
+		return nil, err
+	}
+
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		return nil, err // Daemon likely not running
+	}
+	defer conn.Close()
+
+	if err := json.NewEncoder(conn).Encode(req); err != nil {
+		return nil, err
+	}
+
+	var resp daemon.IPCResponse
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		return nil, err
+	}
+
+	return &resp, nil
+}
+
+func ensureDaemonRunning(profile string) error {
+	_, err := queryDaemon(profile, daemon.IPCRequest{Action: "ping"})
+	if err == nil {
+		return nil // Already running
+	}
+
+	// Not running, let's start it
+	bin, err := os.Executable()
+	if err != nil {
+		return err
+	}
+
+	// #nosec G204
+	cmd := exec.Command(bin, "daemon")
+	cmd.Env = append(os.Environ(), fmt.Sprintf("SEC_PROFILE=%s", profile))
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start daemon process: %w", err)
+	}
+
+	// Wait up to 2 seconds for the socket to appear
+	socketPath, err := config.GetSocketPath(profile)
+	if err != nil {
+		return err
+	}
+	for i := 0; i < 20; i++ {
+		if _, err := os.Stat(socketPath); err == nil {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	return fmt.Errorf("daemon socket failed to initialize within time limit")
+}
+
+func handleOpen(profile string, args []string) {
+	ttlStr := ""
+	graceStr := ""
+
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--ttl" || args[i] == "-t" {
+			if i+1 < len(args) {
+				ttlStr = args[i+1]
+				i++
+			} else {
+				fmt.Fprintln(os.Stderr, "Error: --ttl requires a duration value (e.g. 8h, 30m)")
+				os.Exit(1)
+			}
+		} else if args[i] == "--grace" || args[i] == "-g" {
+			if i+1 < len(args) {
+				graceStr = args[i+1]
+				i++
+			} else {
+				fmt.Fprintln(os.Stderr, "Error: --grace requires a duration value (e.g. 30m, 1h)")
+				os.Exit(1)
+			}
+		}
+	}
+
+	// Validate duration format if provided
+	if ttlStr != "" {
+		if _, err := time.ParseDuration(ttlStr); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: invalid TTL duration format %q: %v\n", ttlStr, err)
+			os.Exit(1)
+		}
+	}
+	if graceStr != "" {
+		if _, err := time.ParseDuration(graceStr); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: invalid Grace duration format %q: %v\n", graceStr, err)
+			os.Exit(1)
+		}
+	}
+
+	if err := ensureDaemonRunning(profile); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("Authorizing session via Touch ID...")
+
+	if !biometrics.Authenticate("Authorize sec session") {
+		fmt.Fprintln(os.Stderr, "Authentication failed: Biometric verification failed.")
+		os.Exit(1)
+	}
+
+	getter := func() ([]byte, error) {
+		if profile == "" || profile == "default" {
+			return keychain.Get("sec-session", "master")
+		}
+		return keychain.Get("sec-session:profile_"+profile, "master")
+	}
+	setter := func(k []byte) error {
+		if profile == "" || profile == "default" {
+			return keychain.Set("sec-session", "master", k)
+		}
+		return keychain.Set("sec-session:profile_"+profile, "master", k)
+	}
+
+	masterKey, err := store.InitializeMasterKey(profile, getter, setter)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Authentication failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	resp, err := queryDaemon(profile, daemon.IPCRequest{
+		Action: "open",
+		Key:    masterKey,
+		TTL:    ttlStr,
+		Grace:  graceStr,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Daemon IPC error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if !resp.Success {
+		fmt.Fprintf(os.Stderr, "Unlock failed: %s\n", resp.Error)
+		os.Exit(1)
+	}
+
+	msg := "Session unlocked successfully. Cache active."
+	if ttlStr != "" {
+		msg += fmt.Sprintf(" TTL: %s.", ttlStr)
+	} else {
+		msg += " TTL: 8h."
+	}
+	if graceStr != "" {
+		msg += fmt.Sprintf(" Inactivity Grace: %s.", graceStr)
+	} else {
+		msg += " Inactivity Grace: 30m."
+	}
+	fmt.Fprintln(os.Stderr, msg)
+	fmt.Fprintf(os.Stdout, "export SEC_SESSION_TOKEN=%q\n", resp.Token)
+	fmt.Fprintln(os.Stderr, "Tip: Run 'eval $(sec open)' to automatically authorize this shell session.")
+}
+
+func handleGet(profile string, path string, args []string) {
+	showJSON := false
+	showComment := false
+	showMetaKey := ""
+	showExpired := false
+
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--json" {
+			showJSON = true
+		} else if args[i] == "--comment" || args[i] == "-c" {
+			showComment = true
+		} else if args[i] == "--show-expired" {
+			showExpired = true
+		} else if args[i] == "--meta" || args[i] == "-m" {
+			if i+1 < len(args) {
+				showMetaKey = args[i+1]
+				i++
+			} else {
+				fmt.Fprintln(os.Stderr, "Error: --meta requires a key name")
+				os.Exit(1)
+			}
+		}
+	}
+
+	resp, err := queryDaemon(profile, daemon.IPCRequest{
+		Action:      "get",
+		Path:        path,
+		ShowExpired: showExpired,
+	})
+	if err != nil {
+		fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running. Please run 'sec open' to unlock the session."), "Run 'eval $(sec open)' to start/unlock the session.")
+	}
+
+	if !resp.Success {
+		code, rem := mapDaemonError(resp.Error)
+		fail(code, fmt.Errorf("%s", resp.Error), rem)
+	}
+
+	if showJSON {
+		type SecretOutput struct {
+			Value        string            `json:"value"`
+			Comment      string            `json:"comment,omitempty"`
+			Metadata     map[string]string `json:"metadata,omitempty"`
+			Created      string            `json:"created"`
+			LastModified string            `json:"last_modified"`
+			Expires      string            `json:"expires,omitempty"`
+		}
+		out := SecretOutput{
+			Value:        resp.Value,
+			Comment:      resp.Comment,
+			Metadata:     resp.Metadata,
+			Created:      resp.Created.Format(time.RFC3339),
+			LastModified: resp.LastModified.Format(time.RFC3339),
+		}
+		if !resp.Expires.IsZero() {
+			out.Expires = resp.Expires.Format(time.RFC3339)
+		}
+		jsonBytes, _ := json.MarshalIndent(out, "", "  ")
+		fmt.Println(string(jsonBytes))
+	} else if showComment {
+		fmt.Println(resp.Comment)
+	} else if showMetaKey != "" {
+		val, exists := resp.Metadata[showMetaKey]
+		if !exists {
+			fmt.Fprintf(os.Stderr, "Error: metadata key %q not found\n", showMetaKey)
+			os.Exit(1)
+		}
+		fmt.Println(val)
+	} else {
+		fmt.Println(resp.Value)
+	}
+}
+
+func handleSet(profile string, path, value string, args []string) {
+	comment := ""
+	metadata := make(map[string]string)
+	expiresStr := ""
+
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--comment" || args[i] == "-c" {
+			if i+1 < len(args) {
+				comment = args[i+1]
+				i++
+			} else {
+				fmt.Fprintln(os.Stderr, "Error: --comment requires a value")
+				os.Exit(1)
+			}
+		} else if args[i] == "--expires" || args[i] == "-e" {
+			if i+1 < len(args) {
+				expiresStr = args[i+1]
+				i++
+			} else {
+				fmt.Fprintln(os.Stderr, "Error: --expires requires a value (e.g. 30d, 12h, or YYYY-MM-DD)")
+				os.Exit(1)
+			}
+		} else if args[i] == "--meta" || args[i] == "-m" {
+			if i+1 < len(args) {
+				metaPair := args[i+1]
+				i++
+				parts := strings.SplitN(metaPair, "=", 2)
+				if len(parts) == 2 {
+					metadata[parts[0]] = parts[1]
+				} else {
+					fmt.Fprintf(os.Stderr, "Warning: invalid metadata format %q (expected key=value)\n", metaPair)
+				}
+			} else {
+				fmt.Fprintln(os.Stderr, "Error: --meta requires a key=value pair")
+				os.Exit(1)
+			}
+		}
+	}
+
+	expiresTimeStr := ""
+	if expiresStr != "" {
+		t, err := parseExpiration(expiresStr)
+		if err != nil {
+			fail("INVALID_ARGUMENT", err, "Verify option parameters (e.g. format for durations: 30d, 12h)")
+		}
+		expiresTimeStr = t.Format(time.RFC3339)
+	}
+
+	resp, err := queryDaemon(profile, daemon.IPCRequest{
+		Action:   "set",
+		Path:     path,
+		Value:    value,
+		Comment:  comment,
+		Metadata: metadata,
+		Expires:  expiresTimeStr,
+	})
+	if err != nil {
+		fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running. Please run 'sec open' to unlock the session."), "Run 'eval $(sec open)' to start/unlock the session.")
+	}
+
+	if !resp.Success {
+		code, rem := mapDaemonError(resp.Error)
+		fail(code, fmt.Errorf("%s", resp.Error), rem)
+	}
+
+	fmt.Println("Secret saved successfully.")
+}
+
+func handleRun(profile string, args []string) {
+	var cmdArgs []string
+	foundSeparator := false
+	for i, arg := range args {
+		if arg == "--" {
+			cmdArgs = args[i+1:]
+			foundSeparator = true
+			break
+		}
+	}
+	if !foundSeparator {
+		cmdArgs = args
+	}
+	if len(cmdArgs) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: sec run [--profile <name>] -- <command> [args...]")
+		os.Exit(1)
+	}
+
+	resp, err := queryDaemon(profile, daemon.IPCRequest{Action: "backup"})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Error: Daemon is not running. Please run 'sec open' to unlock the session.")
+		os.Exit(1)
+	}
+	if !resp.Success {
+		fmt.Fprintf(os.Stderr, "Error fetching secrets: %s\n", resp.Error)
+		os.Exit(1)
+	}
+
+	env := os.Environ()
+	for path, entry := range resp.Secrets {
+		envKey := pathToEnvKey(path)
+		env = append(env, fmt.Sprintf("%s=%s", envKey, entry.Value))
+	}
+
+	// #nosec G204 G702
+	cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
+	cmd.Env = env
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	err = cmd.Run()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			os.Exit(exitErr.ExitCode())
+		}
+		fmt.Fprintf(os.Stderr, "Error running command: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func handleEnv(profile string, args []string) {
+	prefix := ""
+	if len(args) > 0 {
+		prefix = args[0]
+	}
+
+	resp, err := queryDaemon(profile, daemon.IPCRequest{Action: "backup"})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Error: Daemon is not running. Please run 'sec open' to unlock the session.")
+		os.Exit(1)
+	}
+	if !resp.Success {
+		fmt.Fprintf(os.Stderr, "Error fetching secrets: %s\n", resp.Error)
+		os.Exit(1)
+	}
+
+	for path, entry := range resp.Secrets {
+		if prefix != "" && !strings.HasPrefix(path, prefix) {
+			continue
+		}
+		envKey := pathToEnvKey(path)
+		fmt.Printf("export %s=%q\n", envKey, entry.Value)
+	}
+}
+
+func handleExport(profile string, args []string) {
+	format := "json"
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--format" || args[i] == "-f" {
+			if i+1 < len(args) {
+				format = args[i+1]
+				i++
+			} else {
+				fail("INVALID_ARGUMENT", fmt.Errorf("flag --format requires a value"), "Supported formats: json, env, aws, doppler")
+			}
+		}
+	}
+	if format != "env" && format != "json" && format != "aws" && format != "doppler" {
+		fail("INVALID_ARGUMENT", fmt.Errorf("invalid format %q", format), "Supported formats: json, env, aws, doppler")
+	}
+
+	resp, err := queryDaemon(profile, daemon.IPCRequest{Action: "backup"})
+	if err != nil {
+		fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running. Please run 'sec open' to unlock the session."), "Run 'eval $(sec open)' to start/unlock the session.")
+	}
+	if !resp.Success {
+		code, rem := mapDaemonError(resp.Error)
+		fail(code, fmt.Errorf("%s", resp.Error), rem)
+	}
+
+	switch format {
+	case "env":
+		for path, entry := range resp.Secrets {
+			envKey := pathToEnvKey(path)
+			fmt.Printf("%s=%q\n", envKey, entry.Value)
+		}
+	case "aws":
+		type AWSSecret struct {
+			SecretId     string `json:"SecretId"`
+			SecretString string `json:"SecretString"`
+		}
+		var list []AWSSecret
+		for path, entry := range resp.Secrets {
+			list = append(list, AWSSecret{
+				SecretId:     path,
+				SecretString: entry.Value,
+			})
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(list); err != nil {
+			fail("SERIALIZATION_FAILED", err, "")
+		}
+	case "doppler":
+		flat := make(map[string]string)
+		for path, entry := range resp.Secrets {
+			flat[pathToEnvKey(path)] = entry.Value
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(flat); err != nil {
+			fail("SERIALIZATION_FAILED", err, "")
+		}
+	default: // json
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(resp.Secrets); err != nil {
+			fail("SERIALIZATION_FAILED", err, "")
+		}
+	}
+}
+
+func pathToEnvKey(path string) string {
+	s := strings.ToUpper(path)
+	s = strings.ReplaceAll(s, "/", "_")
+	s = strings.ReplaceAll(s, "-", "_")
+	var buf bytes.Buffer
+	for _, r := range s {
+		if (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
+			buf.WriteRune(r)
+		}
+	}
+	return buf.String()
+}
+
+func handleClear(profile string) {
+	resp, err := queryDaemon(profile, daemon.IPCRequest{Action: "clear"})
+	if err != nil {
+		fmt.Println("Session is already closed.")
+		return
+	}
+
+	if !resp.Success {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", resp.Error)
+		os.Exit(1)
+	}
+
+	fmt.Println("Session locked. Memory cache cleared.")
+}
+
+func handleBackup(profile string, outputFile string, explicitPassword string) {
+	// 1. Get secrets list from daemon
+	resp, err := queryDaemon(profile, daemon.IPCRequest{Action: "backup"})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Error: Daemon is not running. Please run 'sec open' to unlock the session.")
+		os.Exit(1)
+	}
+
+	if !resp.Success {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", resp.Error)
+		os.Exit(1)
+	}
+
+	if len(resp.Secrets) == 0 {
+		fmt.Println("No secrets in the session cache to back up.")
+		return
+	}
+
+	var backupPassword string
+
+	if explicitPassword != "" {
+		backupPassword = explicitPassword
+	} else {
+		// 2. Prompt for KeePassXC master password
+		fmt.Print("Enter KeePassXC master password for backup: ")
+		pass1, err := term.ReadPassword(int(syscall.Stdin))
+		fmt.Println()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to read password: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Print("Confirm KeePassXC master password: ")
+		pass2, err := term.ReadPassword(int(syscall.Stdin))
+		fmt.Println()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to read password: %v\n", err)
+			os.Exit(1)
+		}
+
+		if !bytes.Equal(pass1, pass2) {
+			fmt.Fprintln(os.Stderr, "Error: Passwords do not match.")
+			os.Exit(1)
+		}
+		backupPassword = string(pass1)
+	}
+
+	// 3. Export to KDBX
+	absPath, err := filepath.Abs(outputFile)
+	if err != nil {
+		absPath = outputFile
+	}
+
+	err = backup.ExportToKdbx(absPath, backupPassword, resp.Secrets)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Backup failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Backup created successfully at: %s\n", absPath)
+}
+
+func handleRestore(profile string, filePath, explicitPassword string) {
+	var password string
+
+	if explicitPassword != "" {
+		password = explicitPassword
+	} else {
+		fmt.Print("Enter KeePassXC master password for restore: ")
+		pass, err := term.ReadPassword(int(syscall.Stdin))
+		fmt.Println()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to read password: %v\n", err)
+			os.Exit(1)
+		}
+		password = string(pass)
+	}
+
+	absPath, err := filepath.Abs(filePath)
+	if err != nil {
+		absPath = filePath
+	}
+
+	secrets, err := backup.ImportFromKdbx(absPath, password)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to restore backup: %v\n", err)
+		os.Exit(1)
+	}
+
+	resp, err := queryDaemon(profile, daemon.IPCRequest{
+		Action:  "restore",
+		Secrets: secrets,
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Error: Daemon is not running. Please run 'sec open' to unlock the session.")
+		os.Exit(1)
+	}
+
+	if !resp.Success {
+		fmt.Fprintf(os.Stderr, "Restore failed: %s\n", resp.Error)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Secrets restored successfully. Merged %d entries into active session.\n", len(secrets))
+}
+
+func runDaemon(profile string) {
+	d, err := daemon.NewDaemon(profile, 8*time.Hour, Version)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating daemon: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Handle graceful shutdown signals to clean up the socket file
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigChan
+		d.Stop()
+		os.Exit(0)
+	}()
+
+	// Serve
+	if err := d.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "Daemon runtime error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func readInput(prompt string) string {
+	fmt.Print(prompt)
+	reader := bufio.NewReader(os.Stdin)
+	text, _ := reader.ReadString('\n')
+	return text
+}
+
+func parseExpiration(expStr string) (time.Time, error) {
+	expStr = strings.TrimSpace(expStr)
+	if expStr == "" {
+		return time.Time{}, nil
+	}
+
+	// 1. Try parsing relative formats: e.g. "30d", "1y", "6mo" (months)
+	if strings.HasSuffix(expStr, "d") {
+		numStr := strings.TrimSuffix(expStr, "d")
+		days, err := strconv.Atoi(numStr)
+		if err == nil {
+			return time.Now().AddDate(0, 0, days), nil
+		}
+	}
+	if strings.HasSuffix(expStr, "y") {
+		numStr := strings.TrimSuffix(expStr, "y")
+		years, err := strconv.Atoi(numStr)
+		if err == nil {
+			return time.Now().AddDate(years, 0, 0), nil
+		}
+	}
+	if strings.HasSuffix(expStr, "mo") {
+		numStr := strings.TrimSuffix(expStr, "mo")
+		months, err := strconv.Atoi(numStr)
+		if err == nil {
+			return time.Now().AddDate(0, months, 0), nil
+		}
+	}
+
+	// 2. Try standard Go duration parsing (e.g. "12h", "45m")
+	if d, err := time.ParseDuration(expStr); err == nil {
+		return time.Now().Add(d), nil
+	}
+
+	// 3. Try parsing absolute formats (RFC3339)
+	if t, err := time.Parse(time.RFC3339, expStr); err == nil {
+		return t, nil
+	}
+	// Fallback to simple date: e.g. "2026-12-31"
+	if t, err := time.Parse("2006-01-02", expStr); err == nil {
+		return t, nil
+	}
+
+	return time.Time{}, fmt.Errorf("unknown expiration format %q (use e.g. '30d', '12h', or 'YYYY-MM-DD')", expStr)
+}
+
+func handleMigrateLocal(profile string, dotenvPath string, args []string) {
+	prefix := "env"
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--prefix" {
+			if i+1 < len(args) {
+				prefix = args[i+1]
+				i++
+			} else {
+				fail("INVALID_ARGUMENT", fmt.Errorf("flag --prefix requires a value"), "")
+			}
+		}
+	}
+
+	// #nosec G304 G703
+	file, err := os.Open(dotenvPath)
+	if err != nil {
+		fail("FILE_READ_FAILED", err, "Verify that the dotenv file path is correct and accessible.")
+	}
+	defer file.Close()
+
+	// Parse lines and modify in place
+	type dotenvEntry struct {
+		key      string
+		rawLine  string
+		isSecret bool
+		value    string
+	}
+	var entries []dotenvEntry
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			entries = append(entries, dotenvEntry{rawLine: line})
+			continue
+		}
+
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			entries = append(entries, dotenvEntry{rawLine: line})
+			continue
+		}
+
+		k := strings.TrimSpace(parts[0])
+		v := strings.TrimSpace(parts[1])
+
+		// Strip quotes
+		if (strings.HasPrefix(v, "\"") && strings.HasSuffix(v, "\"")) ||
+			(strings.HasPrefix(v, "'") && strings.HasSuffix(v, "'")) {
+			v = v[1 : len(v)-1]
+		}
+
+		// We assume it's a secret if it's not a common static config (e.g. PORT, NODE_ENV, etc.)
+		if v != "" {
+			entries = append(entries, dotenvEntry{
+				key:      k,
+				rawLine:  line,
+				isSecret: true,
+				value:    v,
+			})
+		} else {
+			entries = append(entries, dotenvEntry{rawLine: line})
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		fail("FILE_READ_FAILED", err, "")
+	}
+
+	// Connect to daemon to set the secrets
+	importedCount := 0
+	for _, entry := range entries {
+		if !entry.isSecret {
+			continue
+		}
+
+		// Determine path
+		cleanKey := strings.ReplaceAll(strings.ToLower(entry.key), "_", "-")
+		secretPath := cleanKey
+		if prefix != "" {
+			secretPath = prefix + "/" + cleanKey
+		}
+
+		resp, err := queryDaemon(profile, daemon.IPCRequest{
+			Action: "set",
+			Path:   secretPath,
+			Value:  entry.value,
+		})
+		if err != nil {
+			fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running. Please run 'sec open' to unlock the session."), "Run 'eval $(sec open)' to start/unlock the session.")
+		}
+		if !resp.Success {
+			code, rem := mapDaemonError(resp.Error)
+			fail(code, fmt.Errorf("failed to save key %q: %s", entry.key, resp.Error), rem)
+		}
+		importedCount++
+	}
+
+	// Write sanitized file back
+	dir := filepath.Dir(dotenvPath)
+	// #nosec G304 G703
+	tmpFile, err := os.CreateTemp(dir, ".env.tmp.*")
+	if err != nil {
+		fail("FILE_WRITE_FAILED", err, "Verify permissions to write to target dotenv directory.")
+	}
+	tmpPath := tmpFile.Name()
+	defer func() {
+		_ = tmpFile.Close()
+		// #nosec G304 G703
+		_ = os.Remove(tmpPath)
+	}()
+
+	// Restrict permissions to owner-only
+	if err := tmpFile.Chmod(0600); err != nil {
+		fail("FILE_WRITE_FAILED", err, "")
+	}
+
+	writer := bufio.NewWriter(tmpFile)
+	// Write a top header note
+	if _, err := writer.WriteString(fmt.Sprintf("# Migrated to sec. Run your commands using: sec run --profile %s -- <command>\n", profile)); err != nil {
+		fail("FILE_WRITE_FAILED", err, "")
+	}
+
+	for _, entry := range entries {
+		var writeErr error
+		if entry.isSecret {
+			_, writeErr = writer.WriteString(fmt.Sprintf("%s=%q\n", entry.key, "<migrated_to_sec>"))
+		} else {
+			_, writeErr = writer.WriteString(entry.rawLine + "\n")
+		}
+		if writeErr != nil {
+			fail("FILE_WRITE_FAILED", writeErr, "")
+		}
+	}
+	if err := writer.Flush(); err != nil {
+		fail("FILE_WRITE_FAILED", err, "")
+	}
+
+	// Force storage device sync (fsync)
+	if err := tmpFile.Sync(); err != nil {
+		fail("FILE_WRITE_FAILED", err, "")
+	}
+
+	if err := tmpFile.Close(); err != nil {
+		fail("FILE_WRITE_FAILED", err, "")
+	}
+
+	// Atomically replace target dotenv file
+	// #nosec G304 G703
+	if err := os.Rename(tmpPath, dotenvPath); err != nil {
+		fail("FILE_WRITE_FAILED", err, "Verify permissions to replace the target dotenv file.")
+	}
+
+	// Sync parent directory metadata
+	// #nosec G304 G703
+	dirFile, err := os.Open(dir)
+	if err == nil {
+		_ = dirFile.Sync()
+		_ = dirFile.Close()
+	}
+
+	fmt.Printf("Successfully migrated %d secret(s) to sec (profile: %s). Dotenv file %q sanitized.\n", importedCount, profile, dotenvPath)
+}
+
+func handleVersion(profile string) {
+	fmt.Printf("sec-agent CLI:      %s\n", Version)
+
+	// Fetch daemon status and version
+	daemonVer := "Not running"
+	resp, err := queryDaemon(profile, daemon.IPCRequest{Action: "ping"})
+	if err == nil {
+		if resp.Version != "" {
+			daemonVer = fmt.Sprintf("%s (Running, profile: %s)", resp.Version, profile)
+		} else {
+			daemonVer = fmt.Sprintf("Active (Running, profile: %s)", profile)
+		}
+	}
+	fmt.Printf("sec-agent Daemon:   %s\n", daemonVer)
+
+	// Build info
+	commit := "unknown"
+	goVersion := runtime.Version()
+	var deps []string
+
+	if info, ok := debug.ReadBuildInfo(); ok {
+		if goVersion == "" {
+			goVersion = info.GoVersion
+		}
+		for _, setting := range info.Settings {
+			if setting.Key == "vcs.revision" {
+				commit = setting.Value
+			}
+		}
+		for _, dep := range info.Deps {
+			deps = append(deps, fmt.Sprintf("  %s  %s", dep.Path, dep.Version))
+		}
+	}
+
+	fmt.Printf("  Build Date:       %s\n", BuildDate)
+	fmt.Printf("  Commit:           %s\n", commit)
+	fmt.Printf("  Go Version:       %s\n", goVersion)
+	fmt.Printf("  Platform:         %s/%s\n", runtime.GOOS, runtime.GOARCH)
+
+	if len(deps) > 0 {
+		fmt.Println("\nDependencies:")
+		for _, d := range deps {
+			fmt.Println(d)
+		}
+	}
+
+	// Mismatch check
+	if err == nil && resp.Version != "" && resp.Version != Version {
+		fmt.Printf("\n⚠️  WARNING: CLI version (%s) does not match running daemon version (%s).\n", Version, resp.Version)
+		fmt.Println("To upgrade the daemon, close the active session and re-open it:")
+		fmt.Println("  sec lock")
+		fmt.Println("  eval $(sec open)")
+	}
+}

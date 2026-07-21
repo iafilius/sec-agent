@@ -1,0 +1,242 @@
+package backup
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"secure_secrets/store"
+	"strings"
+	"time"
+
+	"github.com/tobischo/gokeepasslib/v3"
+	"github.com/tobischo/gokeepasslib/v3/wrappers"
+)
+
+// ExportToKdbx exports a map of secrets (including comments and metadata) to a new KeePassXC KDBX file.
+func ExportToKdbx(filePath string, password string, secrets map[string]store.SecretEntry) error {
+	dir := filepath.Dir(filePath)
+	// Create temp file in same directory
+	// #nosec G304 G703
+	tmpFile, err := os.CreateTemp(dir, "backup.*.kdbx.tmp")
+	if err != nil {
+		return fmt.Errorf("failed to create temporary backup file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	defer func() {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+	}()
+
+	// Restrict permissions to owner-only
+	if err := tmpFile.Chmod(0600); err != nil {
+		return fmt.Errorf("failed to set permissions on temp file: %w", err)
+	}
+
+	db := gokeepasslib.NewDatabase()
+	db.Credentials = gokeepasslib.NewPasswordCredentials(password)
+
+	// Create root group
+	rootGroup := gokeepasslib.NewGroup()
+	rootGroup.Name = "Secrets Backup"
+
+	for k, entryVal := range secrets {
+		entry := gokeepasslib.NewEntry()
+		
+		// Set Title
+		entry.Values = append(entry.Values, gokeepasslib.ValueData{
+			Key: "Title",
+			Value: gokeepasslib.V{
+				Content: k,
+			},
+		})
+
+		// Set Password
+		entry.Values = append(entry.Values, gokeepasslib.ValueData{
+			Key: "Password",
+			Value: gokeepasslib.V{
+				Content:   entryVal.Value,
+				Protected: wrappers.NewBoolWrapper(true),
+			},
+		})
+
+		// Set Comment as Notes
+		if entryVal.Comment != "" {
+			entry.Values = append(entry.Values, gokeepasslib.ValueData{
+				Key: "Notes",
+				Value: gokeepasslib.V{
+					Content: entryVal.Comment,
+				},
+			})
+		}
+
+		// Set Metadata as custom fields
+		for mk, mv := range entryVal.Metadata {
+			// Avoid colliding with standard reserved fields
+			safeKey := mk
+			if safeKey == "Title" || safeKey == "Password" || safeKey == "Notes" {
+				safeKey = "meta_" + safeKey
+			}
+			entry.Values = append(entry.Values, gokeepasslib.ValueData{
+				Key: safeKey,
+				Value: gokeepasslib.V{
+					Content: mv,
+				},
+			})
+		}
+
+		// Set Timestamps
+		if !entryVal.Created.IsZero() {
+			entry.Times.CreationTime = &wrappers.TimeWrapper{
+				Time:      entryVal.Created,
+				Formatted: true,
+			}
+		}
+		if !entryVal.LastModified.IsZero() {
+			entry.Times.LastModificationTime = &wrappers.TimeWrapper{
+				Time:      entryVal.LastModified,
+				Formatted: true,
+			}
+		}
+		if !entryVal.Expires.IsZero() {
+			entry.Times.ExpiryTime = &wrappers.TimeWrapper{
+				Time:      entryVal.Expires,
+				Formatted: true,
+			}
+			entry.Times.Expires = wrappers.BoolWrapper{Bool: true}
+		}
+
+		rootGroup.Entries = append(rootGroup.Entries, entry)
+	}
+
+	db.Content.Root.Groups = []gokeepasslib.Group{rootGroup}
+
+	if err := db.LockProtectedEntries(); err != nil {
+		return fmt.Errorf("failed to lock protected entries: %w", err)
+	}
+
+	encoder := gokeepasslib.NewEncoder(tmpFile)
+	if err := encoder.Encode(db); err != nil {
+		return fmt.Errorf("failed to encode database to file: %w", err)
+	}
+
+	// Force storage device sync (fsync)
+	if err := tmpFile.Sync(); err != nil {
+		return fmt.Errorf("failed to sync temp backup file: %w", err)
+	}
+
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("failed to close temp backup file: %w", err)
+	}
+
+	// Atomically replace target backup file
+	if err := os.Rename(tmpPath, filePath); err != nil {
+		return fmt.Errorf("failed to replace target backup file: %w", err)
+	}
+
+	// Sync parent directory metadata
+	// #nosec G304 G703
+	dirFile, err := os.Open(dir)
+	if err == nil {
+		_ = dirFile.Sync()
+		_ = dirFile.Close()
+	}
+
+	return nil
+}
+
+// ImportFromKdbx decodes and extracts secrets from a KeePassXC KDBX file.
+func ImportFromKdbx(filePath string, password string) (map[string]store.SecretEntry, error) {
+	// #nosec G304
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open backup file: %w", err)
+	}
+	defer file.Close()
+
+	db := gokeepasslib.NewDatabase()
+	db.Credentials = gokeepasslib.NewPasswordCredentials(password)
+
+	decoder := gokeepasslib.NewDecoder(file)
+	if err := decoder.Decode(db); err != nil {
+		return nil, fmt.Errorf("failed to decode database: %w", err)
+	}
+
+	if err := db.UnlockProtectedEntries(); err != nil {
+		return nil, fmt.Errorf("failed to unlock protected entries: %w", err)
+	}
+
+	secrets := make(map[string]store.SecretEntry)
+
+	var findEntries func(gokeepasslib.Group) []gokeepasslib.Entry
+	findEntries = func(group gokeepasslib.Group) []gokeepasslib.Entry {
+		entries := make([]gokeepasslib.Entry, 0)
+		entries = append(entries, group.Entries...)
+		for _, subGroup := range group.Groups {
+			entries = append(entries, findEntries(subGroup)...)
+		}
+		return entries
+	}
+
+	var allEntries []gokeepasslib.Entry
+	for _, rootGroup := range db.Content.Root.Groups {
+		allEntries = append(allEntries, findEntries(rootGroup)...)
+	}
+
+	for _, entry := range allEntries {
+		title := ""
+		passwordVal := ""
+		comment := ""
+		metadata := make(map[string]string)
+
+		for _, valData := range entry.Values {
+			key := valData.Key
+			content := valData.Value.Content
+
+			switch key {
+			case "Title":
+				title = content
+			case "Password":
+				passwordVal = content
+			case "Notes":
+				comment = content
+			case "UserName", "URL":
+				if content != "" {
+					metadata[strings.ToLower(key)] = content
+				}
+			default:
+				cleanKey := key
+				if strings.HasPrefix(cleanKey, "meta_") {
+					cleanKey = cleanKey[5:]
+				}
+				metadata[cleanKey] = content
+			}
+		}
+
+		if title != "" {
+			created := time.Now()
+			lastModified := time.Now()
+			var expires time.Time
+
+			if entry.Times.CreationTime != nil && !entry.Times.CreationTime.Time.IsZero() {
+				created = entry.Times.CreationTime.Time
+			}
+			if entry.Times.LastModificationTime != nil && !entry.Times.LastModificationTime.Time.IsZero() {
+				lastModified = entry.Times.LastModificationTime.Time
+			}
+			if entry.Times.Expires.Bool && entry.Times.ExpiryTime != nil {
+				expires = entry.Times.ExpiryTime.Time
+			}
+
+			secrets[title] = store.SecretEntry{
+				Value:        passwordVal,
+				Comment:      comment,
+				Metadata:     metadata,
+				Created:      created,
+				LastModified: lastModified,
+				Expires:      expires,
+			}
+		}
+	}
+
+	return secrets, nil
+}

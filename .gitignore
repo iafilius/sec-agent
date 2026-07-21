@@ -1,0 +1,15 @@
+# Build binaries
+sec
+sec_test_bin
+sec_migration_test_bin
+sec_migration_test_bin2
+
+# Sockets and environment databases
+*.sock
+*.enc
+*.kdbx
+
+# IDEs
+.idea/
+.vscode/
+.DS_Store
