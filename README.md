@@ -150,3 +150,28 @@ The `sec version` command allows you to inspect compiled VCS commit history, bui
 ```bash
 sec version
 ```
+
+---
+
+## 📊 Tool Comparison Matrix (sec-agent vs. Enterprise Solutions)
+
+| Feature | `sec-agent` | Delinea (Secret Server / DSV) | HashiCorp Vault | Doppler / Infisical | SOPS (Mozilla) |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Primary Focus** | Local macOS Developer Session & Workstation Security | Enterprise Privileged Access Management (PAM) | Enterprise / Production Infrastructure Vault | Cloud Team Secret Synchronization | GitOps Repository File Encryption |
+| **Deployment Model** | **100% Offline** (Zero SaaS / Zero Server) | Enterprise Cloud SaaS or On-Prem IIS/SQL | Self-Hosted Cluster or Cloud SaaS | Cloud SaaS Platform | Local CLI (Key Server optional) |
+| **Master Key Protection** | **macOS Secure Enclave** | Enterprise Tenant / Cloud Vault | Server Master Key / AppRole | Cloud Account Token | Local GPG / Age Key File |
+| **Biometric Presence Gate** | **Touch ID / Apple Watch Hardware Sensor** | ❌ Software Auth Only | ❌ Software Auth Only | ❌ Software Auth Only | ❌ Software Auth Only |
+| **Remote Session Hijack Intercept** | **Active BSD Process Tree & SSH/VNC Scanner** | ❌ None | ❌ None | ❌ None | ❌ None |
+| **Zero-Codebase Dotenv Injection** | **Automatic `<migrated_to_sec>` Placeholder Override** | SDK / Custom API Scripts | Custom Agent / Template Injection | CLI Secret Ingestion | Manual Decrypt Scripting |
+
+---
+
+## 🏢 Corporate MDM & Workstation Security
+
+In enterprise environments, developer laptops are often enrolled in Mobile Device Management (MDM) platforms (e.g. Jamf, Kandji, Microsoft Intune) with corporate endpoint detection and automated file inventory collection. Plaintext `.env` files lying around in workspace subdirectories pose a high risk of being indexed, backed up to unencrypted IT stores, or exposed during IT support remote sessions.
+
+`sec-agent` addresses this threat model specifically for corporate workstations:
+
+1.  **Hardware-Enforced Privacy**: Secrets are encrypted at rest using keys sealed inside the macOS Secure Enclave (`SecAccessControl`). Even if an MDM script or local admin process reads the database file (`secrets.enc`), it cannot decrypt the contents without physical Touch ID contact on the console.
+2.  **Remote Administration Intercepts**: Active corporate remote support sessions (such as `screensharingd` or `AppleVNCServer`) and remote SSH administration sessions (`SSH_CLIENT`, `SSH_TTY`) are automatically intercepted. The daemon instantly locks itself and purges decrypted keys from RAM, preventing remote support engineers or administrative monitoring software from viewing your secrets.
+
