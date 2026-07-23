@@ -238,8 +238,8 @@ sec run [--profile <name>] -- <command> [args...]
 
 #### Example:
 ```bash
-sec run --profile cloud-service-api -- go test -v ./...
-# Executes test process with API_URL and API_TOKEN variables available
+sec run --profile velocloud-provider -- go test -v ./...
+# Executes test process with VCO_URL and VCO_TOKEN variables available
 ```
 
 ### 3.9. Shell Environment Exporter (`sec env`)
@@ -252,8 +252,8 @@ sec env [<prefix>] [--profile <name>]
 
 #### Example:
 ```bash
-eval $(sec env cloud-service-api)
-# Loads all secrets matching the 'cloud-service-api' prefix as shell exports
+eval $(sec env velocloud-provider)
+# Loads all secrets matching the 'velocloud-provider' prefix as shell exports
 ```
 
 ### 3.10. Plaintext Database Exporter (`sec export`)

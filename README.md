@@ -232,6 +232,26 @@ Hardware security keys (such as YubiKeys using PGP or PKCS#11 modules) are often
 
 ---
 
+## 🤖 AI Agent Integration (Bundled Agent Skill)
+
+To make AI-assisted software development frictionless, `sec-agent` includes a pre-packaged **Agent Skill** (`docs/skills/sec-agent-integration/SKILL.md`). This enables AI coding assistants (such as Antigravity, Cursor, Claude Code, Windsurf, or custom agent frameworks) to use `sec` automatically across your project workspaces.
+
+### Quick Skill Setup for AI Assistants:
+Simply copy or link the bundled skill into your agent's skills directory:
+
+```bash
+# Register the bundled skill globally for your AI coding assistant
+mkdir -p ~/.gemini/config/skills/sec-agent-integration
+cp docs/skills/sec-agent-integration/SKILL.md ~/.gemini/config/skills/sec-agent-integration/
+```
+
+Once installed, your AI assistant will automatically:
+* Check daemon lock status (`sec version`) and prompt for `eval $(sec open)` when needed.
+* Wrap local test/build/deploy commands with `sec run -- <cmd>` to inject credentials in memory without creating plaintext `.env` files.
+* Help migrate legacy `.env` files using `sec migrate-local`.
+
+---
+
 ## 🏢 Corporate MDM & Workstation Security
 
 In enterprise environments, developer laptops are often enrolled in Mobile Device Management (MDM) platforms (e.g. Jamf, Kandji, Microsoft Intune) with corporate endpoint detection and automated file inventory collection. Plaintext `.env` files lying around in workspace subdirectories pose a high risk of being indexed, backed up to unencrypted IT stores, or exposed during IT support remote sessions.

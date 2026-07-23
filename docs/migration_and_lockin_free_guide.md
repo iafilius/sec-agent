@@ -8,41 +8,41 @@ This guide details:
 
 ## 1. Local Workspace Integration Patterns
 
-### 1.1. Kubernetes Deployment Workspaces (`production-deployments`)
-In deployment setups (e.g., executing Helm charts, patching databases, or managing enclaves), developers frequently keep credentials in plaintext logs or fetch them from active cluster secrets.
+### 1.1. Kubernetes Deployment Workspaces (`klus_7_poc2_k8s`)
+In deployment setups (e.g., executing Helm charts, patching sanctuary databases, or managing enclaves), developers frequently keep credentials in plaintext logs or fetch them from active cluster secrets.
 *   **The Plaintext Risk**: Scripts like `patch_secrets.py` read secrets via `kubectl get secret` and write them to unencrypted YAML templates on disk.
-*   **The `sec` Solution**: Store database connection strings, tokens, and certificates under namespaced paths in `sec` (e.g. `--profile k8s-cluster` with paths like `billing-app/database-secrets`).
+*   **The `sec` Solution**: Store database connection strings, tokens, and certificates under namespaced paths in `sec` (e.g. `--profile xuntos-k8s` with paths like `arjanf/che-database-secrets`).
 *   **Frictionless Pipeline Spawner**:
     Instead of hardcoding `sec` calls inside python, execute the script inside the process wrapper:
     ```bash
-    sec run --profile k8s-cluster -- python3 patch_secrets.py
+    sec run --profile xuntos-k8s -- python3 patch_secrets.py
     ```
     Inside `patch_secrets.py`, read the variables directly from `os.environ`, making the Python script 100% decoupled from the secret provider:
     ```python
     import os
     
     # Read the automatically injected environment variable
-    db_secrets = os.getenv("BILLING_APP_DATABASE_SECRETS")
+    db_secrets = os.getenv("ARJANF_CHE_DATABASE_SECRETS")
     ```
 
-### 1.2. Terraform Provider Workspaces (`terraform-provider-workspace`)
-To run Terraform acceptance tests (`TF_ACC=1`), developers must configure API tokens and target URLs (e.g. `API_URL`, `API_TOKEN` in `.env`). Sourcing plaintext `.env` files exposes tokens in shell history and file backups.
-*   **The `sec` Solution**: Load these env values into `sec` under the profile `cloud-service-api`.
+### 1.2. Terraform Provider Workspaces (`future_opensource_terraform_provider`)
+To run Terraform acceptance tests (`TF_ACC=1`), developers must configure API tokens and target URLs (e.g. `VCO_URL`, `VCO_TOKEN` in `.env`). Sourcing plaintext `.env` files exposes tokens in shell history and file backups.
+*   **The `sec` Solution**: Load these env values into `sec` under the profile `velocloud-provider`.
 *   **One-Command Test Execution**:
     Directly run tests with all environment variables dynamically resolved in memory:
     ```bash
-    TF_ACC=1 sec run --profile cloud-service-api -- go test -v ./...
+    TF_ACC=1 sec run --profile velocloud-provider -- go test -v ./...
     ```
-    No files are created on disk, and the Go test suite reads standard `os.Getenv("API_URL")` calls seamlessly.
+    No files are created on disk, and the Go test suite reads standard `os.Getenv("VCO_URL")` calls seamlessly.
 
-### 1.3. Embedded Device Development Workspaces (`embedded-iot-devices`)
-Flashing or downloading partition backups requires administrative credentials or SSH keys.
-*   **The `sec` Solution**: Save credentials under `device-profile/admin-password` to execute scp/ssh automation cleanly.
+### 1.3. Router Hacking Workspaces (`Xiaomi_AIoT-router_AX3600`)
+Flashing or downloading partition backups requires raw dropbear passwords or SSH credentials.
+*   **The `sec` Solution**: Save administrative router SSH credentials under `router-ax3600/root-password` to execute scp/ssh automation cleanly.
 *   **Example Wrapper**:
     ```bash
-    sec run --profile device-profile -- sshpass -e ssh -o HostKeyAlgorithms=+ssh-rsa root@192.168.1.1
+    sec run --profile router-ax3600 -- sshpass -e ssh -o HostKeyAlgorithms=+ssh-rsa root@192.168.31.1
     ```
-    (`sshpass -e` reads the password directly from the `DEVICE_PROFILE_ADMIN_PASSWORD` variable injected by `sec run`).
+    (`sshpass -e` reads the password directly from the `ROUTER_AX3600_ROOT_PASSWORD` variable injected by `sec run`).
 
 ### 1.4. Dotenv Placeholder Override Pattern
 When onboarding a repository using `sec migrate-local <dotenv-file>`, raw secrets inside the dotenv file are absorbed by `sec` and replaced on disk with a placeholder string (`"<migrated_to_sec>"`).
@@ -109,12 +109,12 @@ Your database content is completely yours. If you want to migrate away from `sec
     This yields a standard, open KDBX file readable by KeePass, Bitwarden, or 1Password.
 2.  **Migrate to Decrypted JSON (For Cloud APIs)**:
     ```bash
-    sec export --format json
+    sec get --json
     ```
-    This outputs the complete structured database in plaintext JSON, allowing simple custom scripting to upload secrets to AWS Secrets Manager or cloud enclaves.
+    This outputs the complete structured database in plaintext JSON, allowing simple custom scripting to upload secrets to AWS Secrets Manager or OVH Barbican.
 3.  **Migrate to Shell Exports**:
     ```bash
     # Instantly output environment variables for standard scripts
-    sec export --format json | jq -r 'to_entries[] | "export \(.key | gsub("[/-]"; "_") | upcase)=\(.value.value)"'
+    sec get --json | jq -r '.secrets | to_entries[] | "export \(.key | gsub("[/-]"; "_") | upcase)=\(.value.value)"'
     # Generates: export DATABASE_PROD_PASSWORD="value"
     ```

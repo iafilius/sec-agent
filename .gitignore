@@ -12,4 +12,5 @@ sec_migration_test_bin2
 # IDEs
 .idea/
 .vscode/
+*.code-workspace
 .DS_Store
