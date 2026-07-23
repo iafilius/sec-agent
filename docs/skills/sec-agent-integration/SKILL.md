@@ -186,7 +186,21 @@ sec run --no-redact -- make testacc
 ```
 *   **Default-On Redaction**: Automatically intercepts child process `stdout` and `stderr` streams in real time and replaces active secret values with `[REDACTED_BY_SEC]` to guarantee zero log leaks in CI/CD or terminal scrollbacks.
 
-### 2.14. Session Restart & Locking
+### 2.14. Automated Token Rotation (`sec rotate`) & Expiring Inventory (`sec ls --expiring`)
+```bash
+# Register a token rotation command and rotation TTL
+sec set velocloud-provider-dev/vco_token "..." --expires 30d \
+  --rotate-cmd "sec run --profile velocloud-provider-dev -- curl -s -X POST \$VCO_URL/portal/rest/login/enterpriseLogin -d '{\"username\":\"admin\",\"password\":\"\$VCO_PASSWORD\"}' | jq -r .token" \
+  --rotate-ttl 30d
+
+# Trigger one-command token rotation
+sec rotate velocloud-provider-dev/vco_token
+
+# Inspect all secrets expiring within N days across profiles
+sec ls --expiring 14d
+```
+
+### 2.15. Session Restart & Locking
 ```bash
 # Restart daemon, apply binary updates, and re-authenticate in one step
 eval $(sec restart)

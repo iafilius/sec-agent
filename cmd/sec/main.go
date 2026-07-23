@@ -32,7 +32,7 @@ import (
 
 var jsonErrors bool
 var (
-	Version   = "v1.5.0"
+	Version   = "v1.6.0"
 	BuildDate = "unknown"
 )
 
@@ -339,6 +339,12 @@ func main() {
 			os.Exit(1)
 		}
 		handleLease(profile, os.Args[2], os.Args[3:])
+	case "rotate":
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "Usage: sec rotate <path> [--rotate-cmd <cmd>]")
+			os.Exit(1)
+		}
+		handleRotate(profile, os.Args[2], os.Args[3:])
 	case "doctor":
 		handleDoctor(profile)
 	case "gen", "generate":
@@ -442,10 +448,11 @@ func printUsage() {
 	fmt.Println("  mv <old> <new> [--prefix]       Rename a secret key path or prefix namespace (alias: rename)")
 	fmt.Println("  cp <src> <dst> [--prefix]       Duplicate a secret key path or prefix group (alias: copy)")
 	fmt.Println("  rm <path> [--prefix]            Delete a secret or prefix group (alias: delete)")
-	fmt.Println("  ls [<prefix>] [--json]          List secret paths without exposing values (alias: list)")
+	fmt.Println("  ls [<prefix>] [--json] [--expiring N] List secret paths or expiring keys (alias: list)")
 	fmt.Println("  diff [--other-profile <p>] [<file>] Compare secret paths against another profile or .env file")
 	fmt.Println("  diff-profiles <p1> <p2>         Side-by-side key matrix comparison between two profiles")
 	fmt.Println("  lease <path> [--ttl <duration>] Issue self-destructing temporary lease token for subagents")
+	fmt.Println("  rotate <path> [--rotate-cmd <c>] Execute registered rotation command and reset TTL timer")
 	fmt.Println("  doctor                          Run workstation system & security diagnostic checks")
 	fmt.Println("  gen <path> [--length N]         Generate random password and save to path (alias: generate)")
 	fmt.Println("  import <file> [--format <f>]    Bulk import secrets from JSON, Doppler, or AWS payloads")
@@ -847,10 +854,29 @@ func handleSet(profile string, path, value string, args []string) {
 				fmt.Fprintln(os.Stderr, "Error: --meta requires a key=value pair")
 				os.Exit(1)
 			}
+		} else if args[i] == "--rotate-cmd" {
+			if i+1 < len(args) {
+				metadata["rotate_cmd"] = args[i+1]
+				i++
+			} else {
+				fmt.Fprintln(os.Stderr, "Error: --rotate-cmd requires a command string")
+				os.Exit(1)
+			}
+		} else if args[i] == "--rotate-ttl" {
+			if i+1 < len(args) {
+				metadata["rotate_ttl"] = args[i+1]
+				i++
+			} else {
+				fmt.Fprintln(os.Stderr, "Error: --rotate-ttl requires a duration (e.g. 30d, 12h)")
+				os.Exit(1)
+			}
 		}
 	}
 
 	expiresTimeStr := ""
+	if expiresStr == "" && metadata["rotate_ttl"] != "" {
+		expiresStr = metadata["rotate_ttl"]
+	}
 	if expiresStr != "" {
 		t, err := parseExpiration(expiresStr)
 		if err != nil {
@@ -1140,6 +1166,93 @@ func handleLease(profile, secretPath string, args []string) {
 	fmt.Println(leaseID)
 }
 
+func handleRotate(profile, secretPath string, args []string) {
+	resp, err := queryDaemon(profile, daemon.IPCRequest{
+		Action: "get",
+		Path:   secretPath,
+	})
+	if err != nil || !resp.Success {
+		fail("SECRET_NOT_FOUND", fmt.Errorf("failed to fetch secret %q: %v", secretPath, err), "Check path.")
+	}
+
+	rotateCmd := ""
+	if resp.Metadata != nil {
+		rotateCmd = resp.Metadata["rotate_cmd"]
+	}
+
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--rotate-cmd" && i+1 < len(args) {
+			rotateCmd = args[i+1]
+			i++
+		}
+	}
+
+	if strings.TrimSpace(rotateCmd) == "" {
+		fail("MISSING_ROTATION_HOOK", fmt.Errorf("secret %q does not have a registered rotation command", secretPath), "Register a command using: sec set <path> <val> --rotate-cmd \"<cmd>\"")
+	}
+
+	envResp, _ := queryDaemon(profile, daemon.IPCRequest{Action: "backup"})
+	env := os.Environ()
+	if envResp != nil && envResp.Success {
+		for k, entry := range envResp.Secrets {
+			envKey := pathToEnvKeyWithEntry(k, entry)
+			env = append(env, fmt.Sprintf("%s=%s", envKey, entry.Value))
+		}
+	}
+
+	fmt.Printf("[INFO] Executing rotation hook for %q...\n", secretPath)
+
+	// #nosec G204 G702
+	cmd := exec.Command("sh", "-c", rotateCmd)
+	cmd.Env = env
+
+	out, err := cmd.Output()
+	if err != nil {
+		fail("ROTATION_FAILED", fmt.Errorf("rotation command execution failed: %v", err), "Check script syntax and credentials.")
+	}
+
+	newVal := strings.TrimSpace(string(out))
+	if newVal == "" {
+		fail("ROTATION_FAILED", fmt.Errorf("rotation command returned empty output"), "Rotation script must output new secret string to stdout.")
+	}
+
+	ttlStr := ""
+	if resp.Metadata != nil {
+		ttlStr = resp.Metadata["rotate_ttl"]
+	}
+	expiresTimeStr := ""
+	if ttlStr != "" {
+		if t, err := parseExpiration(ttlStr); err == nil {
+			expiresTimeStr = t.Format(time.RFC3339)
+		}
+	} else if jwtExp, ok := parseJwtExp(newVal); ok {
+		expiresTimeStr = jwtExp.Format(time.RFC3339)
+	}
+
+	meta := resp.Metadata
+	if meta == nil {
+		meta = make(map[string]string)
+	}
+	meta["rotate_cmd"] = rotateCmd
+
+	setResp, err := queryDaemon(profile, daemon.IPCRequest{
+		Action:   "set",
+		Path:     secretPath,
+		Value:    newVal,
+		Comment:  resp.Comment,
+		Metadata: meta,
+		Expires:  expiresTimeStr,
+	})
+	if err != nil || !setResp.Success {
+		fail("STORE_UPDATE_FAILED", fmt.Errorf("failed to save rotated secret: %v", err), "")
+	}
+
+	fmt.Printf("[✓] Secret %q successfully rotated!\n", secretPath)
+	if expiresTimeStr != "" {
+		fmt.Printf(" [✓] Expiration timer updated to: %s\n", expiresTimeStr)
+	}
+}
+
 func handleDoctor(profile string) {
 	fmt.Println("=== sec-agent System & Security Doctor ===")
 
@@ -1333,6 +1446,84 @@ func handleRename(profile string, oldPath, newPath string, args []string) {
 }
 
 func handleList(profile string, prefix string, args []string) {
+	expiringDays := 0
+	checkExpiring := false
+	showJSON := false
+
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--json" {
+			showJSON = true
+		} else if args[i] == "--expiring" {
+			checkExpiring = true
+			expiringDays = 7
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				if d, err := strconv.Atoi(args[i+1]); err == nil && d > 0 {
+					expiringDays = d
+					i++
+				} else if t, err := parseExpiration(args[i+1]); err == nil {
+					expiringDays = int(time.Until(t).Hours() / 24)
+					if expiringDays <= 0 {
+						expiringDays = 1
+					}
+					i++
+				}
+			}
+		}
+	}
+
+	if checkExpiring {
+		bkResp, err := queryDaemon(profile, daemon.IPCRequest{Action: "backup"})
+		if err != nil || !bkResp.Success {
+			fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running. Please run 'sec open' to unlock session."), "Run 'eval $(sec open)' to unlock.")
+		}
+		now := time.Now()
+		limit := time.Duration(expiringDays*24) * time.Hour
+
+		type ExpiringItem struct {
+			Path          string    `json:"path"`
+			Expires       time.Time `json:"expires"`
+			RemainingDays int       `json:"remaining_days"`
+		}
+		var list []ExpiringItem
+
+		for path, entry := range bkResp.Secrets {
+			if strings.HasPrefix(path, "__") {
+				continue
+			}
+			if !entry.Expires.IsZero() {
+				until := entry.Expires.Sub(now)
+				if until > 0 && until <= limit {
+					days := int(until.Hours() / 24)
+					list = append(list, ExpiringItem{
+						Path:          path,
+						Expires:       entry.Expires,
+						RemainingDays: days,
+					})
+				}
+			}
+		}
+
+		if showJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(list)
+			return
+		}
+
+		if len(list) == 0 {
+			fmt.Printf("No secret keys expiring within the next %d day(s).\n", expiringDays)
+			return
+		}
+
+		fmt.Printf("\033[33m⚠️  EXPIRATION WARNING: %d secret key(s) expiring within the next %d day(s)!\033[0m\n\n", len(list), expiringDays)
+		fmt.Printf("%-35s %-25s %s\n", "KEY PATH", "EXPIRATION DATE", "REMAINING")
+		fmt.Println(strings.Repeat("-", 75))
+		for _, item := range list {
+			fmt.Printf("%-35s %-25s %d day(s)\n", item.Path, item.Expires.Format(time.RFC3339), item.RemainingDays)
+		}
+		return
+	}
+
 	resp, err := queryDaemon(profile, daemon.IPCRequest{
 		Action: "list",
 		Path:   prefix,
@@ -1343,13 +1534,6 @@ func handleList(profile string, prefix string, args []string) {
 	if !resp.Success {
 		code, rem := mapDaemonError(resp.Error)
 		fail(code, fmt.Errorf("%s", resp.Error), rem)
-	}
-
-	showJSON := false
-	for _, arg := range args {
-		if arg == "--json" {
-			showJSON = true
-		}
 	}
 
 	if showJSON {

@@ -379,6 +379,37 @@ func TestMainIntegration(t *testing.T) {
 		t.Fatalf("sec diff-profiles failed: %v, output: %s", err, string(diffProfOut))
 	}
 
+	// 6s. Test v1.6.0 features: sec set --rotate-cmd, sec rotate, and sec ls --expiring
+	rotSetCmd := exec.Command("./sec_test_bin", "set", "rot/key", "old-val", "--expires", "14d", "--rotate-cmd", "echo rotated-secret-val", "--rotate-ttl", "14d", "--profile", profile)
+	rotSetCmd.Env = testEnv
+	if err := rotSetCmd.Run(); err != nil {
+		t.Fatalf("sec set with --rotate-cmd failed: %v", err)
+	}
+
+	// Test sec ls --expiring
+	expLsCmd := exec.Command("./sec_test_bin", "ls", "--expiring", "30d", "--profile", profile)
+	expLsCmd.Env = testEnv
+	expLsOut, err := expLsCmd.Output()
+	if err != nil || !strings.Contains(string(expLsOut), "rot/key") {
+		t.Fatalf("sec ls --expiring failed: %v, out: %s", err, string(expLsOut))
+	}
+
+	// Test sec rotate
+	rotRunCmd := exec.Command("./sec_test_bin", "rotate", "rot/key", "--profile", profile)
+	rotRunCmd.Env = testEnv
+	rotRunOut, err := rotRunCmd.Output()
+	if err != nil || !strings.Contains(string(rotRunOut), "successfully rotated") {
+		t.Fatalf("sec rotate failed: %v, out: %s", err, string(rotRunOut))
+	}
+
+	// Verify rotated value
+	getRotCmd := exec.Command("./sec_test_bin", "get", "rot/key", "-r", "--profile", profile)
+	getRotCmd.Env = testEnv
+	getRotOut, err := getRotCmd.Output()
+	if err != nil || string(getRotOut) != "rotated-secret-val" {
+		t.Fatalf("sec get after rotation failed: %v, expected 'rotated-secret-val', got %q", err, string(getRotOut))
+	}
+
 	// Reset profile env to dev for remaining tests
 	resetProfCmd := exec.Command("./sec_test_bin", "profile", "set-env", "dev", "--profile", profile)
 	resetProfCmd.Env = testEnv
