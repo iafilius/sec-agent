@@ -9,7 +9,7 @@ This document outlines the workflows for developing `sec` within your local work
 We maintain a dual-layer repository layout:
 
 ```
-/Users/arjan/personal/secure_secrets (Local Workspace Sandbox)
+/path/to/workspace/secure_secrets (Local Workspace Sandbox)
 ├── .git/ (Local Sandbox history)
 ├── openspec/ (OpenSpec specifications & changes history)
 ├── [Core codebase and documentation with your local configuration context]

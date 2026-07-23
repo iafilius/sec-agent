@@ -8,21 +8,21 @@ This guide details:
 
 ## 1. Local Workspace Integration Patterns
 
-### 1.1. Kubernetes Deployment Workspaces (`klus_7_poc2_k8s`)
-In deployment setups (e.g., executing Helm charts, patching sanctuary databases, or managing enclaves), developers frequently keep credentials in plaintext logs or fetch them from active cluster secrets.
+### 1.1. Kubernetes Deployment Workspaces
+In deployment setups (e.g., executing Helm charts, patching databases, or managing enclaves), developers frequently keep credentials in plaintext logs or fetch them from active cluster secrets.
 *   **The Plaintext Risk**: Scripts like `patch_secrets.py` read secrets via `kubectl get secret` and write them to unencrypted YAML templates on disk.
-*   **The `sec` Solution**: Store database connection strings, tokens, and certificates under namespaced paths in `sec` (e.g. `--profile xuntos-k8s` with paths like `arjanf/che-database-secrets`).
+*   **The `sec` Solution**: Store database connection strings, tokens, and certificates under namespaced paths in `sec` (e.g. `--profile prod-cluster` with paths like `app/database-secrets`).
 *   **Frictionless Pipeline Spawner**:
     Instead of hardcoding `sec` calls inside python, execute the script inside the process wrapper:
     ```bash
-    sec run --profile xuntos-k8s -- python3 patch_secrets.py
+    sec run --profile prod-cluster -- python3 patch_secrets.py
     ```
     Inside `patch_secrets.py`, read the variables directly from `os.environ`, making the Python script 100% decoupled from the secret provider:
     ```python
     import os
     
     # Read the automatically injected environment variable
-    db_secrets = os.getenv("ARJANF_CHE_DATABASE_SECRETS")
+    db_secrets = os.getenv("APP_DATABASE_SECRETS")
     ```
 
 ### 1.2. Terraform Provider Workspaces (`future_opensource_terraform_provider`)
