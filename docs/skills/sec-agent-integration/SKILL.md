@@ -40,7 +40,20 @@ sec run [--profile <profile-name>] -- <command-line>
 ```
 *   **How it works**: The CLI queries the background daemon, fetches keys, translates path strings to uppercase environment variables (e.g. `tf-vars/db-password` -> `TF_VARS_DB_PASSWORD`), injects them into child process memory, and executes the target script.
 
-### 2.2. Storing Secrets
+### 2.2. Batch Loading Scoped Secrets for Purpose/Environment
+For project environments (e.g. Terraform `dev` vs `acceptance`), load or run scoped groups by prefix in one go:
+```bash
+# Execute command with only secrets matching prefix injected (prefix is automatically trimmed)
+sec run --group my-project/terraform/acceptance -- terraform plan
+
+# Export shell environment variables for a specific purpose/group (eval friendly)
+eval $(sec load my-project/terraform/acceptance)
+
+# Query a group of secrets matching a path prefix
+sec get my-project/terraform/acceptance/ --prefix [--json]
+```
+
+### 2.3. Storing Secrets
 ```bash
 sec set <path> "<value>" [--comment "<description>"] [--meta owner=devops] [--profile <profile>]
 ```

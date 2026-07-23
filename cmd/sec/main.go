@@ -265,6 +265,8 @@ func main() {
 			os.Exit(1)
 		}
 		handleSet(profile, os.Args[2], os.Args[3], os.Args[4:])
+	case "load":
+		handleLoad(profile, os.Args[2:])
 	case "run":
 		handleRun(profile, os.Args[2:])
 	case "env":
@@ -318,9 +320,10 @@ func printUsage() {
 	fmt.Println("Usage: sec [--profile <name> | -P <name>] <command> [args]")
 	fmt.Println("Commands:")
 	fmt.Println("  open [--ttl <duration>] [--grace <duration>] Initialize/unlock the secrets session using Touch ID")
-	fmt.Println("  get <path> [--json | --comment | --meta <key>] Retrieve a secret")
+	fmt.Println("  get <path> [--prefix] [--json | --comment | --meta <key>] Retrieve a secret or group of secrets")
 	fmt.Println("  set <path> <val> [--comment <comment>] [--meta key=value ...] Store a secret")
-	fmt.Println("  run [-- <command> [args...]]     Execute a command with secrets injected into its environment")
+	fmt.Println("  load [<prefix>] [--format env|json] Batch-load scoped group secrets for shell sourcing")
+	fmt.Println("  run [--group <prefix>] [-- <command> [args...]] Execute a command with scoped secrets injected")
 	fmt.Println("  env [<prefix>]                   Output shell exports for secrets under prefix")
 	fmt.Println("  export [--format <json|env|aws|doppler>] Output decrypted database contents to stdout")
 	fmt.Println("  clear            Lock the active session and clear memory cache (aliases: close, lock)")
@@ -502,10 +505,13 @@ func handleGet(profile string, path string, args []string) {
 	showComment := false
 	showMetaKey := ""
 	showExpired := false
+	isPrefix := false
 
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--json" {
 			showJSON = true
+		} else if args[i] == "--prefix" {
+			isPrefix = true
 		} else if args[i] == "--comment" || args[i] == "-c" {
 			showComment = true
 		} else if args[i] == "--show-expired" {
@@ -519,6 +525,33 @@ func handleGet(profile string, path string, args []string) {
 				os.Exit(1)
 			}
 		}
+	}
+
+	if isPrefix || strings.HasSuffix(path, "/") {
+		resp, err := queryDaemon(profile, daemon.IPCRequest{
+			Action:      "get_group",
+			Path:        path,
+			ShowExpired: showExpired,
+		})
+		if err != nil {
+			fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running. Please run 'sec open' to unlock the session."), "Run 'eval $(sec open)' to start/unlock the session.")
+		}
+		if !resp.Success {
+			code, rem := mapDaemonError(resp.Error)
+			fail(code, fmt.Errorf("%s", resp.Error), rem)
+		}
+		if showJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			if err := enc.Encode(resp.Secrets); err != nil {
+				fail("SERIALIZATION_FAILED", err, "")
+			}
+			return
+		}
+		for k, entry := range resp.Secrets {
+			fmt.Printf("%s=%s\n", k, entry.Value)
+		}
+		return
 	}
 
 	resp, err := queryDaemon(profile, daemon.IPCRequest{
@@ -638,25 +671,96 @@ func handleSet(profile string, path, value string, args []string) {
 	fmt.Println("Secret saved successfully.")
 }
 
+func handleLoad(profile string, args []string) {
+	prefix := ""
+	format := "env"
+
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--format" || args[i] == "-f" {
+			if i+1 < len(args) {
+				format = args[i+1]
+				i++
+			}
+		} else if !strings.HasPrefix(args[i], "-") && prefix == "" {
+			prefix = args[i]
+		}
+	}
+
+	resp, err := queryDaemon(profile, daemon.IPCRequest{
+		Action: "get_group",
+		Path:   prefix,
+	})
+	if err != nil {
+		fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running. Please run 'sec open' to unlock the session."), "Run 'eval $(sec open)' to start/unlock the session.")
+	}
+	if !resp.Success {
+		code, rem := mapDaemonError(resp.Error)
+		fail(code, fmt.Errorf("%s", resp.Error), rem)
+	}
+
+	if format == "json" {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(resp.Secrets); err != nil {
+			fail("SERIALIZATION_FAILED", err, "")
+		}
+		return
+	}
+
+	for path, entry := range resp.Secrets {
+		relPath := path
+		if prefix != "" && strings.HasPrefix(path, prefix) {
+			relPath = strings.TrimPrefix(path, prefix)
+			relPath = strings.TrimPrefix(relPath, "/")
+		}
+		if relPath == "" {
+			relPath = path
+		}
+		envKey := pathToEnvKey(relPath)
+		fmt.Printf("export %s=%q\n", envKey, entry.Value)
+	}
+}
+
 func handleRun(profile string, args []string) {
+	groupPrefix := ""
 	var cmdArgs []string
 	foundSeparator := false
-	for i, arg := range args {
-		if arg == "--" {
-			cmdArgs = args[i+1:]
+
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--" {
 			foundSeparator = true
+			cmdArgs = args[i+1:]
 			break
+		}
+		if args[i] == "--group" || args[i] == "-g" {
+			if i+1 < len(args) {
+				groupPrefix = args[i+1]
+				i++
+			}
 		}
 	}
 	if !foundSeparator {
-		cmdArgs = args
+		for i := 0; i < len(args); i++ {
+			if args[i] == "--group" || args[i] == "-g" {
+				i++
+				continue
+			}
+			cmdArgs = append(cmdArgs, args[i])
+		}
 	}
 	if len(cmdArgs) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: sec run [--profile <name>] -- <command> [args...]")
+		fmt.Fprintln(os.Stderr, "Usage: sec run [--group <prefix>] [--profile <name>] -- <command> [args...]")
 		os.Exit(1)
 	}
 
-	resp, err := queryDaemon(profile, daemon.IPCRequest{Action: "backup"})
+	action := "backup"
+	reqPath := ""
+	if groupPrefix != "" {
+		action = "get_group"
+		reqPath = groupPrefix
+	}
+
+	resp, err := queryDaemon(profile, daemon.IPCRequest{Action: action, Path: reqPath})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error: Daemon is not running. Please run 'sec open' to unlock the session.")
 		os.Exit(1)
@@ -668,7 +772,15 @@ func handleRun(profile string, args []string) {
 
 	env := os.Environ()
 	for path, entry := range resp.Secrets {
-		envKey := pathToEnvKey(path)
+		relPath := path
+		if groupPrefix != "" && strings.HasPrefix(path, groupPrefix) {
+			relPath = strings.TrimPrefix(path, groupPrefix)
+			relPath = strings.TrimPrefix(relPath, "/")
+		}
+		if relPath == "" {
+			relPath = path
+		}
+		envKey := pathToEnvKey(relPath)
 		env = append(env, fmt.Sprintf("%s=%s", envKey, entry.Value))
 	}
 

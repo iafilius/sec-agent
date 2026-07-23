@@ -256,3 +256,20 @@ func InitializeMasterKey(profile string, keychainGetter func() ([]byte, error), 
 
 	return newKey, nil
 }
+
+// GetGroup returns a map of all secrets whose paths match the specified prefix.
+// If prefix is empty, it returns all secrets in the store.
+func (es *EncryptedStore) GetGroup(prefix string) map[string]SecretEntry {
+	result := make(map[string]SecretEntry)
+	if es == nil || es.Secrets == nil {
+		return result
+	}
+	cleanPrefix := strings.TrimSpace(prefix)
+	for k, v := range es.Secrets {
+		if cleanPrefix == "" || strings.HasPrefix(k, cleanPrefix) {
+			result[k] = v
+		}
+	}
+	return result
+}
+

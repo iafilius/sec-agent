@@ -376,6 +376,28 @@ func (d *Daemon) handleConnection(c net.Conn) {
 			Expires:      entry.Expires,
 		})
 
+	case "get_group":
+		if d.masterKey == nil {
+			d.sendError(c, "Session locked. Please unlock first.")
+			return
+		}
+		group := d.secretsStore.GetGroup(req.Path)
+		filteredGroup := make(map[string]store.SecretEntry)
+		now := time.Now()
+		for k, entry := range group {
+			if !entry.Expires.IsZero() && now.After(entry.Expires) && !req.ShowExpired {
+				continue
+			}
+			filteredGroup[k] = entry
+		}
+
+		d.lastUsed = time.Now()
+		d.sendResponse(c, IPCResponse{
+			Success: true,
+			Secrets: filteredGroup,
+		})
+
+
 	case "set":
 		if d.masterKey == nil {
 			d.sendError(c, "Session locked. Please unlock first.")

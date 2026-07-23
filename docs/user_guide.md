@@ -121,6 +121,25 @@ Frictionless retrieval from the memory cache of the daemon. This is extremely fa
     # devops
     ```
 
+### 3.3.1. Batch Group Loading (`sec load` & `sec run --group`)
+For project environments organized by hierarchy (e.g. `project/terraform/acceptance/` vs `project/terraform/dev/`), you can load or run scoped groups by path prefix in a single Unix Domain Socket IPC call:
+
+*   **Scoped Shell Sourcing (`sec load`)**:
+    ```bash
+    eval $(sec load project/terraform/acceptance)
+    # Automatically exports:
+    # export DB_PASS="..."
+    # export AWS_KEY="..."
+    ```
+*   **Scoped Process Injection (`sec run --group`)**:
+    ```bash
+    sec run --group project/terraform/acceptance -- terraform plan
+    ```
+*   **Batch Group Query (`sec get --prefix`)**:
+    ```bash
+    sec get project/terraform/acceptance/ --prefix [--json]
+    ```
+
 ### 3.4. Expiration Policy & Recovery (`--show-expired`)
 When a secret reaches its expiration timestamp:
 - Normal queries (e.g. `sec get database/test/key`) will block, outputting `Error: Secret has expired` and returning exit code `1`.

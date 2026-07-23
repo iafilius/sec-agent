@@ -130,6 +130,42 @@ func TestMainIntegration(t *testing.T) {
 		t.Errorf("subprocess did not receive injected environment variable. Output:\n%s", runStr)
 	}
 
+	// 6b. Test 'sec load' batch environment output with prefix trimming
+	loadCmd := exec.Command("./sec_test_bin", "load", "velocloud-provider", "--profile", profile)
+	loadCmd.Env = testEnv
+	loadOut, err := loadCmd.Output()
+	if err != nil {
+		t.Fatalf("sec load failed: %v", err)
+	}
+	loadStr := string(loadOut)
+	if !strings.Contains(loadStr, "export VCO_URL=\"https://vco.example.com\"") || !strings.Contains(loadStr, "export VCO_TOKEN=\"mock-token-12345\"") {
+		t.Errorf("sec load output mismatch. Got:\n%s", loadStr)
+	}
+
+	// 6c. Test 'sec run --group' scoped environment variable injection
+	runGroupCmd := exec.Command("./sec_test_bin", "run", "--group", "velocloud-provider", "--profile", profile, "--", "env")
+	runGroupCmd.Env = testEnv
+	runGroupOut, err := runGroupCmd.Output()
+	if err != nil {
+		t.Fatalf("sec run --group failed: %v", err)
+	}
+	runGroupStr := string(runGroupOut)
+	if !strings.Contains(runGroupStr, "VCO_URL=https://vco.example.com") || strings.Contains(runGroupStr, "OTHER_CATEGORY") {
+		t.Errorf("sec run --group output mismatch. Got:\n%s", runGroupStr)
+	}
+
+	// 6d. Test 'sec get --prefix' batch group retrieval
+	getGroupCmd := exec.Command("./sec_test_bin", "get", "velocloud-provider", "--prefix", "--profile", profile)
+	getGroupCmd.Env = testEnv
+	getGroupOut, err := getGroupCmd.Output()
+	if err != nil {
+		t.Fatalf("sec get --prefix failed: %v", err)
+	}
+	getGroupStr := string(getGroupOut)
+	if !strings.Contains(getGroupStr, "velocloud-provider/vco-url=https://vco.example.com") {
+		t.Errorf("sec get --prefix output mismatch. Got:\n%s", getGroupStr)
+	}
+
 	// 7. Test 4: Verify exit code propagation
 	exitCmd := exec.Command("./sec_test_bin", "run", "--profile", profile, "--", "sh", "-c", "exit 42")
 	exitCmd.Env = testEnv
