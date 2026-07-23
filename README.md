@@ -191,17 +191,34 @@ In real-world software engineering, **developer credential hygiene is notoriousl
 
 ---
 
-## 📊 Tool Comparison Matrix (sec-agent vs. Enterprise Solutions)
+## 📊 Comprehensive Solution Comparison Matrix
 
-| Feature | `sec-agent` | Delinea (Secret Server / DSV) | HashiCorp Vault | Doppler / Infisical | SOPS (Mozilla) |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Primary Focus** | Local macOS Developer Session & Workstation Security | Enterprise Privileged Access Management (PAM) | Enterprise / Production Infrastructure Vault | Cloud Team Secret Synchronization | GitOps Repository File Encryption |
-| **Deployment Model** | **100% Offline** (Zero SaaS / Zero Server) | Enterprise Cloud SaaS or On-Prem IIS/SQL | Self-Hosted Cluster or Cloud SaaS | Cloud SaaS Platform | Local CLI (Key Server optional) |
-| **Master Key Protection** | **macOS Secure Enclave** | Enterprise Tenant / Cloud Vault | Server Master Key / AppRole | Cloud Account Token | Local GPG / Age Key File |
-| **"Secret Zero" Disk Dependency** | **✅ Zero Plaintext Files (Hardware Sealed)** | ❌ Plaintext Client ID / Token on Disk | ❌ Plaintext Vault Token / AppRole | ❌ Plaintext Service Token File | ❌ Plaintext GPG / Age Key File |
-| **Biometric Presence Gate** | **Touch ID / Apple Watch Hardware Sensor** | ❌ Software Auth Only | ❌ Software Auth Only | ❌ Software Auth Only | ❌ Software Auth Only |
-| **Remote Session Hijack Intercept** | **Active BSD Process Tree & SSH/VNC Scanner** | ❌ None | ❌ None | ❌ None | ❌ None |
-| **Zero-Codebase Dotenv Injection** | **Automatic `<migrated_to_sec>` Placeholder Override** | SDK / Custom API Scripts | Custom Agent / Template Injection | CLI Secret Ingestion | Manual Decrypt Scripting |
+| Feature | `sec-agent` | YubiKey / Hardware Keys (PKCS#11/PGP) | 1Password CLI / Bitwarden CLI | Delinea (Secret Server / DSV) | HashiCorp Vault | Doppler / Infisical | SOPS / Age (Mozilla) |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Primary Target** | **Local macOS Workstation & Session Agent** | Hardware Authentication & SSH/PGP Keys | Desktop Password Vault CLI Injection | Enterprise Privileged Access Management (PAM) | Enterprise / Infrastructure Production Vault | Cloud Team Secret Synchronization | GitOps Repository File Encryption |
+| **Deployment Model** | **100% Offline** (Zero SaaS / Zero Server) | Local USB Hardware Dongle | Local App + Cloud SaaS Subscription | Enterprise Cloud SaaS or On-Prem IIS/SQL | Self-Hosted Cluster or Cloud SaaS | Cloud SaaS Platform | Local CLI (Key Server optional) |
+| **Master Key Protection** | **macOS Secure Enclave (Silicon)** | USB Security Key Cryptographic Chip | Software Vault Key (Argon2 / Master Pass) | Enterprise Tenant / Cloud Vault | Server Master Key / AppRole | Cloud Account Token | Local GPG / Age Key File |
+| **"Secret Zero" Disk Dependency** | **✅ Zero Plaintext Files (Hardware Sealed)** | ✅ Zero Key Files on Disk | ❌ Plaintext Session Token File | ❌ Plaintext Client ID / Token on Disk | ❌ Plaintext Vault Token / AppRole | ❌ Plaintext Service Token File | ❌ Plaintext GPG / Age Key File |
+| **Hardware Biometric Gate** | **Built-in Touch ID / Apple Watch** | ⚠️ Physical Button Touch (External USB) | ⚠️ Desktop App Biometrics | ❌ Software Auth Only | ❌ Software Auth Only | ❌ Software Auth Only | ❌ Software Auth Only |
+| **Remote Session Hijack Intercept** | **Active BSD Process Tree & SSH/VNC Scanner** | ❌ None (Triggers while plugged in) | ❌ None (CLI queryable during unlock) | ❌ None | ❌ None | ❌ None | ❌ None |
+| **External Hardware Needed** | **❌ None (Uses Built-in Apple Silicon)** | ⚠️ Required (USB Dongle purchase/carrying) | ❌ None | ❌ None | ❌ None | ❌ None | ❌ None |
+| **Zero-Codebase Dotenv Injection** | **Automatic `<migrated_to_sec>` Override** | ❌ Complex GPG / PKCS#11 Scripting | ⚠️ Manual `op run` Template Mapping | SDK / Custom API Scripts | Custom Agent / Template Injection | CLI Secret Ingestion | Manual Decrypt Scripting |
+
+---
+
+### 🔑 Hardware Security Breakdown: `sec-agent` vs. YubiKey & Security Dongles
+
+Hardware security keys (such as YubiKeys using PGP or PKCS#11 modules) are often considered the gold standard for authentication, but face severe limitations when applied to developer local secret management:
+
+1. **Zero External Hardware Friction**:
+   * **YubiKey**: Requires purchasing, configuring, and carrying external USB-C dongles that can be lost, left at home, or broken in USB ports.
+   * **`sec-agent`**: Leverages the **built-in macOS Secure Enclave** and **built-in Touch ID sensor** already present in Apple Silicon Macs—delivering enterprise-grade hardware cryptography out of the box with zero additional hardware cost.
+2. **Active Hijacking Intercepts**:
+   * **YubiKey**: A YubiKey has no process context or ancestry awareness. If a YubiKey remains plugged into a USB port with cached PIN entry, an attacker who gains remote SSH shell access or background process execution can issue `gpg` or `pkcs11-tool` commands to decrypt secrets without prompting for a physical touch button.
+   * **`sec-agent`**: Actively scans the client's BSD process tree and environment variables (`SSH_CLIENT`, `SSH_TTY`, `AppleVNCServer`, `remotepairingd`). If an SSH or remote sharing session is detected, the daemon immediately self-locks and purges decrypted keys from RAM, neutralizing remote session takeover attempts.
+3. **Developer Experience (DX) & Dotenv Migration**:
+   * **YubiKey**: Requires complex GPG setup, pin handling, and custom shell scripts to parse and decrypt environment variables.
+   * **`sec-agent`**: Provides a 30-second automated migration (`sec migrate-local .env`) that sanitizes plaintext files to safe `<migrated_to_sec>` placeholders and injects secrets dynamically at runtime (`sec run -- <app>`) with zero codebase modifications.
 
 ---
 
