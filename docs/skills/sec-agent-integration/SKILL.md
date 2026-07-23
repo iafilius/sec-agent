@@ -5,7 +5,7 @@ description: Use the sec-agent CLI utility to start background daemons, store se
 
 # sec-agent Secrets Management Integration
 
-This skill enables AI coding agents and autonomous assistants to use the `sec` CLI tool (v1.2.0+) to securely retrieve credentials, run application build/test/terraform pipelines in isolated process environments, migrate dotenv configuration files, and manage KeePassXC `.kdbx` backups on macOS.
+This skill enables AI coding agents and autonomous assistants to use the `sec` CLI tool (v1.5.0+) to securely retrieve credentials, run application build/test/terraform pipelines in isolated process environments, migrate dotenv configuration files, and manage KeePassXC `.kdbx` backups on macOS.
 
 ---
 
