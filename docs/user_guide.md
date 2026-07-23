@@ -333,7 +333,8 @@ Secrets are NOT read from plaintext files on disk. Instead, all credentials are 
 `sec run` selects which keys to load using the following resolution hierarchy:
 1.  **Group Prefix (`--group <prefix>`)**: If `--group <prefix>` is passed, `sec run` fetches only secrets matching `<prefix>/*`. The prefix is trimmed off for cleaner variable names (e.g. `velocloud-provider/vco_token` $\rightarrow$ `VCO_TOKEN`).
 2.  **Workspace File (`.secrc`)**: If a `.secrc` or `.sec.json` file is present in the repository root, `sec run` automatically applies the configured `profile` and `prefix`.
-3.  **All Vault Secrets**: If no `--group` or `.secrc` is specified, `sec run` fetches **all active, non-expired keys** in the profile vault.
+3.  **All Vault Secrets (With Notice)**: If no `--group` or `.secrc` is specified, `sec run` fetches **all active, non-expired keys** in the profile vault and prints an informational notice to `stderr`:
+    `[INFO] No --group or .secrc specified: Injecting all 14 active vault secret(s) into child process environment.`
 
 #### 3. Path-to-Environment-Variable Name Conversion:
 *   If a secret entry contains a custom **`env_alias`** metadata field (e.g., `env_alias = "VCO_TOKEN"`), that alias is used verbatim as the environment variable name.

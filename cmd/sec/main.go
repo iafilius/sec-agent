@@ -1729,6 +1729,10 @@ func handleRun(profile string, args []string) {
 		os.Exit(1)
 	}
 
+	if groupPrefix == "" {
+		fmt.Fprintf(os.Stderr, "[INFO] No --group or .secrc specified: Injecting all %d active vault secret(s) into child process environment.\n", len(resp.Secrets))
+	}
+
 	env := os.Environ()
 	var secretVals []string
 	for path, entry := range resp.Secrets {
