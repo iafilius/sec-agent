@@ -30,7 +30,7 @@ import (
 
 var jsonErrors bool
 var (
-	Version   = "v1.2.0"
+	Version   = "v1.3.0"
 	BuildDate = "unknown"
 )
 
@@ -377,18 +377,29 @@ func main() {
 			}
 		}
 		handleBackup(profile, os.Args[2], explicitPassword)
+	case "check":
+		handleCheck(profile, os.Args[2:])
+	case "restart":
+		handleRestart(profile)
+	case "completion":
+		shell := "zsh"
+		if len(os.Args) >= 3 {
+			shell = os.Args[2]
+		}
+		handleCompletion(shell)
 	case "restore":
 		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "Usage: sec restore <backup-file.kdbx> [--password | -p <password>]")
+			fmt.Fprintln(os.Stderr, "Usage: sec restore <backup-file.kdbx> [--password | -p <password>] [--merge] [--overwrite]")
 			os.Exit(1)
 		}
 		explicitPassword := ""
-		if len(os.Args) >= 5 {
-			if os.Args[3] == "--password" || os.Args[3] == "-p" {
-				explicitPassword = os.Args[4]
+		for i := 3; i < len(os.Args); i++ {
+			if (os.Args[i] == "--password" || os.Args[i] == "-p") && i+1 < len(os.Args) {
+				explicitPassword = os.Args[i+1]
+				i++
 			}
 		}
-		handleRestore(profile, os.Args[2], explicitPassword)
+		handleRestore(profile, os.Args[2], explicitPassword, os.Args[3:])
 	case "daemon":
 		runDaemon(profile)
 	case "migrate-local":
@@ -407,11 +418,11 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Println("Usage: sec [--profile <name> | -P <name>] <command> [args]")
+	fmt.Println("Usage: sec [--profile <name> | -P <name>] [--auto-open] <command> [args]")
 	fmt.Println("Commands:")
 	fmt.Println("  open [--ttl <duration>] [--grace <duration>] Initialize/unlock the secrets session using Touch ID")
-	fmt.Println("  get <path> [--prefix] [--json | --comment | --meta <key>] Retrieve a secret or group of secrets")
-	fmt.Println("  set <path> <val> [--comment <comment>] [--meta key=value ...] Store a secret")
+	fmt.Println("  get <path> [--prefix] [--json | --comment | --meta <key> | -r] Retrieve a secret or group of secrets")
+	fmt.Println("  set <path> <val> [--comment <comment>] [--meta k=v ...] [--env-alias ALIAS] Store a secret")
 	fmt.Println("  mv <old> <new> [--prefix]       Rename a secret key path or prefix namespace (alias: rename)")
 	fmt.Println("  cp <src> <dst> [--prefix]       Duplicate a secret key path or prefix group (alias: copy)")
 	fmt.Println("  rm <path> [--prefix]            Delete a secret or prefix group (alias: delete)")
@@ -420,16 +431,19 @@ func printUsage() {
 	fmt.Println("  doctor                          Run workstation system & security diagnostic checks")
 	fmt.Println("  gen <path> [--length N]         Generate random password and save to path (alias: generate)")
 	fmt.Println("  import <file> [--format <f>]    Bulk import secrets from JSON, Doppler, or AWS payloads")
+	fmt.Println("  check [--template <file>] [--required <keys>] Validate vault schema completeness")
 	fmt.Println("  load [<prefix>] [--format env|json] Batch-load scoped group secrets for shell sourcing")
 	fmt.Println("  run [--group <prefix>] [-- <command> [args...]] Execute a command with scoped secrets injected")
 	fmt.Println("  status                          Display session health, profile, and diagnostic metrics")
 	fmt.Println("  audit [--limit <n>] [--json]    View recent daemon security audit logs (alias: log)")
 	fmt.Println("  env [<prefix>]                   Output shell exports for secrets under prefix")
-	fmt.Println("  export [--format <json|env|aws|doppler>] Output decrypted database contents to stdout")
+	fmt.Println("  export [--format <json|env|aws|doppler|template>] Output decrypted database contents to stdout")
 	fmt.Println("  clear            Lock the active session and clear memory cache (aliases: close, lock)")
+	fmt.Println("  restart          Lock session, stop daemon process, re-launch, and prompt Touch ID")
 	fmt.Println("  backup <file> [--password | -p <password>] Export cached secrets to a portable KeePassXC (.kdbx) file")
-	fmt.Println("  restore <file> [--password | -p <password>] Import secrets from a portable KeePassXC (.kdbx) file")
+	fmt.Println("  restore <file> [--merge] [--overwrite] Import secrets from a portable KeePassXC (.kdbx) file")
 	fmt.Println("  migrate-local <file> [--prefix <prefix>] Import dotenv file and sanitize it")
+	fmt.Println("  completion <zsh|bash|fish>      Generate native shell completion script")
 	fmt.Println("  version          Print CLI and active daemon version and build metadata")
 }
 
@@ -617,6 +631,7 @@ func handleOpen(profile string, args []string) {
 func handleGet(profile string, path string, args []string) {
 	showJSON := false
 	showComment := false
+	showRaw := false
 	showMetaKey := ""
 	showExpired := false
 	isPrefix := false
@@ -624,6 +639,8 @@ func handleGet(profile string, path string, args []string) {
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--json" {
 			showJSON = true
+		} else if args[i] == "--raw" || args[i] == "-r" {
+			showRaw = true
 		} else if args[i] == "--prefix" {
 			isPrefix = true
 		} else if args[i] == "--comment" || args[i] == "-c" {
@@ -712,6 +729,8 @@ func handleGet(profile string, path string, args []string) {
 			os.Exit(1)
 		}
 		fmt.Println(val)
+	} else if showRaw {
+		fmt.Print(resp.Value)
 	} else {
 		fmt.Println(resp.Value)
 	}
@@ -1382,7 +1401,28 @@ func handleRun(profile string, args []string) {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	err = cmd.Run()
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error starting command: %v\n", err)
+		os.Exit(1)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(15 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				_, _ = queryDaemonRaw(profile, daemon.IPCRequest{Action: "ping"})
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	err = cmd.Wait()
+	close(done)
+
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			os.Exit(exitErr.ExitCode())
@@ -1589,7 +1629,17 @@ func handleBackup(profile string, outputFile string, explicitPassword string) {
 	fmt.Printf("Backup created successfully at: %s\n", absPath)
 }
 
-func handleRestore(profile string, filePath, explicitPassword string) {
+func handleRestore(profile string, filePath, explicitPassword string, args []string) {
+	mergeMode := false
+	overwriteMode := false
+	for _, arg := range args {
+		if arg == "--merge" || arg == "-m" {
+			mergeMode = true
+		} else if arg == "--overwrite" {
+			overwriteMode = true
+		}
+	}
+
 	var password string
 
 	if explicitPassword != "" {
@@ -1616,6 +1666,19 @@ func handleRestore(profile string, filePath, explicitPassword string) {
 		os.Exit(1)
 	}
 
+	if mergeMode && !overwriteMode {
+		curResp, err := queryDaemon(profile, daemon.IPCRequest{Action: "backup"})
+		if err == nil && curResp.Success {
+			filtered := make(map[string]store.SecretEntry)
+			for k, v := range secrets {
+				if _, exists := curResp.Secrets[k]; !exists {
+					filtered[k] = v
+				}
+			}
+			secrets = filtered
+		}
+	}
+
 	resp, err := queryDaemon(profile, daemon.IPCRequest{
 		Action:  "restore",
 		Secrets: secrets,
@@ -1631,6 +1694,155 @@ func handleRestore(profile string, filePath, explicitPassword string) {
 	}
 
 	fmt.Printf("Secrets restored successfully. Merged %d entries into active session.\n", len(secrets))
+}
+
+func handleCheck(profile string, args []string) {
+	templateFile := ""
+	var requiredKeys []string
+
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--template" || args[i] == "-t" {
+			if i+1 < len(args) {
+				templateFile = args[i+1]
+				i++
+			}
+		} else if args[i] == "--required" || args[i] == "-r" {
+			if i+1 < len(args) {
+				raw := args[i+1]
+				i++
+				for _, k := range strings.Split(raw, ",") {
+					k = strings.TrimSpace(k)
+					if k != "" {
+						requiredKeys = append(requiredKeys, k)
+					}
+				}
+			}
+		}
+	}
+
+	if templateFile != "" {
+		// #nosec G304 G703
+		data, err := os.ReadFile(templateFile)
+		if err != nil {
+			fail("FILE_READ_ERROR", fmt.Errorf("failed to read template file %s: %v", templateFile, err), "Check file path.")
+		}
+		scanner := bufio.NewScanner(bytes.NewReader(data))
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			parts := strings.SplitN(line, "=", 2)
+			key := strings.TrimSpace(parts[0])
+			if key != "" {
+				requiredKeys = append(requiredKeys, key)
+			}
+		}
+	}
+
+	if len(requiredKeys) == 0 {
+		fail("INVALID_ARGUMENT", fmt.Errorf("no required keys specified"), "Pass --template <file> or --required KEY1,KEY2")
+	}
+
+	resp, err := queryDaemon(profile, daemon.IPCRequest{Action: "backup"})
+	if err != nil {
+		fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running. Please run 'sec open' to unlock the session."), "Run 'eval $(sec open)' to start/unlock the session.")
+	}
+	if !resp.Success {
+		code, rem := mapDaemonError(resp.Error)
+		fail(code, fmt.Errorf("%s", resp.Error), rem)
+	}
+
+	available := make(map[string]string)
+	for path, entry := range resp.Secrets {
+		envKey := pathToEnvKeyWithEntry(path, entry)
+		available[envKey] = path
+		available[path] = path
+	}
+
+	fmt.Println("=== sec-agent Vault Schema Linter ===")
+	missingCount := 0
+	for _, req := range requiredKeys {
+		if matchedPath, ok := available[req]; ok {
+			fmt.Printf(" [✓] %-30s -> Found (path/alias: %s)\n", req, matchedPath)
+		} else {
+			fmt.Printf(" [✗] %-30s -> MISSING!\n", req)
+			missingCount++
+		}
+	}
+
+	if missingCount > 0 {
+		fmt.Printf("\nError: %d required secret key/alias missing from profile %q.\n", missingCount, profile)
+		os.Exit(1)
+	}
+	fmt.Printf("\nSuccess: All %d required keys/aliases present in profile %q.\n", len(requiredKeys), profile)
+}
+
+func handleRestart(profile string) {
+	_, _ = queryDaemon(profile, daemon.IPCRequest{Action: "clear"})
+	socketPath, err := config.GetSocketPath(profile)
+	if err == nil {
+		_ = os.Remove(socketPath)
+	}
+	fmt.Printf("Restarting sec-agent daemon for profile %q...\n", profile)
+	handleOpen(profile, nil)
+}
+
+func handleCompletion(shell string) {
+	switch shell {
+	case "zsh":
+		fmt.Print(`#compdef sec
+
+_sec() {
+    local -a commands
+    commands=(
+        'open:Initialize/unlock the secrets session using Touch ID'
+        'get:Retrieve a secret or group of secrets'
+        'set:Store a secret with optional comment and env alias'
+        'mv:Rename a secret key path or prefix namespace'
+        'cp:Duplicate a secret key path or prefix group'
+        'rm:Delete a secret or prefix group'
+        'ls:List secret paths without exposing values'
+        'diff:Compare secret paths against another profile or .env file'
+        'doctor:Run workstation system & security diagnostic checks'
+        'gen:Generate random password and save to path'
+        'import:Bulk import secrets from JSON, Doppler, or AWS payloads'
+        'check:Pre-flight validation of required vault keys or template'
+        'load:Batch-load scoped group secrets for shell sourcing'
+        'run:Execute a command with scoped secrets injected'
+        'status:Display session health, profile, and diagnostic metrics'
+        'audit:View recent daemon security audit logs'
+        'env:Output shell exports for secrets under prefix'
+        'export:Output decrypted database contents to stdout'
+        'clear:Lock the active session and clear memory cache'
+        'restart:Restart the active session daemon and re-authenticate'
+        'backup:Export cached secrets to a portable KeePassXC (.kdbx) file'
+        'restore:Import secrets from a portable KeePassXC (.kdbx) file'
+        'completion:Generate shell completion script (zsh, bash, fish)'
+        'version:Print CLI and active daemon version'
+    )
+    _describe -t commands 'sec command' commands
+}
+
+_sec "$@"
+`)
+	case "bash":
+		fmt.Print(`# bash completion for sec
+_sec_completions() {
+    local cur="${COMP_WORDS[COMP_CWORD]}"
+    local cmds="open get set mv cp rm ls diff doctor gen import check load run status audit env export clear restart backup restore completion version"
+    COMPREPLY=( $(compgen -W "${cmds}" -- ${cur}) )
+}
+complete -F _sec_completions sec
+`)
+	case "fish":
+		fmt.Print(`# fish completion for sec
+complete -c sec -n "__fish_use_subcommand" -a "open get set mv cp rm ls diff doctor gen import check load run status audit env export clear restart backup restore completion version"
+`)
+	default:
+		fmt.Fprintf(os.Stderr, "Usage: sec completion <zsh|bash|fish>\n")
+		os.Exit(1)
+	}
 }
 
 func runDaemon(profile string) {

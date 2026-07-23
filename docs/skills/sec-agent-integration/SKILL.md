@@ -97,6 +97,10 @@ sec cp <src-path> <dst-path> [--prefix]
 
 # Bulk import secrets from JSON, Doppler, or AWS Secrets Manager payloads
 sec import <file.json> [--format doppler|aws|json] [--prefix <prefix>]
+
+# Pre-flight validation of required vault keys or template file before CI/CD runs
+sec check --template .env.example
+sec check --required VCO_URL,VCO_TOKEN
 ```
 
 ### 2.6. Storing Secrets & Custom Environment Aliases
@@ -109,6 +113,9 @@ sec set <path> "<value>" [--env-alias BGP_INBOUND_PASSWORD] [--comment "<descrip
 ```bash
 # Get raw plaintext secret value
 sec get <path> [--profile <profile>]
+
+# Get raw secret string without newline or stderr warnings for clean shell assignment
+val=$(sec get <path> -r)
 
 # Output JSON structure with metadata and timestamps
 sec get <path> --json [--profile <profile>]
@@ -126,8 +133,8 @@ sec migrate-local <dotenv-file> --prefix <prefix> --profile <profile-name>
 # Export active store to a KeePassXC encrypted .kdbx file
 sec backup <backup-name>.kdbx
 
-# Restore secrets from a KeePassXC .kdbx file
-sec restore <backup-name>.kdbx
+# Restore secrets from a KeePassXC .kdbx file (non-destructive merge)
+sec restore <backup-name>.kdbx --merge
 
 # Export sanitized .env.example template for repository onboarding
 sec export --format template [--prefix <prefix>]
@@ -137,7 +144,7 @@ sec export --format doppler
 sec export --format aws
 ```
 
-### 2.10. Workspace Configuration (`.secrc`) & Auto-Open Helper
+### 2.10. Workspace Configuration (`.secrc`), Auto-Open & Shell Completions
 *   **Workspace `.secrc`**: Place a `.secrc` or `.sec.json` in your repository root to configure project defaults:
     ```json
     {
@@ -147,9 +154,14 @@ sec export --format aws
     }
     ```
 *   **Auto-Open**: Pass `--auto-open` or set `export SEC_AUTO_OPEN=1` to automatically trigger Touch ID unlock inline if the session is locked.
+*   **Shell Completions**: Generate tab completions: `sec completion zsh > ~/.zsh/completion/_sec`
 
-### 2.11. Session Locking
+### 2.11. Session Restart & Locking
 ```bash
+# Restart daemon, apply binary updates, and re-authenticate in one step
+eval $(sec restart)
+
+# Lock session and flush keys from memory
 sec lock
 ```
 *   Instantly locks the database and flushes all master keys from system memory.

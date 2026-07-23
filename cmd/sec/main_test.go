@@ -294,6 +294,28 @@ func TestMainIntegration(t *testing.T) {
 		t.Fatalf("sec export --format template failed: %v, output: %s", err, string(tmplOut))
 	}
 
+	// 6p. Test 'sec check', 'sec get -r', and 'sec completion'
+	checkCmd := exec.Command("./sec_test_bin", "check", "--required", "CUSTOM_BGP_ENV", "--profile", profile)
+	checkCmd.Env = testEnv
+	checkOut, err := checkCmd.Output()
+	if err != nil || !strings.Contains(string(checkOut), "Success: All 1 required keys/aliases present") {
+		t.Fatalf("sec check failed: %v, output: %s", err, string(checkOut))
+	}
+
+	rawGetCmd := exec.Command("./sec_test_bin", "get", "aliased/key", "-r", "--profile", profile)
+	rawGetCmd.Env = testEnv
+	rawOut, err := rawGetCmd.Output()
+	if err != nil || string(rawOut) != "secret-value" {
+		t.Fatalf("sec get -r failed: %v, expected 'secret-value', got %q", err, string(rawOut))
+	}
+
+	compCmd := exec.Command("./sec_test_bin", "completion", "zsh")
+	compCmd.Env = testEnv
+	compOut, err := compCmd.Output()
+	if err != nil || !strings.Contains(string(compOut), "#compdef sec") {
+		t.Fatalf("sec completion zsh failed: %v, output: %s", err, string(compOut))
+	}
+
 	rmPrefixCmd := exec.Command("./sec_test_bin", "rm", "provider-v2", "--prefix", "--profile", profile)
 	rmPrefixCmd.Env = testEnv
 	if err := rmPrefixCmd.Run(); err != nil {
