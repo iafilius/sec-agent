@@ -273,6 +273,27 @@ func TestMainIntegration(t *testing.T) {
 		t.Fatalf("sec rm single key failed: %v", err)
 	}
 
+	// 6o. Test '--env-alias' and 'sec export --format template'
+	aliasSetCmd := exec.Command("./sec_test_bin", "set", "aliased/key", "secret-value", "--env-alias", "CUSTOM_BGP_ENV", "--profile", profile)
+	aliasSetCmd.Env = testEnv
+	if err := aliasSetCmd.Run(); err != nil {
+		t.Fatalf("sec set --env-alias failed: %v", err)
+	}
+
+	envAliasCmd := exec.Command("./sec_test_bin", "env", "aliased", "--profile", profile)
+	envAliasCmd.Env = testEnv
+	aliasOut, err := envAliasCmd.Output()
+	if err != nil || !strings.Contains(string(aliasOut), "CUSTOM_BGP_ENV=") {
+		t.Fatalf("sec env with --env-alias failed: %v, output: %s", err, string(aliasOut))
+	}
+
+	tmplCmd := exec.Command("./sec_test_bin", "export", "--format", "template", "--profile", profile)
+	tmplCmd.Env = testEnv
+	tmplOut, err := tmplCmd.Output()
+	if err != nil || !strings.Contains(string(tmplOut), "<migrated_to_sec>") {
+		t.Fatalf("sec export --format template failed: %v, output: %s", err, string(tmplOut))
+	}
+
 	rmPrefixCmd := exec.Command("./sec_test_bin", "rm", "provider-v2", "--prefix", "--profile", profile)
 	rmPrefixCmd.Env = testEnv
 	if err := rmPrefixCmd.Run(); err != nil {
