@@ -530,6 +530,10 @@ When prompting AI coding assistants (such as Antigravity, GitHub Copilot, or Cur
    ```bash
    git push origin --force --all --tags
    ```
+   > [!IMPORTANT]
+   > **Branch Protection & Admin Rights**: Force-pushing rewritten Git history requires **Repository Admin privileges**. If branch protection rules are enabled on `main`/`master` (e.g. GitHub/GitLab "Block force pushes"), an admin must temporarily toggle off branch protection in *Repository Settings -> Branches* before executing `git push --force`.
+   >
+   > **Always Rotate Secrets**: Force-pushing removes commits from the remote repository, but existing local clones or forks may still hold old commit objects. **Rotating the secrets remains mandatory.**
 
 ---
 

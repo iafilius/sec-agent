@@ -218,6 +218,7 @@ sec status --all
     > git filter-repo --path .env --invert-paths --force
     > git push origin --force --all --tags
     > ```
+    > *Note: Force-pushing rewritten history requires **Repository Admin privileges** to temporarily bypass branch protection rules on `main`/`master`. Always rotate exposed credentials immediately regardless.*
 
 ### 2.17. Project Vault Governance Best Practices
 *   **One Profile Per Environment**: Always scope vaults per environment (`--profile <project>-dev`, `--profile <project>-prod`).
