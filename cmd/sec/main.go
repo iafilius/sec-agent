@@ -30,7 +30,7 @@ import (
 
 var jsonErrors bool
 var (
-	Version   = "v1.0.0"
+	Version   = "v1.2.0"
 	BuildDate = "unknown"
 )
 

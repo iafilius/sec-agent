@@ -1,5 +1,6 @@
+VERSION := v1.2.0
 BUILD_DATE := $(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
-LDFLAGS := -ldflags "-X main.BuildDate=$(BUILD_DATE)"
+LDFLAGS := -ldflags "-X main.Version=$(VERSION) -X main.BuildDate=$(BUILD_DATE)"
 
 .PHONY: all build clean test codesign verify-sip sec-check sync
 
