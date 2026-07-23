@@ -321,19 +321,37 @@ To configure and route commands to a specific profile, you can either pass the `
     If no flag is passed and `SEC_PROFILE` is not set, the tool falls back to the default profile (`default`) using `secrets.enc` and `sec.sock`.
 
 ### 3.8. Process Environment Wrapper (`sec run`)
-To avoid writing credentials to files on disk, `sec run` launches any shell process (tests, deployment wrappers, or compilation scripts) with all decrypted session secrets injected directly as uppercase environment variables in process memory.
+To avoid writing credentials to files on disk, `sec run` launches any shell process (tests, deployment wrappers, or compilation scripts) with decrypted session secrets injected directly as uppercase environment variables in child process memory.
 
-Paths like `database/prod/password` are automatically sanitized and converted to `DATABASE_PROD_PASSWORD`.
+#### 1. Which File Secrets Are Read From:
+Secrets are NOT read from plaintext files on disk. Instead, all credentials are read from the active session daemon memory, which loads the encrypted vault database:
+*   **Default Profile Store**: `~/.config/sec/secrets.enc`
+*   **Named Profile Store**: `~/.config/sec/profiles/<profile_name>/secrets.enc`
+*   **Decryption Master Key**: Hardware-sealed in the **macOS Secure Enclave** via the macOS Keychain (`SecAccessControl`).
+
+#### 2. Key Selection Algorithm (Which Keys are Injected):
+`sec run` selects which keys to load using the following resolution hierarchy:
+1.  **Group Prefix (`--group <prefix>`)**: If `--group <prefix>` is passed, `sec run` fetches only secrets matching `<prefix>/*`. The prefix is trimmed off for cleaner variable names (e.g. `velocloud-provider/vco_token` $\rightarrow$ `VCO_TOKEN`).
+2.  **Workspace File (`.secrc`)**: If a `.secrc` or `.sec.json` file is present in the repository root, `sec run` automatically applies the configured `profile` and `prefix`.
+3.  **All Vault Secrets**: If no `--group` or `.secrc` is specified, `sec run` fetches **all active, non-expired keys** in the profile vault.
+
+#### 3. Path-to-Environment-Variable Name Conversion:
+*   If a secret entry contains a custom **`env_alias`** metadata field (e.g., `env_alias = "VCO_TOKEN"`), that alias is used verbatim as the environment variable name.
+*   Otherwise, the secret path string is sanitized: converted to uppercase, slashes (`/`) and hyphens (`-`) are replaced with underscores (`_`), and non-alphanumeric characters are stripped (e.g. `database/prod/password` $\rightarrow$ `DATABASE_PROD_PASSWORD`).
+
+#### 4. Real-Time Stream Log Redaction (Default-On):
+*   By default, `sec run` intercepts child `stdout` and `stderr` streams in real time and replaces any occurrences of active vault secret strings with `[REDACTED_BY_SEC]`.
+*   Pass `--no-redact` if raw output is required for debugging.
 
 #### Usage:
 ```bash
-sec run [--profile <name>] -- <command> [args...]
+sec run [--profile <name>] [--group <prefix>] [--no-redact] -- <command> [args...]
 ```
 
 #### Example:
 ```bash
-sec run --profile velocloud-provider -- go test -v ./...
-# Executes test process with VCO_URL and VCO_TOKEN variables available
+sec run --profile velocloud-provider --group orchestrator -- go test -v ./...
+# Executes test process with VCO_URL and VCO_TOKEN environment variables injected in memory and auto-redacted in logs
 ```
 
 ### 3.9. Shell Environment Exporter (`sec env`)
