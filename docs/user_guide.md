@@ -401,6 +401,32 @@ To allow AI coding agents to interact with `sec` cleanly and diagnose failures p
 
 ---
 
+### 3.13. Environment Isolation & Safety Guards (v1.4.0)
+To prevent running development tools against production orchestrators or cloud accounts, `sec` supports profile environment tagging and execution guards:
+
+#### Profile Environment Tagging (`sec profile set-env`)
+Bind an explicit environment tier (`dev`, `dta`/`staging`, `prod`) to a vault profile:
+```bash
+sec profile set-env prod --profile velocloud-provider-prod
+sec profile set-env dev --profile velocloud-provider-dev
+```
+
+#### Terminal Visual Color Badges
+Commands executed against tagged profiles render color-coded headers:
+- `dev`: `🟢 [ENV: DEV]` (Green header)
+- `dta` / `staging`: `🟡 [ENV: STAGING]` (Yellow header)
+- `prod`: `🔴 [ENV: PROD - CAUTION!]` (Red header)
+
+#### Production Confirmation Guard (`--confirm-prod`)
+When running `sec run` or `sec get` against a profile tagged as `prod`:
+- **Interactive Mode**: Prompts for physical Touch ID or explicit confirmation before executing commands.
+- **Non-Interactive / CI Mode**: Requires passing `--confirm-prod` flag:
+  ```bash
+  sec run --confirm-prod --profile velocloud-provider-prod -- terraform apply
+  ```
+
+---
+
 ## 4. Troubleshooting & Verification
 
 ### Verifying Hardened Runtime
