@@ -53,7 +53,16 @@ eval $(sec load my-project/terraform/acceptance)
 sec get my-project/terraform/acceptance/ --prefix [--json]
 ```
 
-### 2.3. Storing Secrets
+### 2.3. Renaming & Refactoring Secret Namespaces
+```bash
+# Rename a single secret path (preserves comments, metadata, and creation dates)
+sec mv old-path/db-pass new-path/db-pass
+
+# Refactor an entire prefix hierarchy in a single atomic transaction
+sec mv legacy-project/ new-project/ --prefix
+```
+
+### 2.4. Storing Secrets
 ```bash
 sec set <path> "<value>" [--comment "<description>"] [--meta owner=devops] [--profile <profile>]
 ```

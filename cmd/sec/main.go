@@ -265,6 +265,12 @@ func main() {
 			os.Exit(1)
 		}
 		handleSet(profile, os.Args[2], os.Args[3], os.Args[4:])
+	case "mv", "rename":
+		if len(os.Args) < 4 {
+			fmt.Fprintln(os.Stderr, "Usage: sec mv <old-path> <new-path> [--prefix]")
+			os.Exit(1)
+		}
+		handleRename(profile, os.Args[2], os.Args[3], os.Args[4:])
 	case "load":
 		handleLoad(profile, os.Args[2:])
 	case "run":
@@ -322,6 +328,7 @@ func printUsage() {
 	fmt.Println("  open [--ttl <duration>] [--grace <duration>] Initialize/unlock the secrets session using Touch ID")
 	fmt.Println("  get <path> [--prefix] [--json | --comment | --meta <key>] Retrieve a secret or group of secrets")
 	fmt.Println("  set <path> <val> [--comment <comment>] [--meta key=value ...] Store a secret")
+	fmt.Println("  mv <old> <new> [--prefix]       Rename a secret key path or prefix namespace (alias: rename)")
 	fmt.Println("  load [<prefix>] [--format env|json] Batch-load scoped group secrets for shell sourcing")
 	fmt.Println("  run [--group <prefix>] [-- <command> [args...]] Execute a command with scoped secrets injected")
 	fmt.Println("  env [<prefix>]                   Output shell exports for secrets under prefix")
@@ -669,6 +676,31 @@ func handleSet(profile string, path, value string, args []string) {
 	}
 
 	fmt.Println("Secret saved successfully.")
+}
+
+func handleRename(profile string, oldPath, newPath string, args []string) {
+	isPrefix := false
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--prefix" {
+			isPrefix = true
+		}
+	}
+
+	resp, err := queryDaemon(profile, daemon.IPCRequest{
+		Action:   "rename",
+		Path:     oldPath,
+		NewPath:  newPath,
+		IsPrefix: isPrefix,
+	})
+	if err != nil {
+		fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running. Please run 'sec open' to unlock the session."), "Run 'eval $(sec open)' to start/unlock the session.")
+	}
+	if !resp.Success {
+		code, rem := mapDaemonError(resp.Error)
+		fail(code, fmt.Errorf("%s", resp.Error), rem)
+	}
+
+	fmt.Println(resp.Value)
 }
 
 func handleLoad(profile string, args []string) {

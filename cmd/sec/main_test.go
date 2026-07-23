@@ -166,6 +166,32 @@ func TestMainIntegration(t *testing.T) {
 		t.Errorf("sec get --prefix output mismatch. Got:\n%s", getGroupStr)
 	}
 
+	// 6e. Test single secret rename ('sec mv')
+	mvSingleCmd := exec.Command("./sec_test_bin", "mv", "other-category/test-key", "new-category/renamed-key", "--profile", profile)
+	mvSingleCmd.Env = testEnv
+	if err := mvSingleCmd.Run(); err != nil {
+		t.Fatalf("sec mv single key failed: %v", err)
+	}
+	getRenamedCmd := exec.Command("./sec_test_bin", "get", "new-category/renamed-key", "--profile", profile)
+	getRenamedCmd.Env = testEnv
+	renamedOut, err := getRenamedCmd.Output()
+	if err != nil || strings.TrimSpace(string(renamedOut)) != "some-value" {
+		t.Fatalf("sec get renamed key failed: %v, got %q", err, string(renamedOut))
+	}
+
+	// 6f. Test prefix namespace refactoring ('sec mv --prefix')
+	mvPrefixCmd := exec.Command("./sec_test_bin", "mv", "velocloud-provider", "provider-v2", "--prefix", "--profile", profile)
+	mvPrefixCmd.Env = testEnv
+	if err := mvPrefixCmd.Run(); err != nil {
+		t.Fatalf("sec mv --prefix failed: %v", err)
+	}
+	getV2Cmd := exec.Command("./sec_test_bin", "get", "provider-v2/vco-url", "--profile", profile)
+	getV2Cmd.Env = testEnv
+	v2Out, err := getV2Cmd.Output()
+	if err != nil || strings.TrimSpace(string(v2Out)) != "https://vco.example.com" {
+		t.Fatalf("sec get provider-v2 key failed: %v, got %q", err, string(v2Out))
+	}
+
 	// 7. Test 4: Verify exit code propagation
 	exitCmd := exec.Command("./sec_test_bin", "run", "--profile", profile, "--", "sh", "-c", "exit 42")
 	exitCmd.Env = testEnv

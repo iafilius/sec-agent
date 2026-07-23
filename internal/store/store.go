@@ -273,3 +273,55 @@ func (es *EncryptedStore) GetGroup(prefix string) map[string]SecretEntry {
 	return result
 }
 
+// RenameSecret renames a secret key path in the store.
+func (es *EncryptedStore) RenameSecret(oldPath, newPath string) error {
+	if es == nil || es.Secrets == nil {
+		return fmt.Errorf("store is uninitialized")
+	}
+	oldPath = strings.TrimSpace(oldPath)
+	newPath = strings.TrimSpace(newPath)
+	if oldPath == "" || newPath == "" {
+		return fmt.Errorf("old and new paths cannot be empty")
+	}
+	entry, exists := es.Secrets[oldPath]
+	if !exists {
+		return fmt.Errorf("secret %q not found", oldPath)
+	}
+	entry.LastModified = time.Now()
+	es.Secrets[newPath] = entry
+	delete(es.Secrets, oldPath)
+	return nil
+}
+
+// RenamePrefix renames all secret paths matching oldPrefix to start with newPrefix.
+// Returns the count of renamed secrets.
+func (es *EncryptedStore) RenamePrefix(oldPrefix, newPrefix string) (int, error) {
+	if es == nil || es.Secrets == nil {
+		return 0, fmt.Errorf("store is uninitialized")
+	}
+	oldPrefix = strings.TrimSpace(oldPrefix)
+	newPrefix = strings.TrimSpace(newPrefix)
+	if oldPrefix == "" || newPrefix == "" {
+		return 0, fmt.Errorf("old and new prefixes cannot be empty")
+	}
+
+	count := 0
+	toRename := make(map[string]SecretEntry)
+	for k, v := range es.Secrets {
+		if strings.HasPrefix(k, oldPrefix) {
+			toRename[k] = v
+		}
+	}
+
+	for k, v := range toRename {
+		rel := strings.TrimPrefix(k, oldPrefix)
+		newKey := newPrefix + rel
+		v.LastModified = time.Now()
+		es.Secrets[newKey] = v
+		delete(es.Secrets, k)
+		count++
+	}
+
+	return count, nil
+}
+

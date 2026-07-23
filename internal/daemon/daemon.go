@@ -30,6 +30,8 @@ type IPCRequest struct {
 	Grace       string                         `json:"grace,omitempty"`
 	Secrets     map[string]store.SecretEntry   `json:"secrets,omitempty"`
 	Key         []byte                         `json:"key,omitempty"`
+	NewPath     string                         `json:"new_path,omitempty"`
+	IsPrefix    bool                           `json:"is_prefix,omitempty"`
 	Expires     string                         `json:"expires,omitempty"`      // RFC3339 formatted expiration time
 	ShowExpired bool                           `json:"show_expired,omitempty"` // Override to show expired secrets
 	Token       string                         `json:"token,omitempty"`        // Shell session token
@@ -450,6 +452,48 @@ func (d *Daemon) handleConnection(c net.Conn) {
 		}
 		d.lastUsed = time.Now()
 		d.sendResponse(c, IPCResponse{Success: true})
+
+	case "rename":
+		if d.masterKey == nil {
+			d.sendError(c, "Session locked. Please unlock first.")
+			return
+		}
+		oldPath := req.Path
+		newPath := req.NewPath
+		if newPath == "" {
+			newPath = req.Value
+		}
+		if req.IsPrefix {
+			count, err := d.secretsStore.RenamePrefix(oldPath, newPath)
+			if err != nil {
+				d.sendError(c, fmt.Sprintf("failed to rename prefix: %v", err))
+				return
+			}
+			if err := store.SaveStore(d.profile, d.secretsStore, d.masterKey); err != nil {
+				d.sendError(c, fmt.Sprintf("failed to persist store: %v", err))
+				return
+			}
+			d.lastUsed = time.Now()
+			d.sendResponse(c, IPCResponse{
+				Success: true,
+				Value:   fmt.Sprintf("Renamed %d secrets under prefix %q to %q", count, oldPath, newPath),
+			})
+		} else {
+			err := d.secretsStore.RenameSecret(oldPath, newPath)
+			if err != nil {
+				d.sendError(c, fmt.Sprintf("failed to rename secret: %v", err))
+				return
+			}
+			if err := store.SaveStore(d.profile, d.secretsStore, d.masterKey); err != nil {
+				d.sendError(c, fmt.Sprintf("failed to persist store: %v", err))
+				return
+			}
+			d.lastUsed = time.Now()
+			d.sendResponse(c, IPCResponse{
+				Success: true,
+				Value:   fmt.Sprintf("Renamed secret %q to %q", oldPath, newPath),
+			})
+		}
 
 	case "clear":
 		d.wipeMemory()

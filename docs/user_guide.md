@@ -140,6 +140,22 @@ For project environments organized by hierarchy (e.g. `project/terraform/accepta
     sec get project/terraform/acceptance/ --prefix [--json]
     ```
 
+### 3.3.2. Secret Path Renaming & Namespace Refactoring (`sec mv` / `sec rename`)
+Redesign your secret taxonomy without reading, deleting, and re-creating paths manually:
+
+*   **Single Secret Move**:
+    ```bash
+    sec mv old-path/db-pass new-path/db-pass
+    # Renamed secret "old-path/db-pass" to "new-path/db-pass"
+    ```
+    *Preserves original secret values, comments, custom metadata, and creation timestamps.*
+
+*   **Prefix Group Refactoring**:
+    ```bash
+    sec mv legacy-project/ terraform/dev/ --prefix
+    # Renamed 5 secrets under prefix "legacy-project/" to "terraform/dev/"
+    ```
+
 ### 3.4. Expiration Policy & Recovery (`--show-expired`)
 When a secret reaches its expiration timestamp:
 - Normal queries (e.g. `sec get database/test/key`) will block, outputting `Error: Secret has expired` and returning exit code `1`.
