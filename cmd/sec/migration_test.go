@@ -139,6 +139,18 @@ EMPTY_VAL=
 		t.Errorf("stored secret value mismatch, got %q", string(getOut))
 	}
 
+	// Verify migrated secrets can be batch-loaded back into original env vars using 'sec load'
+	loadMigratedCmd := exec.Command("./sec_migration_test_bin2", "load", "app-secrets", "--profile", profile)
+	loadMigratedCmd.Env = append(os.Environ(), "SEC_SESSION_TOKEN=test-migration-token")
+	loadMigratedOut, err := loadMigratedCmd.Output()
+	if err != nil {
+		t.Fatalf("sec load for migrated secrets failed: %v", err)
+	}
+	loadMigratedStr := string(loadMigratedOut)
+	if !strings.Contains(loadMigratedStr, "export DB_PASSWORD=\"my-super-secret-password-123\"") || !strings.Contains(loadMigratedStr, "export STRIPE_KEY=\"sk_live_stripe_secret_key\"") {
+		t.Errorf("migrated secrets load roundtrip mismatch. Got:\n%s", loadMigratedStr)
+	}
+
 	// Test export --format doppler
 	dopplerCmd := exec.Command("./sec_migration_test_bin2", "export", "--format", "doppler", "--profile", profile)
 	dopplerCmd.Env = append(os.Environ(), "SEC_SESSION_TOKEN=test-migration-token")
