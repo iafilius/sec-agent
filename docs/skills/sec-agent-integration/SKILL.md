@@ -60,6 +60,8 @@ sec mv old-path/db-pass new-path/db-pass
 
 # Refactor an entire prefix hierarchy in a single atomic transaction
 sec mv legacy-project/ new-project/ --prefix
+```
+
 ### 2.4. Path Listing, Deletion, Diagnostics & Security Audits
 ```bash
 # List secret paths without exposing raw values
@@ -80,7 +82,7 @@ sec audit [--limit 50] [--json]
 sec set <path> "<value>" [--comment "<description>"] [--meta owner=devops] [--profile <profile>]
 ```
 
-### 2.3. Retrieving Secrets
+### 2.6. Retrieving Secrets
 ```bash
 # Get raw plaintext secret value
 sec get <path> [--profile <profile>]
@@ -89,14 +91,14 @@ sec get <path> [--profile <profile>]
 sec get <path> --json [--profile <profile>]
 ```
 
-### 2.4. Onboarding Plaintext Env Files
+### 2.7. Onboarding Plaintext Env Files
 If a plaintext `.env` file containing credentials exists in the workspace, migrate it to eliminate disk exposure:
 ```bash
 sec migrate-local <dotenv-file> --prefix <prefix> --profile <profile-name>
 ```
 *   This securely imports all keys into the enclave store and replaces raw values inside the `.env` file with safe `"<migrated_to_sec>"` placeholders.
 
-### 2.5. Portable Backups & Vault Exports
+### 2.8. Portable Backups & Vault Exports
 ```bash
 # Export active store to a KeePassXC encrypted .kdbx file
 sec backup <backup-name>.kdbx
@@ -111,7 +113,7 @@ sec export --format doppler
 sec export --format aws
 ```
 
-### 2.6. Session Locking
+### 2.9. Session Locking
 ```bash
 sec lock
 ```
