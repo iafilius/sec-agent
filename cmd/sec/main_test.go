@@ -337,6 +337,40 @@ func TestMainIntegration(t *testing.T) {
 		t.Fatalf("sec run --confirm-prod on prod profile failed: %v", err)
 	}
 
+	// 6r. Test v1.5.0 features: JWT auto-exp, stream redactor, profile diffing, and leases
+	// Set secret with dummy JWT payload (header.payload.sig) where payload={"exp":1800000000}
+	dummyJwt := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE4MDAwMDAwMDB9.sig"
+	jwtSetCmd := exec.Command("./sec_test_bin", "set", "jwt/token", dummyJwt, "--profile", profile)
+	jwtSetCmd.Env = testEnv
+	jwtOut, err := jwtSetCmd.Output()
+	if err != nil || !strings.Contains(string(jwtOut), "Automatically detected JWT token") {
+		t.Fatalf("sec set with JWT auto expiration failed: %v, out: %s", err, string(jwtOut))
+	}
+
+	// Test stream redaction (sec run --redact)
+	redactRunCmd := exec.Command("./sec_test_bin", "run", "--confirm-prod", "--redact", "--profile", profile, "--", "sh", "-c", "echo secret-value")
+	redactRunCmd.Env = testEnv
+	redactOut, err := redactRunCmd.Output()
+	if err != nil || !strings.Contains(string(redactOut), "[REDACTED_BY_SEC]") {
+		t.Fatalf("sec run --redact failed to redact secret: %v, out: %s", err, string(redactOut))
+	}
+
+	// Test sec lease
+	leaseCmd := exec.Command("./sec_test_bin", "lease", "aliased/key", "--ttl", "1m", "--profile", profile)
+	leaseCmd.Env = testEnv
+	leaseOut, err := leaseCmd.Output()
+	if err != nil || !strings.Contains(string(leaseOut), "lease:aliased/key:") {
+		t.Fatalf("sec lease failed: %v, output: %s", err, string(leaseOut))
+	}
+
+	// Test sec diff-profiles
+	diffProfCmd := exec.Command("./sec_test_bin", "diff-profiles", profile, profile)
+	diffProfCmd.Env = testEnv
+	diffProfOut, err := diffProfCmd.Output()
+	if err != nil || !strings.Contains(string(diffProfOut), "[MATCH]") {
+		t.Fatalf("sec diff-profiles failed: %v, output: %s", err, string(diffProfOut))
+	}
+
 	// Reset profile env to dev for remaining tests
 	resetProfCmd := exec.Command("./sec_test_bin", "profile", "set-env", "dev", "--profile", profile)
 	resetProfCmd.Env = testEnv

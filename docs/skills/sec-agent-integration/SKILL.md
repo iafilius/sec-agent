@@ -166,7 +166,23 @@ sec run --confirm-prod --profile velocloud-provider-prod -- terraform apply
 ```
 *   Displays visual terminal badges (`🟢 [ENV: DEV]`, `🟡 [ENV: STAGING]`, `🔴 [ENV: PROD - CAUTION!]`).
 
-### 2.12. Session Restart & Locking
+### 2.12. Time-Bound Secret Leases (`sec lease`)
+```bash
+# Grant a 15-minute temporary lease token for an AI subagent or background task
+lease_token=$(sec lease velocloud-provider-dev/vco_token --ttl 15m)
+```
+*   **Why Use Leases**: Delegate temporary credential access to autonomous AI subagents or background test scripts with **zero credential lingering**. The lease token self-destructs automatically after the specified TTL expires.
+
+### 2.13. Cross-Profile Matrix Diffing (`sec diff-profiles`) & Stream Redactor (`sec run --redact`)
+```bash
+# Compare structural key alignment between dev and prod profiles
+sec diff-profiles velocloud-provider-dev velocloud-provider-prod
+
+# Execute command with real-time secret stream redaction
+sec run --redact -- make testacc
+```
+
+### 2.14. Session Restart & Locking
 ```bash
 # Restart daemon, apply binary updates, and re-authenticate in one step
 eval $(sec restart)

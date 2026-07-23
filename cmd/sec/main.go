@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -30,7 +32,7 @@ import (
 
 var jsonErrors bool
 var (
-	Version   = "v1.4.0"
+	Version   = "v1.5.0"
 	BuildDate = "unknown"
 )
 
@@ -325,6 +327,18 @@ func main() {
 		handleCopy(profile, os.Args[2], os.Args[3], os.Args[4:])
 	case "diff":
 		handleDiff(profile, os.Args[2:])
+	case "diff-profiles":
+		if len(os.Args) < 4 {
+			fmt.Fprintln(os.Stderr, "Usage: sec diff-profiles <profile1> <profile2> [--prefix <prefix>]")
+			os.Exit(1)
+		}
+		handleDiffProfiles(os.Args[2], os.Args[3], os.Args[4:])
+	case "lease":
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "Usage: sec lease <path> [--ttl <duration>]")
+			os.Exit(1)
+		}
+		handleLease(profile, os.Args[2], os.Args[3:])
 	case "doctor":
 		handleDoctor(profile)
 	case "gen", "generate":
@@ -430,6 +444,8 @@ func printUsage() {
 	fmt.Println("  rm <path> [--prefix]            Delete a secret or prefix group (alias: delete)")
 	fmt.Println("  ls [<prefix>] [--json]          List secret paths without exposing values (alias: list)")
 	fmt.Println("  diff [--other-profile <p>] [<file>] Compare secret paths against another profile or .env file")
+	fmt.Println("  diff-profiles <p1> <p2>         Side-by-side key matrix comparison between two profiles")
+	fmt.Println("  lease <path> [--ttl <duration>] Issue self-destructing temporary lease token for subagents")
 	fmt.Println("  doctor                          Run workstation system & security diagnostic checks")
 	fmt.Println("  gen <path> [--length N]         Generate random password and save to path (alias: generate)")
 	fmt.Println("  import <file> [--format <f>]    Bulk import secrets from JSON, Doppler, or AWS payloads")
@@ -739,6 +755,54 @@ func handleGet(profile string, path string, args []string) {
 	}
 }
 
+func parseJwtExp(val string) (time.Time, bool) {
+	val = strings.TrimSpace(val)
+	if !strings.HasPrefix(val, "eyJ") {
+		return time.Time{}, false
+	}
+	parts := strings.Split(val, ".")
+	if len(parts) != 3 {
+		return time.Time{}, false
+	}
+	payloadSegment := parts[1]
+	switch len(payloadSegment) % 4 {
+	case 2:
+		payloadSegment += "=="
+	case 3:
+		payloadSegment += "="
+	}
+	data, err := base64.URLEncoding.DecodeString(payloadSegment)
+	if err != nil {
+		data, err = base64.StdEncoding.DecodeString(payloadSegment)
+		if err != nil {
+			return time.Time{}, false
+		}
+	}
+	var claims map[string]interface{}
+	if err := json.Unmarshal(data, &claims); err != nil {
+		return time.Time{}, false
+	}
+	expVal, ok := claims["exp"]
+	if !ok {
+		return time.Time{}, false
+	}
+	var expUnix int64
+	switch v := expVal.(type) {
+	case float64:
+		expUnix = int64(v)
+	case int64:
+		expUnix = v
+	case string:
+		if parsed, err := strconv.ParseInt(v, 10, 64); err == nil {
+			expUnix = parsed
+		}
+	}
+	if expUnix > 0 {
+		return time.Unix(expUnix, 0), true
+	}
+	return time.Time{}, false
+}
+
 func handleSet(profile string, path, value string, args []string) {
 	comment := ""
 	metadata := make(map[string]string)
@@ -793,6 +857,9 @@ func handleSet(profile string, path, value string, args []string) {
 			fail("INVALID_ARGUMENT", err, "Verify option parameters (e.g. format for durations: 30d, 12h)")
 		}
 		expiresTimeStr = t.Format(time.RFC3339)
+	} else if jwtExp, ok := parseJwtExp(value); ok {
+		expiresTimeStr = jwtExp.Format(time.RFC3339)
+		fmt.Printf("[INFO] Automatically detected JWT token with expiration date: %s\n", jwtExp.Format("2006-01-02 15:04:05 MST"))
 	}
 
 	resp, err := queryDaemon(profile, daemon.IPCRequest{
@@ -947,6 +1014,130 @@ func handleDiff(profile string, args []string) {
 	if len(onlyInA) == 0 && len(onlyInB) == 0 {
 		fmt.Println("\nResult: Both targets have identical secret key paths!")
 	}
+}
+
+func handleDiffProfiles(p1, p2 string, args []string) {
+	prefix := ""
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--prefix" && i+1 < len(args) {
+			prefix = args[i+1]
+			i++
+		}
+	}
+
+	resp1, err1 := queryDaemon(p1, daemon.IPCRequest{Action: "backup"})
+	if err1 != nil || !resp1.Success {
+		fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running or locked for profile %q.", p1), "Run 'eval $(sec open)' to unlock.")
+	}
+
+	resp2, err2 := queryDaemon(p2, daemon.IPCRequest{Action: "backup"})
+	if err2 != nil || !resp2.Success {
+		fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running or locked for profile %q.", p2), "Run 'eval $(sec open --profile "+p2+")' to unlock.")
+	}
+
+	map1 := make(map[string]string)
+	for path, entry := range resp1.Secrets {
+		if prefix != "" && !strings.HasPrefix(path, prefix) {
+			continue
+		}
+		envKey := pathToEnvKeyWithEntry(path, entry)
+		map1[envKey] = path
+		map1[path] = path
+	}
+
+	map2 := make(map[string]string)
+	for path, entry := range resp2.Secrets {
+		if prefix != "" && !strings.HasPrefix(path, prefix) {
+			continue
+		}
+		envKey := pathToEnvKeyWithEntry(path, entry)
+		map2[envKey] = path
+		map2[path] = path
+	}
+
+	allKeysSet := make(map[string]bool)
+	for k := range map1 {
+		allKeysSet[k] = true
+	}
+	for k := range map2 {
+		allKeysSet[k] = true
+	}
+
+	var allKeys []string
+	for k := range allKeysSet {
+		if !strings.HasPrefix(k, "__") {
+			allKeys = append(allKeys, k)
+		}
+	}
+	sort.Strings(allKeys)
+
+	fmt.Printf("=== Profile Structural Matrix Diff: %q vs %q ===\n", p1, p2)
+	fmt.Printf("%-32s %-16s %-16s %s\n", "KEY / ALIAS", fmt.Sprintf("[%s]", strings.ToUpper(p1)), fmt.Sprintf("[%s]", strings.ToUpper(p2)), "STATUS")
+	fmt.Println(strings.Repeat("-", 80))
+
+	for _, k := range allKeys {
+		p1Path, in1 := map1[k]
+		p2Path, in2 := map2[k]
+
+		status := "[MATCH]"
+		s1 := "Present"
+		s2 := "Present"
+
+		if in1 && !in2 {
+			status = fmt.Sprintf("[%s ONLY]", strings.ToUpper(p1))
+			s2 = "Missing"
+		} else if !in1 && in2 {
+			status = fmt.Sprintf("[%s ONLY]", strings.ToUpper(p2))
+			s1 = "Missing"
+		}
+
+		_ = p1Path
+		_ = p2Path
+		fmt.Printf("%-32s %-16s %-16s %s\n", k, s1, s2, status)
+	}
+}
+
+func handleLease(profile, secretPath string, args []string) {
+	ttlStr := "15m"
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--ttl" && i+1 < len(args) {
+			ttlStr = args[i+1]
+			i++
+		}
+	}
+
+	ttlTime, err := parseExpiration(ttlStr)
+	if err != nil {
+		fail("INVALID_ARGUMENT", err, "Duration format: e.g. 15m, 1h, 30m")
+	}
+
+	resp, err := queryDaemon(profile, daemon.IPCRequest{
+		Action: "get",
+		Path:   secretPath,
+	})
+	if err != nil || !resp.Success {
+		fail("SECRET_NOT_FOUND", fmt.Errorf("failed to fetch secret %q: %v", secretPath, err), "Check path.")
+	}
+
+	randBuf := make([]byte, 8)
+	_, _ = rand.Read(randBuf)
+	leaseID := fmt.Sprintf("lease:%s:%x", secretPath, randBuf)
+
+	expiresStr := ttlTime.Format(time.RFC3339)
+
+	setResp, err := queryDaemon(profile, daemon.IPCRequest{
+		Action:  "set",
+		Path:    leaseID,
+		Value:   resp.Value,
+		Comment: fmt.Sprintf("Temporary lease for %s (TTL: %s)", secretPath, ttlStr),
+		Expires: expiresStr,
+	})
+	if err != nil || !setResp.Success {
+		fail("LEASE_CREATION_FAILED", fmt.Errorf("failed to create lease token: %v", err), "")
+	}
+
+	fmt.Printf("[INFO] Temporary secret lease created for %q (Expires: %s)\n", secretPath, ttlTime.Format("15:04:05 MST"))
+	fmt.Println(leaseID)
 }
 
 func handleDoctor(profile string) {
@@ -1297,6 +1488,29 @@ func handleProfile(profile string, args []string) {
 	os.Exit(1)
 }
 
+func checkExpirationWarnings(secrets map[string]store.SecretEntry) {
+	now := time.Now()
+	var expiringSoon []string
+	for path, entry := range secrets {
+		if strings.HasPrefix(path, "__") {
+			continue
+		}
+		if !entry.Expires.IsZero() {
+			until := entry.Expires.Sub(now)
+			if until > 0 && until <= 7*24*time.Hour {
+				days := int(until.Hours() / 24)
+				expiringSoon = append(expiringSoon, fmt.Sprintf(" [!] %-30s -> Expires in %d day(s) (%s)", path, days, entry.Expires.Format(time.RFC3339)))
+			}
+		}
+	}
+	if len(expiringSoon) > 0 {
+		fmt.Printf("\n\033[33m⚠️  EXPIRATION WARNING: %d secret key(s) expiring soon!\033[0m\n", len(expiringSoon))
+		for _, msg := range expiringSoon {
+			fmt.Println(msg)
+		}
+	}
+}
+
 func handleStatus(profile string) {
 	resp, err := queryDaemon(profile, daemon.IPCRequest{Action: "status"})
 	if err != nil {
@@ -1327,6 +1541,12 @@ func handleStatus(profile string) {
 	fmt.Printf("Socket Path:          %v\n", info["socket_path"])
 	fmt.Printf("Database Path:        %v\n", info["store_path"])
 	fmt.Printf("Database Size:        %v bytes\n", info["store_size_bytes"])
+
+	// Expiration warning check
+	bkResp, err := queryDaemonRaw(profile, daemon.IPCRequest{Action: "backup"})
+	if err == nil && bkResp.Success {
+		checkExpirationWarnings(bkResp.Secrets)
+	}
 }
 
 func handleAudit(profile string, args []string) {
@@ -1433,8 +1653,25 @@ func handleLoad(profile string, args []string) {
 	}
 }
 
+type redactWriter struct {
+	target  io.Writer
+	secrets []string
+}
+
+func (w *redactWriter) Write(p []byte) (n int, err error) {
+	out := string(p)
+	for _, sec := range w.secrets {
+		if len(sec) > 3 {
+			out = strings.ReplaceAll(out, sec, "[REDACTED_BY_SEC]")
+		}
+	}
+	_, err = w.target.Write([]byte(out))
+	return len(p), err
+}
+
 func handleRun(profile string, args []string) {
 	groupPrefix := ""
+	shouldRedact := false
 	var cmdArgs []string
 	foundSeparator := false
 
@@ -1449,6 +1686,8 @@ func handleRun(profile string, args []string) {
 				groupPrefix = args[i+1]
 				i++
 			}
+		} else if args[i] == "--redact" {
+			shouldRedact = true
 		}
 	}
 	if !foundSeparator {
@@ -1457,11 +1696,14 @@ func handleRun(profile string, args []string) {
 				i++
 				continue
 			}
+			if args[i] == "--redact" {
+				continue
+			}
 			cmdArgs = append(cmdArgs, args[i])
 		}
 	}
 	if len(cmdArgs) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: sec run [--group <prefix>] [--profile <name>] [--confirm-prod] -- <command> [args...]")
+		fmt.Fprintln(os.Stderr, "Usage: sec run [--group <prefix>] [--profile <name>] [--confirm-prod] [--redact] -- <command> [args...]")
 		os.Exit(1)
 	}
 
@@ -1486,6 +1728,7 @@ func handleRun(profile string, args []string) {
 	}
 
 	env := os.Environ()
+	var secretVals []string
 	for path, entry := range resp.Secrets {
 		relPath := path
 		if groupPrefix != "" && strings.HasPrefix(path, groupPrefix) {
@@ -1497,14 +1740,22 @@ func handleRun(profile string, args []string) {
 		}
 		envKey := pathToEnvKeyWithEntry(relPath, entry)
 		env = append(env, fmt.Sprintf("%s=%s", envKey, entry.Value))
+		if len(entry.Value) > 3 {
+			secretVals = append(secretVals, entry.Value)
+		}
 	}
 
 	// #nosec G204 G702
 	cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
 	cmd.Env = env
 	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	if shouldRedact {
+		cmd.Stdout = &redactWriter{target: os.Stdout, secrets: secretVals}
+		cmd.Stderr = &redactWriter{target: os.Stderr, secrets: secretVals}
+	} else {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	}
 
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error starting command: %v\n", err)
@@ -1878,9 +2129,11 @@ func handleCheck(profile string, args []string) {
 
 	if missingCount > 0 {
 		fmt.Printf("\nError: %d required secret key/alias missing from profile %q.\n", missingCount, profile)
+		checkExpirationWarnings(resp.Secrets)
 		os.Exit(1)
 	}
 	fmt.Printf("\nSuccess: All %d required keys/aliases present in profile %q.\n", len(requiredKeys), profile)
+	checkExpirationWarnings(resp.Secrets)
 }
 
 func handleRestart(profile string) {
