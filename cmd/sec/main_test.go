@@ -192,6 +192,44 @@ func TestMainIntegration(t *testing.T) {
 		t.Fatalf("sec get provider-v2 key failed: %v, got %q", err, string(v2Out))
 	}
 
+	// 6g. Test 'sec ls' path listing
+	lsCmd := exec.Command("./sec_test_bin", "ls", "provider-v2", "--profile", profile)
+	lsCmd.Env = testEnv
+	lsOut, err := lsCmd.Output()
+	if err != nil || !strings.Contains(string(lsOut), "provider-v2/vco-url") {
+		t.Fatalf("sec ls failed: %v, output: %s", err, string(lsOut))
+	}
+
+	// 6h. Test 'sec status' diagnostic output
+	statusCmd := exec.Command("./sec_test_bin", "status", "--profile", profile)
+	statusCmd.Env = testEnv
+	statusOut, err := statusCmd.Output()
+	if err != nil || !strings.Contains(string(statusOut), "UNLOCKED") {
+		t.Fatalf("sec status failed: %v, output: %s", err, string(statusOut))
+	}
+
+	// 6i. Test 'sec audit' log retrieval
+	auditCmd := exec.Command("./sec_test_bin", "audit", "--profile", profile)
+	auditCmd.Env = testEnv
+	auditOut, err := auditCmd.Output()
+	if err != nil {
+		t.Fatalf("sec audit failed: %v", err)
+	}
+	t.Logf("Audit log output length: %d bytes", len(auditOut))
+
+	// 6j. Test 'sec rm' secret deletion
+	rmSingleCmd := exec.Command("./sec_test_bin", "rm", "new-category/renamed-key", "--profile", profile)
+	rmSingleCmd.Env = testEnv
+	if err := rmSingleCmd.Run(); err != nil {
+		t.Fatalf("sec rm single key failed: %v", err)
+	}
+
+	rmPrefixCmd := exec.Command("./sec_test_bin", "rm", "provider-v2", "--prefix", "--profile", profile)
+	rmPrefixCmd.Env = testEnv
+	if err := rmPrefixCmd.Run(); err != nil {
+		t.Fatalf("sec rm --prefix failed: %v", err)
+	}
+
 	// 7. Test 4: Verify exit code propagation
 	exitCmd := exec.Command("./sec_test_bin", "run", "--profile", profile, "--", "sh", "-c", "exit 42")
 	exitCmd.Env = testEnv

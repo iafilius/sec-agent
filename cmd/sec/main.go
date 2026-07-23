@@ -271,6 +271,22 @@ func main() {
 			os.Exit(1)
 		}
 		handleRename(profile, os.Args[2], os.Args[3], os.Args[4:])
+	case "ls", "list":
+		prefix := ""
+		if len(os.Args) >= 3 {
+			prefix = os.Args[2]
+		}
+		handleList(profile, prefix, os.Args)
+	case "rm", "delete":
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "Usage: sec rm <path> [--prefix]")
+			os.Exit(1)
+		}
+		handleDelete(profile, os.Args[2], os.Args[3:])
+	case "status":
+		handleStatus(profile)
+	case "audit", "log":
+		handleAudit(profile, os.Args[2:])
 	case "load":
 		handleLoad(profile, os.Args[2:])
 	case "run":
@@ -329,8 +345,12 @@ func printUsage() {
 	fmt.Println("  get <path> [--prefix] [--json | --comment | --meta <key>] Retrieve a secret or group of secrets")
 	fmt.Println("  set <path> <val> [--comment <comment>] [--meta key=value ...] Store a secret")
 	fmt.Println("  mv <old> <new> [--prefix]       Rename a secret key path or prefix namespace (alias: rename)")
+	fmt.Println("  rm <path> [--prefix]            Delete a secret or prefix group (alias: delete)")
+	fmt.Println("  ls [<prefix>] [--json]          List secret paths without exposing values (alias: list)")
 	fmt.Println("  load [<prefix>] [--format env|json] Batch-load scoped group secrets for shell sourcing")
 	fmt.Println("  run [--group <prefix>] [-- <command> [args...]] Execute a command with scoped secrets injected")
+	fmt.Println("  status                          Display session health, profile, and diagnostic metrics")
+	fmt.Println("  audit [--limit <n>] [--json]    View recent daemon security audit logs (alias: log)")
 	fmt.Println("  env [<prefix>]                   Output shell exports for secrets under prefix")
 	fmt.Println("  export [--format <json|env|aws|doppler>] Output decrypted database contents to stdout")
 	fmt.Println("  clear            Lock the active session and clear memory cache (aliases: close, lock)")
@@ -700,6 +720,149 @@ func handleRename(profile string, oldPath, newPath string, args []string) {
 		fail(code, fmt.Errorf("%s", resp.Error), rem)
 	}
 
+	fmt.Println(resp.Value)
+}
+
+func handleList(profile string, prefix string, args []string) {
+	resp, err := queryDaemon(profile, daemon.IPCRequest{
+		Action: "list",
+		Path:   prefix,
+	})
+	if err != nil {
+		fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running. Please run 'sec open' to unlock the session."), "Run 'eval $(sec open)' to start/unlock the session.")
+	}
+	if !resp.Success {
+		code, rem := mapDaemonError(resp.Error)
+		fail(code, fmt.Errorf("%s", resp.Error), rem)
+	}
+
+	showJSON := false
+	for _, arg := range args {
+		if arg == "--json" {
+			showJSON = true
+		}
+	}
+
+	if showJSON {
+		var paths []string
+		if resp.Value != "" {
+			paths = strings.Split(resp.Value, "\n")
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(paths)
+		return
+	}
+
+	if resp.Value == "" {
+		fmt.Println("No matching secret paths found.")
+		return
+	}
+	fmt.Println(resp.Value)
+}
+
+func handleDelete(profile string, path string, args []string) {
+	isPrefix := false
+	for _, arg := range args {
+		if arg == "--prefix" {
+			isPrefix = true
+		}
+	}
+
+	resp, err := queryDaemon(profile, daemon.IPCRequest{
+		Action:   "delete",
+		Path:     path,
+		IsPrefix: isPrefix,
+	})
+	if err != nil {
+		fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running. Please run 'sec open' to unlock the session."), "Run 'eval $(sec open)' to start/unlock the session.")
+	}
+	if !resp.Success {
+		code, rem := mapDaemonError(resp.Error)
+		fail(code, fmt.Errorf("%s", resp.Error), rem)
+	}
+
+	fmt.Println(resp.Value)
+}
+
+func handleStatus(profile string) {
+	resp, err := queryDaemon(profile, daemon.IPCRequest{Action: "status"})
+	if err != nil {
+		fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running. Please run 'sec open' to unlock the session."), "Run 'eval $(sec open)' to start/unlock the session.")
+	}
+	if !resp.Success {
+		code, rem := mapDaemonError(resp.Error)
+		fail(code, fmt.Errorf("%s", resp.Error), rem)
+	}
+
+	info := resp.StatusInfo
+	fmt.Println("=== sec-agent Status & Diagnostics ===")
+	fmt.Printf("Active Profile:       %v\n", info["profile"])
+	fmt.Printf("Daemon Version:       %v\n", info["version"])
+	if unlocked, _ := info["is_unlocked"].(bool); unlocked {
+		fmt.Println("Session Status:       UNLOCKED (Authorized via Touch ID)")
+	} else {
+		fmt.Println("Session Status:       LOCKED (Run 'eval $(sec open)')")
+	}
+	fmt.Printf("Stored Secrets:       %v total (%v expired)\n", info["total_secrets"], info["expired_secrets"])
+	fmt.Printf("Hard TTL Limit:       %v\n", info["session_ttl"])
+	fmt.Printf("Inactivity Grace:     %v\n", info["grace_ttl"])
+	fmt.Printf("Socket Path:          %v\n", info["socket_path"])
+	fmt.Printf("Database Path:        %v\n", info["store_path"])
+	fmt.Printf("Database Size:        %v bytes\n", info["store_size_bytes"])
+}
+
+func handleAudit(profile string, args []string) {
+	limit := 50
+	showJSON := false
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--limit" || args[i] == "-n" {
+			if i+1 < len(args) {
+				if l, err := strconv.Atoi(args[i+1]); err == nil {
+					limit = l
+					i++
+				}
+			}
+		} else if args[i] == "--json" {
+			showJSON = true
+		}
+	}
+
+	resp, err := queryDaemon(profile, daemon.IPCRequest{
+		Action: "audit",
+		Limit:  limit,
+	})
+	if err != nil {
+		fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running. Please run 'sec open' to unlock the session."), "Run 'eval $(sec open)' to start/unlock the session.")
+	}
+	if !resp.Success {
+		code, rem := mapDaemonError(resp.Error)
+		fail(code, fmt.Errorf("%s", resp.Error), rem)
+	}
+
+	if showJSON {
+		lines := strings.Split(resp.Value, "\n")
+		var list []map[string]interface{}
+		for _, line := range lines {
+			if line == "" {
+				continue
+			}
+			var m map[string]interface{}
+			if err := json.Unmarshal([]byte(line), &m); err == nil {
+				list = append(list, m)
+			}
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(list)
+		return
+	}
+
+	if resp.Value == "" {
+		fmt.Println("No audit log entries found.")
+		return
+	}
+	fmt.Println("=== sec-agent Audit Log (Recent Entries) ===")
 	fmt.Println(resp.Value)
 }
 

@@ -156,6 +156,36 @@ Redesign your secret taxonomy without reading, deleting, and re-creating paths m
     # Renamed 5 secrets under prefix "legacy-project/" to "terraform/dev/"
     ```
 
+### 3.3.3. Path Listing, Deletion, Diagnostics & Security Audits
+Enterprise controls for discovery, deletion, environment diagnostics, and compliance logging:
+
+*   **Secret Path Listing (`sec ls` / `sec list`)**:
+    ```bash
+    sec ls project/ [--json]
+    # Displays matching key paths without revealing raw values to terminal logs.
+    ```
+*   **Single & Group Secret Deletion (`sec rm` / `sec delete`)**:
+    ```bash
+    sec rm old-path/db-pass             # Delete single secret
+    sec rm legacy-project/ --prefix      # Batch delete matching prefix group
+    ```
+*   **Session & Environment Diagnostics (`sec status`)**:
+    ```bash
+    sec status
+    # === sec-agent Status & Diagnostics ===
+    # Active Profile:       default
+    # Daemon Version:       v1.1.0
+    # Session Status:       UNLOCKED (Authorized via Touch ID)
+    # Stored Secrets:       14 total (0 expired)
+    # Hard TTL Limit:       8h0m0s
+    # Inactivity Grace:     30m0s
+    ```
+*   **Security Access Audit Logging (`sec audit` / `sec log`)**:
+    ```bash
+    sec audit [--limit 50] [--json]
+    # Displays JSON records from ~/.config/sec/audit.log tracking process PIDs and actions.
+    ```
+
 ### 3.4. Expiration Policy & Recovery (`--show-expired`)
 When a secret reaches its expiration timestamp:
 - Normal queries (e.g. `sec get database/test/key`) will block, outputting `Error: Secret has expired` and returning exit code `1`.

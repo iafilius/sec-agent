@@ -60,9 +60,22 @@ sec mv old-path/db-pass new-path/db-pass
 
 # Refactor an entire prefix hierarchy in a single atomic transaction
 sec mv legacy-project/ new-project/ --prefix
+### 2.4. Path Listing, Deletion, Diagnostics & Security Audits
+```bash
+# List secret paths without exposing raw values
+sec ls [prefix] [--json]
+
+# Delete a single secret or prefix group
+sec rm <path> [--prefix]
+
+# Inspect daemon health, TTLs, and store metrics
+sec status
+
+# Read structured security access audit log
+sec audit [--limit 50] [--json]
 ```
 
-### 2.4. Storing Secrets
+### 2.5. Storing Secrets
 ```bash
 sec set <path> "<value>" [--comment "<description>"] [--meta owner=devops] [--profile <profile>]
 ```

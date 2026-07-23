@@ -325,3 +325,40 @@ func (es *EncryptedStore) RenamePrefix(oldPrefix, newPrefix string) (int, error)
 	return count, nil
 }
 
+// DeleteSecret removes a single secret path from the store.
+func (es *EncryptedStore) DeleteSecret(path string) error {
+	if es == nil || es.Secrets == nil {
+		return fmt.Errorf("store is uninitialized")
+	}
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return fmt.Errorf("secret path cannot be empty")
+	}
+	if _, exists := es.Secrets[path]; !exists {
+		return fmt.Errorf("secret %q not found", path)
+	}
+	delete(es.Secrets, path)
+	return nil
+}
+
+// DeletePrefix removes all secret paths matching prefix from the store.
+// Returns the count of deleted secrets.
+func (es *EncryptedStore) DeletePrefix(prefix string) (int, error) {
+	if es == nil || es.Secrets == nil {
+		return 0, fmt.Errorf("store is uninitialized")
+	}
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" {
+		return 0, fmt.Errorf("prefix cannot be empty")
+	}
+
+	count := 0
+	for k := range es.Secrets {
+		if strings.HasPrefix(k, prefix) {
+			delete(es.Secrets, k)
+			count++
+		}
+	}
+	return count, nil
+}
+

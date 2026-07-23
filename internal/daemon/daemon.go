@@ -9,6 +9,8 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,9 +34,20 @@ type IPCRequest struct {
 	Key         []byte                         `json:"key,omitempty"`
 	NewPath     string                         `json:"new_path,omitempty"`
 	IsPrefix    bool                           `json:"is_prefix,omitempty"`
+	Limit       int                            `json:"limit,omitempty"`
 	Expires     string                         `json:"expires,omitempty"`      // RFC3339 formatted expiration time
 	ShowExpired bool                           `json:"show_expired,omitempty"` // Override to show expired secrets
 	Token       string                         `json:"token,omitempty"`        // Shell session token
+}
+
+// AuditLogEntry represents a single audit event record.
+type AuditLogEntry struct {
+	Timestamp string `json:"timestamp"`
+	Action    string `json:"action"`
+	Path      string `json:"path,omitempty"`
+	PeerPID   int    `json:"peer_pid"`
+	Success   bool   `json:"success"`
+	Error     string `json:"error,omitempty"`
 }
 
 // IPCResponse defines the format for replies from the daemon.
@@ -50,6 +63,7 @@ type IPCResponse struct {
 	Expires      time.Time                    `json:"expires,omitempty"`
 	Token        string                       `json:"token,omitempty"` // Shell session token
 	Version      string                       `json:"version,omitempty"`
+	StatusInfo   map[string]interface{}       `json:"status_info,omitempty"`
 }
 
 // Daemon represents the background secrets agent.
@@ -527,8 +541,158 @@ func (d *Daemon) handleConnection(c net.Conn) {
 		d.lastUsed = time.Now()
 		d.sendResponse(c, IPCResponse{Success: true})
 
+	case "list":
+		if d.masterKey == nil {
+			d.sendError(c, "Session locked. Please unlock first.")
+			return
+		}
+		group := d.secretsStore.GetGroup(req.Path)
+		var paths []string
+		for k := range group {
+			paths = append(paths, k)
+		}
+		sort.Strings(paths)
+		d.lastUsed = time.Now()
+		d.sendResponse(c, IPCResponse{
+			Success: true,
+			Value:   strings.Join(paths, "\n"),
+			Secrets: group,
+		})
+
+	case "delete":
+		if d.masterKey == nil {
+			d.sendError(c, "Session locked. Please unlock first.")
+			return
+		}
+		if req.IsPrefix {
+			count, err := d.secretsStore.DeletePrefix(req.Path)
+			if err != nil {
+				d.sendError(c, fmt.Sprintf("failed to delete prefix: %v", err))
+				return
+			}
+			if err := store.SaveStore(d.profile, d.secretsStore, d.masterKey); err != nil {
+				d.sendError(c, fmt.Sprintf("failed to persist store: %v", err))
+				return
+			}
+			d.lastUsed = time.Now()
+			d.sendResponse(c, IPCResponse{
+				Success: true,
+				Value:   fmt.Sprintf("Deleted %d secrets under prefix %q", count, req.Path),
+			})
+		} else {
+			err := d.secretsStore.DeleteSecret(req.Path)
+			if err != nil {
+				d.sendError(c, fmt.Sprintf("failed to delete secret: %v", err))
+				return
+			}
+			if err := store.SaveStore(d.profile, d.secretsStore, d.masterKey); err != nil {
+				d.sendError(c, fmt.Sprintf("failed to persist store: %v", err))
+				return
+			}
+			d.lastUsed = time.Now()
+			d.sendResponse(c, IPCResponse{
+				Success: true,
+				Value:   fmt.Sprintf("Deleted secret %q", req.Path),
+			})
+		}
+
+	case "status":
+		d.lastUsed = time.Now()
+		totalSecrets := 0
+		expiredSecrets := 0
+		if d.secretsStore != nil && d.secretsStore.Secrets != nil {
+			totalSecrets = len(d.secretsStore.Secrets)
+			now := time.Now()
+			for _, entry := range d.secretsStore.Secrets {
+				if !entry.Expires.IsZero() && now.After(entry.Expires) {
+					expiredSecrets++
+				}
+			}
+		}
+		storePath, _ := store.GetStorePath(d.profile)
+		var fileSize int64
+		if fi, err := os.Stat(storePath); err == nil {
+			fileSize = fi.Size()
+		}
+
+		info := map[string]interface{}{
+			"profile":          d.profile,
+			"version":          d.version,
+			"socket_path":      d.socketPath,
+			"store_path":       storePath,
+			"store_size_bytes": fileSize,
+			"is_unlocked":      d.masterKey != nil,
+			"total_secrets":    totalSecrets,
+			"expired_secrets":  expiredSecrets,
+			"session_start":    d.sessionStart.Format(time.RFC3339),
+			"last_used":        d.lastUsed.Format(time.RFC3339),
+			"session_ttl":      d.sessionTTL.String(),
+			"grace_ttl":        d.graceTTL.String(),
+		}
+		d.sendResponse(c, IPCResponse{
+			Success:    true,
+			StatusInfo: info,
+		})
+
+	case "audit":
+		cfgDir, err := config.GetConfigDir()
+		if err != nil {
+			d.sendError(c, fmt.Sprintf("failed to resolve config dir: %v", err))
+			return
+		}
+		logPath := filepath.Join(cfgDir, "audit.log")
+		// #nosec G304
+		data, err := os.ReadFile(logPath)
+		if err != nil && !os.IsNotExist(err) {
+			d.sendError(c, fmt.Sprintf("failed to read audit log: %v", err))
+			return
+		}
+		rawStr := strings.TrimSpace(string(data))
+		if rawStr == "" {
+			d.sendResponse(c, IPCResponse{Success: true, Value: ""})
+			return
+		}
+		lines := strings.Split(rawStr, "\n")
+		limit := req.Limit
+		if limit <= 0 || limit > len(lines) {
+			limit = 50
+		}
+		if limit < len(lines) {
+			lines = lines[len(lines)-limit:]
+		}
+		d.sendResponse(c, IPCResponse{
+			Success: true,
+			Value:   strings.Join(lines, "\n"),
+		})
+
 	default:
 		d.sendError(c, "unknown action")
+	}
+}
+
+func (d *Daemon) logAudit(action, path string, peerPID int, success bool, errStr string) {
+	cfgDir, err := config.GetConfigDir()
+	if err != nil {
+		return
+	}
+	logPath := filepath.Join(cfgDir, "audit.log")
+	entry := AuditLogEntry{
+		Timestamp: time.Now().Format(time.RFC3339),
+		Action:    action,
+		Path:      path,
+		PeerPID:   peerPID,
+		Success:   success,
+		Error:     errStr,
+	}
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return
+	}
+	// #nosec G304 G703
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err == nil {
+		_, _ = f.Write(append(data, '\n'))
+		_ = f.Close()
 	}
 }
 
