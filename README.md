@@ -216,9 +216,19 @@ Hardware security keys (such as YubiKeys using PGP or PKCS#11 modules) are often
 2. **Active Hijacking Intercepts**:
    * **YubiKey**: A YubiKey has no process context or ancestry awareness. If a YubiKey remains plugged into a USB port with cached PIN entry, an attacker who gains remote SSH shell access or background process execution can issue `gpg` or `pkcs11-tool` commands to decrypt secrets without prompting for a physical touch button.
    * **`sec-agent`**: Actively scans the client's BSD process tree and environment variables (`SSH_CLIENT`, `SSH_TTY`, `AppleVNCServer`, `remotepairingd`). If an SSH or remote sharing session is detected, the daemon immediately self-locks and purges decrypted keys from RAM, neutralizing remote session takeover attempts.
-3. **Developer Experience (DX) & Dotenv Migration**:
-   * **YubiKey**: Requires complex GPG setup, pin handling, and custom shell scripts to parse and decrypt environment variables.
-   * **`sec-agent`**: Provides a 30-second automated migration (`sec migrate-local .env`) that sanitizes plaintext files to safe `<migrated_to_sec>` placeholders and injects secrets dynamically at runtime (`sec run -- <app>`) with zero codebase modifications.
+3. **Seamless Local Pipelines, Terraform & Script Integration**:
+   * **YubiKey High-Friction Workflow**: YubiKeys cannot natively inject environment variables into child process trees. To pass secrets into local build scripts, `.env` loaders, or Infrastructure-as-Code tools (e.g., Terraform `TF_VAR_db_password`, AWS credentials, Docker Compose), developers are forced to write custom wrapper scripts around `gpg --decrypt` or `pkcs11-tool`. Every execution forces constant physical button taps or PIN prompts. If a developer enables PIN/touch caching to avoid tap fatigue, it opens a severe vulnerability where background scripts or remote SSH shells can steal credentials from the cached YubiKey session.
+   * **`sec-agent` Frictionless Experience**:
+     * **Single Session Authorization**: Unlock your session once (`eval $(sec open)`) backed by a single Touch ID hardware check.
+     * **Transparent Process Wrapper**: Execute any local pipeline, shell script, or Terraform command directly without modifying scripts or codebase files:
+       ```bash
+       sec run -- terraform plan
+       sec run -- make deploy-staging
+       sec run -- docker compose up
+       ```
+     * **Automatic Key-to-Env Mapping**: Secret paths (e.g. `tf-vars/db-password`) are automatically converted to uppercase environment variables (`TF_VARS_DB_PASSWORD` or `AWS_SECRET_ACCESS_KEY`) in child process memory.
+     * **Zero-Codebase Dotenv Overrides**: Automatically overrides `<migrated_to_sec>` placeholders in `.env` files in memory—requiring **zero code changes** in your application or build pipelines.
+     * **Uncompromised Security**: Even while the session is open, `sec-agent` continuously monitors the process tree and peer environment (`SSH_CLIENT`, `SSH_TTY`, `AppleVNCServer`). If a remote session attempts to query secrets, the daemon self-locks instantly.
 
 ---
 
