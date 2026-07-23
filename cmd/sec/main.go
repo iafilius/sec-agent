@@ -30,7 +30,7 @@ import (
 
 var jsonErrors bool
 var (
-	Version   = "v1.3.0"
+	Version   = "v1.4.0"
 	BuildDate = "unknown"
 )
 
@@ -377,6 +377,8 @@ func main() {
 			}
 		}
 		handleBackup(profile, os.Args[2], explicitPassword)
+	case "profile":
+		handleProfile(profile, os.Args[2:])
 	case "check":
 		handleCheck(profile, os.Args[2:])
 	case "restart":
@@ -431,9 +433,10 @@ func printUsage() {
 	fmt.Println("  doctor                          Run workstation system & security diagnostic checks")
 	fmt.Println("  gen <path> [--length N]         Generate random password and save to path (alias: generate)")
 	fmt.Println("  import <file> [--format <f>]    Bulk import secrets from JSON, Doppler, or AWS payloads")
+	fmt.Println("  profile [set-env dev|dta|prod] Manage profile metadata & environment classification")
 	fmt.Println("  check [--template <file>] [--required <keys>] Validate vault schema completeness")
 	fmt.Println("  load [<prefix>] [--format env|json] Batch-load scoped group secrets for shell sourcing")
-	fmt.Println("  run [--group <prefix>] [-- <command> [args...]] Execute a command with scoped secrets injected")
+	fmt.Println("  run [--group <prefix>] [--confirm-prod] [-- <cmd>] Execute a command with secrets injected")
 	fmt.Println("  status                          Display session health, profile, and diagnostic metrics")
 	fmt.Println("  audit [--limit <n>] [--json]    View recent daemon security audit logs (alias: log)")
 	fmt.Println("  env [<prefix>]                   Output shell exports for secrets under prefix")
@@ -1200,6 +1203,100 @@ func handleDelete(profile string, path string, args []string) {
 	fmt.Println(resp.Value)
 }
 
+func getProfileEnvTier(profile string) string {
+	resp, err := queryDaemonRaw(profile, daemon.IPCRequest{
+		Action: "get",
+		Path:   "__profile_env__",
+	})
+	if err == nil && resp.Success && resp.Value != "" {
+		return strings.ToLower(strings.TrimSpace(resp.Value))
+	}
+	return ""
+}
+
+func printEnvBadge(profile string) {
+	tier := getProfileEnvTier(profile)
+	switch tier {
+	case "dev":
+		fmt.Println("\033[32m🟢 [ENV: DEV]\033[0m")
+	case "dta", "test", "staging":
+		fmt.Println("\033[33m🟡 [ENV: STAGING]\033[0m")
+	case "prod", "production":
+		fmt.Println("\033[1;31m🔴 [ENV: PROD - CAUTION!]\033[0m")
+	}
+}
+
+func checkProductionGuard(profile string, args []string) {
+	tier := getProfileEnvTier(profile)
+	if tier == "prod" || tier == "production" {
+		hasConfirm := false
+		for _, arg := range args {
+			if arg == "--confirm-prod" {
+				hasConfirm = true
+				break
+			}
+		}
+		if !hasConfirm {
+			if !term.IsTerminal(int(os.Stdin.Fd())) {
+				fail("PRODUCTION_GUARD_BLOCKED", fmt.Errorf("command execution against PRODUCTION profile %q requires --confirm-prod flag in non-interactive mode", profile), "Pass --confirm-prod flag to confirm execution.")
+			}
+			fmt.Printf("\n\033[1;31m⚠️  WARNING: You are executing a command against PRODUCTION profile %q!\033[0m\n", profile)
+			fmt.Print("Type 'prod' or press Enter to confirm execution: ")
+			var input string
+			_, _ = fmt.Scanln(&input)
+			input = strings.ToLower(strings.TrimSpace(input))
+			if input != "" && input != "prod" && input != "y" && input != "yes" {
+				fmt.Fprintln(os.Stderr, "Execution cancelled by production safety guard.")
+				os.Exit(1)
+			}
+		}
+	}
+}
+
+func handleProfile(profile string, args []string) {
+	if len(args) == 0 {
+		tier := getProfileEnvTier(profile)
+		fmt.Printf("Profile: %s\n", profile)
+		if tier != "" {
+			fmt.Printf("Environment Tier: %s\n", strings.ToUpper(tier))
+			printEnvBadge(profile)
+		} else {
+			fmt.Println("Environment Tier: Unset (Run 'sec profile set-env dev|dta|prod')")
+		}
+		return
+	}
+
+	if args[0] == "set-env" {
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "Usage: sec profile set-env <dev|dta|staging|prod> [--profile <name>]")
+			os.Exit(1)
+		}
+		tier := strings.ToLower(strings.TrimSpace(args[1]))
+		if tier != "dev" && tier != "dta" && tier != "test" && tier != "staging" && tier != "prod" && tier != "production" {
+			fail("INVALID_ARGUMENT", fmt.Errorf("invalid environment tier %q", tier), "Supported tiers: dev, dta, staging, prod")
+		}
+		resp, err := queryDaemon(profile, daemon.IPCRequest{
+			Action:  "set",
+			Path:    "__profile_env__",
+			Value:   tier,
+			Comment: "Profile Environment Tagging",
+		})
+		if err != nil {
+			fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running. Please run 'sec open' to unlock the session."), "Run 'eval $(sec open)' to start/unlock the session.")
+		}
+		if !resp.Success {
+			code, rem := mapDaemonError(resp.Error)
+			fail(code, fmt.Errorf("%s", resp.Error), rem)
+		}
+		fmt.Printf("Profile %q successfully bound to environment tier %q.\n", profile, strings.ToUpper(tier))
+		printEnvBadge(profile)
+		return
+	}
+
+	fmt.Fprintln(os.Stderr, "Usage: sec profile [set-env dev|dta|staging|prod]")
+	os.Exit(1)
+}
+
 func handleStatus(profile string) {
 	resp, err := queryDaemon(profile, daemon.IPCRequest{Action: "status"})
 	if err != nil {
@@ -1211,8 +1308,13 @@ func handleStatus(profile string) {
 	}
 
 	info := resp.StatusInfo
+	tier := getProfileEnvTier(profile)
+	if tier == "" {
+		tier = "UNSET"
+	}
 	fmt.Println("=== sec-agent Status & Diagnostics ===")
-	fmt.Printf("Active Profile:       %v\n", info["profile"])
+	fmt.Printf("Active Profile:       %v (Tier: %s)\n", info["profile"], strings.ToUpper(tier))
+	printEnvBadge(profile)
 	fmt.Printf("Daemon Version:       %v\n", info["version"])
 	if unlocked, _ := info["is_unlocked"].(bool); unlocked {
 		fmt.Println("Session Status:       UNLOCKED (Authorized via Touch ID)")
@@ -1359,9 +1461,12 @@ func handleRun(profile string, args []string) {
 		}
 	}
 	if len(cmdArgs) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: sec run [--group <prefix>] [--profile <name>] -- <command> [args...]")
+		fmt.Fprintln(os.Stderr, "Usage: sec run [--group <prefix>] [--profile <name>] [--confirm-prod] -- <command> [args...]")
 		os.Exit(1)
 	}
+
+	checkProductionGuard(profile, args)
+	printEnvBadge(profile)
 
 	action := "backup"
 	reqPath := ""

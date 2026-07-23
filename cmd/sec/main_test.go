@@ -316,6 +316,32 @@ func TestMainIntegration(t *testing.T) {
 		t.Fatalf("sec completion zsh failed: %v, output: %s", err, string(compOut))
 	}
 
+	// 6q. Test 'sec profile set-env' and production safety guards
+	profTagCmd := exec.Command("./sec_test_bin", "profile", "set-env", "prod", "--profile", profile)
+	profTagCmd.Env = testEnv
+	if err := profTagCmd.Run(); err != nil {
+		t.Fatalf("sec profile set-env failed: %v", err)
+	}
+
+	// Non-interactive run without --confirm-prod MUST fail
+	unconfirmedRun := exec.Command("./sec_test_bin", "run", "--profile", profile, "--", "echo", "hello")
+	unconfirmedRun.Env = testEnv
+	if err := unconfirmedRun.Run(); err == nil {
+		t.Fatalf("expected sec run without --confirm-prod on prod profile to fail, but succeeded")
+	}
+
+	// Non-interactive run WITH --confirm-prod MUST succeed
+	confirmedRun := exec.Command("./sec_test_bin", "run", "--confirm-prod", "--profile", profile, "--", "echo", "hello")
+	confirmedRun.Env = testEnv
+	if err := confirmedRun.Run(); err != nil {
+		t.Fatalf("sec run --confirm-prod on prod profile failed: %v", err)
+	}
+
+	// Reset profile env to dev for remaining tests
+	resetProfCmd := exec.Command("./sec_test_bin", "profile", "set-env", "dev", "--profile", profile)
+	resetProfCmd.Env = testEnv
+	_ = resetProfCmd.Run()
+
 	rmPrefixCmd := exec.Command("./sec_test_bin", "rm", "provider-v2", "--prefix", "--profile", profile)
 	rmPrefixCmd.Env = testEnv
 	if err := rmPrefixCmd.Run(); err != nil {

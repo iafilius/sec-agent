@@ -156,7 +156,17 @@ sec export --format aws
 *   **Auto-Open**: Pass `--auto-open` or set `export SEC_AUTO_OPEN=1` to automatically trigger Touch ID unlock inline if the session is locked.
 *   **Shell Completions**: Generate tab completions: `sec completion zsh > ~/.zsh/completion/_sec`
 
-### 2.11. Session Restart & Locking
+### 2.11. Environment Isolation & Safety Guards
+```bash
+# Tag a profile with an environment classification (dev, dta, staging, prod)
+sec profile set-env prod --profile velocloud-provider-prod
+
+# Execute against production profile (requires --confirm-prod or Touch ID confirmation)
+sec run --confirm-prod --profile velocloud-provider-prod -- terraform apply
+```
+*   Displays visual terminal badges (`🟢 [ENV: DEV]`, `🟡 [ENV: STAGING]`, `🔴 [ENV: PROD - CAUTION!]`).
+
+### 2.12. Session Restart & Locking
 ```bash
 # Restart daemon, apply binary updates, and re-authenticate in one step
 eval $(sec restart)
@@ -177,4 +187,5 @@ If a command fails, `sec` returns programmatic JSON or text error blocks:
 | `DAEMON_NOT_RUNNING` | The background socket is inactive. | Ask user to run `eval $(sec open)` or use `--auto-open` |
 | `SESSION_LOCKED` | Active session has expired or been locked. | Ask user to run `eval $(sec open)` or use `--auto-open` |
 | `INVALID_TOKEN` | The current shell session is not authorized. | Ask user to run `eval $(sec open)` to sync session token |
+| `PRODUCTION_GUARD_BLOCKED` | Command execution against PRODUCTION profile requires confirmation. | Pass `--confirm-prod` flag or complete interactive Touch ID prompt. |
 | `ACCESS_DENIED_HIJACK` | Connection blocked due to detected SSH or remote sharing ancestry. | Connection rejected due to remote/hijack safety guards. Must run from local physical terminal. |
