@@ -509,6 +509,45 @@ func (d *Daemon) handleConnection(c net.Conn) {
 			})
 		}
 
+	case "copy":
+		if d.masterKey == nil {
+			d.sendError(c, "Session locked. Please unlock first.")
+			return
+		}
+		srcPath := req.Path
+		dstPath := req.NewPath
+		if req.IsPrefix {
+			count, err := d.secretsStore.CopyPrefix(srcPath, dstPath)
+			if err != nil {
+				d.sendError(c, fmt.Sprintf("failed to copy prefix: %v", err))
+				return
+			}
+			if err := store.SaveStore(d.profile, d.secretsStore, d.masterKey); err != nil {
+				d.sendError(c, fmt.Sprintf("failed to persist store: %v", err))
+				return
+			}
+			d.lastUsed = time.Now()
+			d.sendResponse(c, IPCResponse{
+				Success: true,
+				Value:   fmt.Sprintf("Copied %d secrets under prefix %q to %q", count, srcPath, dstPath),
+			})
+		} else {
+			err := d.secretsStore.CopySecret(srcPath, dstPath)
+			if err != nil {
+				d.sendError(c, fmt.Sprintf("failed to copy secret: %v", err))
+				return
+			}
+			if err := store.SaveStore(d.profile, d.secretsStore, d.masterKey); err != nil {
+				d.sendError(c, fmt.Sprintf("failed to persist store: %v", err))
+				return
+			}
+			d.lastUsed = time.Now()
+			d.sendResponse(c, IPCResponse{
+				Success: true,
+				Value:   fmt.Sprintf("Copied secret %q to %q", srcPath, dstPath),
+			})
+		}
+
 	case "clear":
 		d.wipeMemory()
 		d.sendResponse(c, IPCResponse{Success: true})

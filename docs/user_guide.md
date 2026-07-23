@@ -186,6 +186,35 @@ Enterprise controls for discovery, deletion, environment diagnostics, and compli
     # Displays JSON records from ~/.config/sec/audit.log tracking process PIDs and actions.
     ```
 
+### 3.3.4. Advanced Developer & Vault Tools (`sec diff`, `sec doctor`, `sec gen`, `sec cp`, `sec import`)
+*   **Environment Key Diff (`sec diff`)**:
+    ```bash
+    sec diff --other-profile prod [--prefix project/dev/]
+    sec diff .env
+    # Outputs added/missing key path diffs between profiles without exposing values.
+    ```
+*   **System Health Doctor (`sec doctor`)**:
+    ```bash
+    sec doctor
+    # Runs automated checks on Secure Enclave biometrics, Keychain, socket permissions, and runtime signing.
+    ```
+*   **Cryptographic Password Generator (`sec gen`)**:
+    ```bash
+    sec gen database/prod/password --length 32 [--no-symbols]
+    # Generates 32-character random string using crypto/rand and saves it directly into sec.
+    ```
+*   **Secret Key Duplication (`sec cp` / `sec copy`)**:
+    ```bash
+    sec cp project/dev/db-pass project/staging/db-pass
+    sec cp project/dev/ project/staging/ --prefix
+    # Duplicates keys or namespace trees into a new target path.
+    ```
+*   **Bulk Vault Payload Importer (`sec import`)**:
+    ```bash
+    sec import secrets.json --format doppler --prefix project/acceptance/
+    # Bulk imports Doppler, AWS, or custom JSON key-value files.
+    ```
+
 ### 3.4. Expiration Policy & Recovery (`--show-expired`)
 When a secret reaches its expiration timestamp:
 - Normal queries (e.g. `sec get database/test/key`) will block, outputting `Error: Secret has expired` and returning exit code `1`.

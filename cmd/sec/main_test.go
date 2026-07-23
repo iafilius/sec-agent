@@ -217,7 +217,56 @@ func TestMainIntegration(t *testing.T) {
 	}
 	t.Logf("Audit log output length: %d bytes", len(auditOut))
 
-	// 6j. Test 'sec rm' secret deletion
+	// 6j. Test 'sec gen' secret generation
+	genCmd := exec.Command("./sec_test_bin", "gen", "generated/password", "--length", "24", "--profile", profile)
+	genCmd.Env = testEnv
+	if err := genCmd.Run(); err != nil {
+		t.Fatalf("sec gen failed: %v", err)
+	}
+	getGenCmd := exec.Command("./sec_test_bin", "get", "generated/password", "--profile", profile)
+	getGenCmd.Env = testEnv
+	genOut, err := getGenCmd.Output()
+	if err != nil || len(strings.TrimSpace(string(genOut))) != 24 {
+		t.Fatalf("sec get generated password failed: %v, got %q", err, string(genOut))
+	}
+
+	// 6k. Test 'sec cp' secret duplication
+	cpCmd := exec.Command("./sec_test_bin", "cp", "generated/password", "copied/password", "--profile", profile)
+	cpCmd.Env = testEnv
+	if err := cpCmd.Run(); err != nil {
+		t.Fatalf("sec cp failed: %v", err)
+	}
+	getCpCmd := exec.Command("./sec_test_bin", "get", "copied/password", "--profile", profile)
+	getCpCmd.Env = testEnv
+	cpOut, err := getCpCmd.Output()
+	if err != nil || strings.TrimSpace(string(cpOut)) != strings.TrimSpace(string(genOut)) {
+		t.Fatalf("sec get copied password failed: %v, got %q", err, string(cpOut))
+	}
+
+	// 6l. Test 'sec doctor' diagnostics
+	docCmd := exec.Command("./sec_test_bin", "doctor", "--profile", profile)
+	docCmd.Env = testEnv
+	docOut, err := docCmd.Output()
+	if err != nil || !strings.Contains(string(docOut), "All system diagnostic checks complete") {
+		t.Fatalf("sec doctor failed: %v, output: %s", err, string(docOut))
+	}
+
+	// 6m. Test 'sec import' JSON import
+	importFile := filepath.Join(t.TempDir(), "import_test.json")
+	os.WriteFile(importFile, []byte(`{"IMPORTED_KEY_1":"val1","IMPORTED_KEY_2":"val2"}`), 0600)
+	importCmd := exec.Command("./sec_test_bin", "import", importFile, "--prefix", "imported-app", "--profile", profile)
+	importCmd.Env = testEnv
+	if err := importCmd.Run(); err != nil {
+		t.Fatalf("sec import failed: %v", err)
+	}
+	getImportCmd := exec.Command("./sec_test_bin", "get", "imported-app/IMPORTED_KEY_1", "--profile", profile)
+	getImportCmd.Env = testEnv
+	impOut, err := getImportCmd.Output()
+	if err != nil || strings.TrimSpace(string(impOut)) != "val1" {
+		t.Fatalf("sec get imported key failed: %v, got %q", err, string(impOut))
+	}
+
+	// 6n. Test 'sec rm' secret deletion
 	rmSingleCmd := exec.Command("./sec_test_bin", "rm", "new-category/renamed-key", "--profile", profile)
 	rmSingleCmd.Env = testEnv
 	if err := rmSingleCmd.Run(); err != nil {

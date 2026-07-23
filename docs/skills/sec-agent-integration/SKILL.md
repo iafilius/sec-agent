@@ -77,7 +77,26 @@ sec status
 sec audit [--limit 50] [--json]
 ```
 
-### 2.5. Storing Secrets
+### 2.5. Advanced Developer & Vault Tools
+```bash
+# Compare secret key paths against another profile or .env file (without exposing values)
+sec diff --other-profile prod [--prefix <prefix>]
+sec diff .env
+
+# Run system health diagnostics (Secure Enclave, socket permissions, Hardened Runtime)
+sec doctor
+
+# Generate high-entropy random password and save to path
+sec gen <path> [--length 32] [--no-symbols] [--comment <description>]
+
+# Duplicate a single key path or prefix namespace
+sec cp <src-path> <dst-path> [--prefix]
+
+# Bulk import secrets from JSON, Doppler, or AWS Secrets Manager payloads
+sec import <file.json> [--format doppler|aws|json] [--prefix <prefix>]
+```
+
+### 2.6. Storing Secrets
 ```bash
 sec set <path> "<value>" [--comment "<description>"] [--meta owner=devops] [--profile <profile>]
 ```

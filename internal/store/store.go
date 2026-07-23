@@ -362,3 +362,53 @@ func (es *EncryptedStore) DeletePrefix(prefix string) (int, error) {
 	return count, nil
 }
 
+// CopySecret duplicates a secret key path to a new location in the store.
+func (es *EncryptedStore) CopySecret(srcPath, dstPath string) error {
+	if es == nil || es.Secrets == nil {
+		return fmt.Errorf("store is uninitialized")
+	}
+	srcPath = strings.TrimSpace(srcPath)
+	dstPath = strings.TrimSpace(dstPath)
+	if srcPath == "" || dstPath == "" {
+		return fmt.Errorf("source and destination paths cannot be empty")
+	}
+	entry, exists := es.Secrets[srcPath]
+	if !exists {
+		return fmt.Errorf("secret %q not found", srcPath)
+	}
+	entry.LastModified = time.Now()
+	es.Secrets[dstPath] = entry
+	return nil
+}
+
+// CopyPrefix duplicates all secret paths matching srcPrefix to start with dstPrefix.
+// Returns the count of copied secrets.
+func (es *EncryptedStore) CopyPrefix(srcPrefix, dstPrefix string) (int, error) {
+	if es == nil || es.Secrets == nil {
+		return 0, fmt.Errorf("store is uninitialized")
+	}
+	srcPrefix = strings.TrimSpace(srcPrefix)
+	dstPrefix = strings.TrimSpace(dstPrefix)
+	if srcPrefix == "" || dstPrefix == "" {
+		return 0, fmt.Errorf("source and destination prefixes cannot be empty")
+	}
+
+	count := 0
+	toCopy := make(map[string]SecretEntry)
+	for k, v := range es.Secrets {
+		if strings.HasPrefix(k, srcPrefix) {
+			toCopy[k] = v
+		}
+	}
+
+	for k, v := range toCopy {
+		rel := strings.TrimPrefix(k, srcPrefix)
+		newKey := dstPrefix + rel
+		v.LastModified = time.Now()
+		es.Secrets[newKey] = v
+		count++
+	}
+
+	return count, nil
+}
+
