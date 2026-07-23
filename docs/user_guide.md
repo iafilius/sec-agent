@@ -446,6 +446,38 @@ When running `sec run` or `sec get` against a profile tagged as `prod`:
 
 ---
 
+### 3.14. Automated Token Rotation & Expiring Inventory (v1.6.0)
+To ensure zero-downtime token management, `sec` supports registering custom rotation commands and inspecting expiring vault entries:
+
+#### Secret Rotation Hook Registration (`sec set --rotate-cmd`)
+Bind a custom rotation script command and rotation TTL duration to a secret entry:
+```bash
+sec set velocloud-provider-dev/vco_token "eyJhbGci..." --expires 30d \
+  --rotate-cmd "sec run --profile velocloud-provider-dev -- curl -s -X POST \$VCO_URL/portal/rest/login/enterpriseLogin -d '{\"username\":\"admin\",\"password\":\"\$VCO_PASSWORD\"}' | jq -r .token" \
+  --rotate-ttl 30d
+```
+
+#### Automated Token Rotation (`sec rotate <path>`)
+Triggers execution of the registered rotation script in a memory-isolated process container, captures the new token string from stdout, updates the vault entry, and resets the expiration timer:
+```bash
+sec rotate velocloud-provider-dev/vco_token
+# [INFO] Executing rotation hook for 'velocloud-provider-dev/vco_token'...
+# [✓] Secret 'velocloud-provider-dev/vco_token' successfully rotated!
+# [✓] Expiration timer updated to: 2026-08-22T20:00:00Z
+```
+
+#### Expiring Vault Inventory (`sec ls --expiring [days]`)
+List all secret entries expiring within N days (default 7 days) across your profile:
+```bash
+sec ls --expiring 14d
+# ⚠️ EXPIRATION WARNING: 2 secret key(s) expiring within the next 14 day(s)!
+# KEY PATH                            EXPIRATION DATE           REMAINING
+# ---------------------------------------------------------------------------
+# velocloud-provider-dev/vco_token      2026-07-26T18:00:00Z      3 day(s)
+```
+
+---
+
 ## 4. Troubleshooting & Verification
 
 ### Verifying Hardened Runtime
