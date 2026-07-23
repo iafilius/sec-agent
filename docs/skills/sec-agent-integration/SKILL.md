@@ -173,14 +173,18 @@ lease_token=$(sec lease velocloud-provider-dev/vco_token --ttl 15m)
 ```
 *   **Why Use Leases**: Delegate temporary credential access to autonomous AI subagents or background test scripts with **zero credential lingering**. The lease token self-destructs automatically after the specified TTL expires.
 
-### 2.13. Cross-Profile Matrix Diffing (`sec diff-profiles`) & Stream Redactor (`sec run --redact`)
+### 2.13. Cross-Profile Matrix Diffing (`sec diff-profiles`) & Real-Time Stream Redactor (`sec run`)
 ```bash
 # Compare structural key alignment between dev and prod profiles
 sec diff-profiles velocloud-provider-dev velocloud-provider-prod
 
-# Execute command with real-time secret stream redaction
-sec run --redact -- make testacc
+# Execute command with REAL-TIME SECRET REDACTION ENABLED BY DEFAULT in logs
+sec run -- make testacc
+
+# Opt out of log redaction if raw output is required
+sec run --no-redact -- make testacc
 ```
+*   **Default-On Redaction**: Automatically intercepts child process `stdout` and `stderr` streams in real time and replaces active secret values with `[REDACTED_BY_SEC]` to guarantee zero log leaks in CI/CD or terminal scrollbacks.
 
 ### 2.14. Session Restart & Locking
 ```bash

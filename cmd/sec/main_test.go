@@ -119,7 +119,7 @@ func TestMainIntegration(t *testing.T) {
 	}
 
 	// 6. Test 3: Verify 'sec run' subprocess environment injection
-	runCmd := exec.Command("./sec_test_bin", "run", "--profile", profile, "--", "env")
+	runCmd := exec.Command("./sec_test_bin", "run", "--no-redact", "--profile", profile, "--", "env")
 	runCmd.Env = testEnv
 	runOut, err := runCmd.Output()
 	if err != nil {
@@ -143,7 +143,7 @@ func TestMainIntegration(t *testing.T) {
 	}
 
 	// 6c. Test 'sec run --group' scoped environment variable injection
-	runGroupCmd := exec.Command("./sec_test_bin", "run", "--group", "velocloud-provider", "--profile", profile, "--", "env")
+	runGroupCmd := exec.Command("./sec_test_bin", "run", "--no-redact", "--group", "velocloud-provider", "--profile", profile, "--", "env")
 	runGroupCmd.Env = testEnv
 	runGroupOut, err := runGroupCmd.Output()
 	if err != nil {
@@ -347,12 +347,20 @@ func TestMainIntegration(t *testing.T) {
 		t.Fatalf("sec set with JWT auto expiration failed: %v, out: %s", err, string(jwtOut))
 	}
 
-	// Test stream redaction (sec run --redact)
-	redactRunCmd := exec.Command("./sec_test_bin", "run", "--confirm-prod", "--redact", "--profile", profile, "--", "sh", "-c", "echo secret-value")
+	// Test stream redaction (DEFAULT-ON)
+	redactRunCmd := exec.Command("./sec_test_bin", "run", "--confirm-prod", "--profile", profile, "--", "sh", "-c", "echo secret-value")
 	redactRunCmd.Env = testEnv
 	redactOut, err := redactRunCmd.Output()
 	if err != nil || !strings.Contains(string(redactOut), "[REDACTED_BY_SEC]") {
-		t.Fatalf("sec run --redact failed to redact secret: %v, out: %s", err, string(redactOut))
+		t.Fatalf("sec run default redaction failed to redact secret: %v, out: %s", err, string(redactOut))
+	}
+
+	// Test stream redaction opt-out (--no-redact)
+	noRedactRunCmd := exec.Command("./sec_test_bin", "run", "--confirm-prod", "--no-redact", "--profile", profile, "--", "sh", "-c", "echo secret-value")
+	noRedactRunCmd.Env = testEnv
+	noRedactOut, err := noRedactRunCmd.Output()
+	if err != nil || strings.Contains(string(noRedactOut), "[REDACTED_BY_SEC]") || !strings.Contains(string(noRedactOut), "secret-value") {
+		t.Fatalf("sec run --no-redact failed opt-out: %v, out: %s", err, string(noRedactOut))
 	}
 
 	// Test sec lease

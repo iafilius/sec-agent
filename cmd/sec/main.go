@@ -452,7 +452,7 @@ func printUsage() {
 	fmt.Println("  profile [set-env dev|dta|prod] Manage profile metadata & environment classification")
 	fmt.Println("  check [--template <file>] [--required <keys>] Validate vault schema completeness")
 	fmt.Println("  load [<prefix>] [--format env|json] Batch-load scoped group secrets for shell sourcing")
-	fmt.Println("  run [--group <prefix>] [--confirm-prod] [-- <cmd>] Execute a command with secrets injected")
+	fmt.Println("  run [--group <prefix>] [--confirm-prod] [--no-redact] [-- <cmd>] Execute command with secrets injected & auto-redacted in logs")
 	fmt.Println("  status                          Display session health, profile, and diagnostic metrics")
 	fmt.Println("  audit [--limit <n>] [--json]    View recent daemon security audit logs (alias: log)")
 	fmt.Println("  env [<prefix>]                   Output shell exports for secrets under prefix")
@@ -1671,7 +1671,7 @@ func (w *redactWriter) Write(p []byte) (n int, err error) {
 
 func handleRun(profile string, args []string) {
 	groupPrefix := ""
-	shouldRedact := false
+	shouldRedact := true
 	var cmdArgs []string
 	foundSeparator := false
 
@@ -1686,6 +1686,8 @@ func handleRun(profile string, args []string) {
 				groupPrefix = args[i+1]
 				i++
 			}
+		} else if args[i] == "--no-redact" {
+			shouldRedact = false
 		} else if args[i] == "--redact" {
 			shouldRedact = true
 		}
@@ -1696,14 +1698,14 @@ func handleRun(profile string, args []string) {
 				i++
 				continue
 			}
-			if args[i] == "--redact" {
+			if args[i] == "--redact" || args[i] == "--no-redact" {
 				continue
 			}
 			cmdArgs = append(cmdArgs, args[i])
 		}
 	}
 	if len(cmdArgs) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: sec run [--group <prefix>] [--profile <name>] [--confirm-prod] [--redact] -- <command> [args...]")
+		fmt.Fprintln(os.Stderr, "Usage: sec run [--group <prefix>] [--profile <name>] [--confirm-prod] [--no-redact] -- <command> [args...]")
 		os.Exit(1)
 	}
 
