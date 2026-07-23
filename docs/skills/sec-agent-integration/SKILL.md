@@ -5,7 +5,7 @@ description: Use the sec-agent CLI utility to start background daemons, store se
 
 # sec-agent Secrets Management Integration
 
-This skill enables AI coding agents and autonomous assistants to use the `sec` CLI tool to securely retrieve credentials, run application build/test/terraform pipelines in isolated process environments, migrate dotenv configuration files, and manage KeePassXC `.kdbx` backups on macOS.
+This skill enables AI coding agents and autonomous assistants to use the `sec` CLI tool (v1.2.0+) to securely retrieve credentials, run application build/test/terraform pipelines in isolated process environments, migrate dotenv configuration files, and manage KeePassXC `.kdbx` backups on macOS.
 
 ---
 
@@ -16,6 +16,9 @@ At the start of work, if the user mentions secrets, environment variables, or te
 ```bash
 # Check CLI binary version and query active background daemon status
 sec version
+
+# Output programmatic JSON metadata
+sec version --json
 ```
 
 ### Interpretation of `sec version` Outputs:
@@ -36,9 +39,9 @@ sec version
 ### 2.1. Executing Applications & Pipelines with Secrets
 Instead of reading from unencrypted `.env` files, wrap process executions (e.g. `npm test`, `go test`, `terraform plan`, `make deploy`):
 ```bash
-sec run [--profile <profile-name>] -- <command-line>
+sec run [--profile <profile-name>] [--auto-open] -- <command-line>
 ```
-*   **How it works**: The CLI queries the background daemon, fetches keys, translates path strings to uppercase environment variables (e.g. `tf-vars/db-password` -> `TF_VARS_DB_PASSWORD`), injects them into child process memory, and executes the target script.
+*   **How it works**: The CLI queries the background daemon, fetches keys, translates path strings or `--env-alias` names, injects them into child process memory, and executes the target script.
 
 ### 2.2. Batch Loading Scoped Secrets for Purpose/Environment
 For project environments (e.g. Terraform `dev` vs `acceptance`), load or run scoped groups by prefix in one go:
@@ -96,12 +99,13 @@ sec cp <src-path> <dst-path> [--prefix]
 sec import <file.json> [--format doppler|aws|json] [--prefix <prefix>]
 ```
 
-### 2.6. Storing Secrets
+### 2.6. Storing Secrets & Custom Environment Aliases
 ```bash
-sec set <path> "<value>" [--comment "<description>"] [--meta owner=devops] [--profile <profile>]
+# Store secret with optional comment and custom environment variable alias
+sec set <path> "<value>" [--env-alias BGP_INBOUND_PASSWORD] [--comment "<description>"] [--meta owner=devops] [--profile <profile>]
 ```
 
-### 2.6. Retrieving Secrets
+### 2.7. Retrieving Secrets
 ```bash
 # Get raw plaintext secret value
 sec get <path> [--profile <profile>]
@@ -110,14 +114,14 @@ sec get <path> [--profile <profile>]
 sec get <path> --json [--profile <profile>]
 ```
 
-### 2.7. Onboarding Plaintext Env Files
+### 2.8. Onboarding Plaintext Env Files
 If a plaintext `.env` file containing credentials exists in the workspace, migrate it to eliminate disk exposure:
 ```bash
 sec migrate-local <dotenv-file> --prefix <prefix> --profile <profile-name>
 ```
 *   This securely imports all keys into the enclave store and replaces raw values inside the `.env` file with safe `"<migrated_to_sec>"` placeholders.
 
-### 2.8. Portable Backups & Vault Exports
+### 2.9. Portable Backups, Vault Exports & Onboarding Templates
 ```bash
 # Export active store to a KeePassXC encrypted .kdbx file
 sec backup <backup-name>.kdbx
@@ -125,14 +129,26 @@ sec backup <backup-name>.kdbx
 # Restore secrets from a KeePassXC .kdbx file
 sec restore <backup-name>.kdbx
 
-# Export secrets to Doppler JSON format
-sec export --format doppler
+# Export sanitized .env.example template for repository onboarding
+sec export --format template [--prefix <prefix>]
 
-# Export secrets to AWS Secrets Manager JSON format
+# Export secrets to Doppler or AWS Secrets Manager JSON formats
+sec export --format doppler
 sec export --format aws
 ```
 
-### 2.9. Session Locking
+### 2.10. Workspace Configuration (`.secrc`) & Auto-Open Helper
+*   **Workspace `.secrc`**: Place a `.secrc` or `.sec.json` in your repository root to configure project defaults:
+    ```json
+    {
+      "profile": "velocloud-provider",
+      "prefix": "velocloud-provider/acceptance/",
+      "auto_open": true
+    }
+    ```
+*   **Auto-Open**: Pass `--auto-open` or set `export SEC_AUTO_OPEN=1` to automatically trigger Touch ID unlock inline if the session is locked.
+
+### 2.11. Session Locking
 ```bash
 sec lock
 ```
@@ -146,7 +162,7 @@ If a command fails, `sec` returns programmatic JSON or text error blocks:
 
 | Error Code | Root Cause | Remediation Hint to User |
 | :--- | :--- | :--- |
-| `DAEMON_NOT_RUNNING` | The background socket is inactive. | Ask user to run `eval $(sec open)` |
-| `SESSION_LOCKED` | Active session has expired or been locked. | Ask user to run `eval $(sec open)` and complete Touch ID auth |
+| `DAEMON_NOT_RUNNING` | The background socket is inactive. | Ask user to run `eval $(sec open)` or use `--auto-open` |
+| `SESSION_LOCKED` | Active session has expired or been locked. | Ask user to run `eval $(sec open)` or use `--auto-open` |
 | `INVALID_TOKEN` | The current shell session is not authorized. | Ask user to run `eval $(sec open)` to sync session token |
 | `ACCESS_DENIED_HIJACK` | Connection blocked due to detected SSH or remote sharing ancestry. | Connection rejected due to remote/hijack safety guards. Must run from local physical terminal. |
