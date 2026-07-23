@@ -32,7 +32,7 @@ import (
 
 var jsonErrors bool
 var (
-	Version   = "v1.6.0"
+	Version   = "v1.7.0"
 	BuildDate = "unknown"
 )
 
@@ -372,7 +372,7 @@ func main() {
 		}
 		handleDelete(profile, os.Args[2], os.Args[3:])
 	case "status":
-		handleStatus(profile)
+		handleStatus(profile, os.Args[2:])
 	case "audit", "log":
 		handleAudit(profile, os.Args[2:])
 	case "load":
@@ -1695,7 +1695,161 @@ func checkExpirationWarnings(secrets map[string]store.SecretEntry) {
 	}
 }
 
-func handleStatus(profile string) {
+func handleStatusAll() {
+	cfgDir, err := config.GetConfigDir()
+	if err != nil {
+		fail("CONFIG_ERROR", err, "")
+	}
+
+	profilesMap := make(map[string]bool)
+	profilesMap["default"] = true
+
+	profilesDir := filepath.Join(cfgDir, "profiles")
+	if entries, err := os.ReadDir(profilesDir); err == nil {
+		for _, e := range entries {
+			if e.IsDir() {
+				profilesMap[e.Name()] = true
+			}
+		}
+	}
+
+	var profiles []string
+	for p := range profilesMap {
+		profiles = append(profiles, p)
+	}
+	sort.Strings(profiles)
+
+	fmt.Println("=== sec-agent Global Workstation Status & Inventory ===")
+	fmt.Printf("CLI Version:            %s (Build Date: %s)\n", Version, BuildDate)
+	fmt.Printf("Config Directory:       %s\n\n", cfgDir)
+
+	fmt.Printf("%-24s %-10s %-20s %-12s %s\n", "PROFILE NAME", "ENV TIER", "SESSION STATUS", "STORED KEYS", "EXPIRED")
+	fmt.Println(strings.Repeat("-", 80))
+
+	type ProfileInfo struct {
+		Name       string
+		Tier       string
+		Unlocked   bool
+		DaemonRun  bool
+		TotalKeys  int
+		ExpKeys    int
+		SocketPath string
+		Namespaces []string
+	}
+
+	var profileInfos []ProfileInfo
+	totalGlobalExpiring := 0
+
+	for _, p := range profiles {
+		tier := getProfileEnvTier(p)
+		if tier == "" {
+			tier = "dev"
+		}
+
+		info := ProfileInfo{
+			Name: p,
+			Tier: strings.ToUpper(tier),
+		}
+
+		resp, err := queryDaemonRaw(p, daemon.IPCRequest{Action: "status"})
+		if err == nil && resp != nil && resp.Success {
+			info.DaemonRun = true
+			if unlocked, ok := resp.StatusInfo["is_unlocked"].(bool); ok {
+				info.Unlocked = unlocked
+			}
+			if total, ok := resp.StatusInfo["total_secrets"].(float64); ok {
+				info.TotalKeys = int(total)
+			} else if total, ok := resp.StatusInfo["total_secrets"].(int); ok {
+				info.TotalKeys = total
+			}
+			if exp, ok := resp.StatusInfo["expired_secrets"].(float64); ok {
+				info.ExpKeys = int(exp)
+			} else if exp, ok := resp.StatusInfo["expired_secrets"].(int); ok {
+				info.ExpKeys = exp
+			}
+			if sock, ok := resp.StatusInfo["socket_path"].(string); ok {
+				info.SocketPath = sock
+			}
+		}
+
+		bkResp, bkErr := queryDaemonRaw(p, daemon.IPCRequest{Action: "backup"})
+		if bkErr == nil && bkResp != nil && bkResp.Success {
+			nsMap := make(map[string]int)
+			for path, entry := range bkResp.Secrets {
+				if strings.HasPrefix(path, "__") {
+					continue
+				}
+				parts := strings.SplitN(path, "/", 2)
+				if len(parts) > 1 {
+					nsMap[parts[0]+"/"]++
+				} else {
+					nsMap["root"]++
+				}
+				if !entry.Expires.IsZero() && time.Until(entry.Expires) <= 7*24*time.Hour && time.Until(entry.Expires) > 0 {
+					totalGlobalExpiring++
+				}
+			}
+			var nsList []string
+			for ns, count := range nsMap {
+				nsList = append(nsList, fmt.Sprintf("%s (%d)", ns, count))
+			}
+			sort.Strings(nsList)
+			info.Namespaces = nsList
+		}
+
+		profileInfos = append(profileInfos, info)
+	}
+
+	for _, info := range profileInfos {
+		tierBadge := info.Tier
+		switch info.Tier {
+		case "DEV":
+			tierBadge = "\033[32mDEV🟢\033[0m"
+		case "DTA", "STAGING":
+			tierBadge = "\033[33mSTAGING🟡\033[0m"
+		case "PROD":
+			tierBadge = "\033[31mPROD🔴\033[0m"
+		}
+
+		sessStatus := "\033[31mLOCKED\033[0m"
+		if info.Unlocked {
+			sessStatus = "\033[32mUNLOCKED (TouchID)\033[0m"
+		} else if !info.DaemonRun {
+			sessStatus = "\033[90mInactive\033[0m"
+		}
+
+		fmt.Printf("%-24s %-19s %-29s %-12d %-12d\n",
+			info.Name,
+			tierBadge,
+			sessStatus,
+			info.TotalKeys,
+			info.ExpKeys,
+		)
+	}
+
+	fmt.Println("\n=== Key Vault Namespaces & Groups Across Profiles ===")
+	for _, info := range profileInfos {
+		if len(info.Namespaces) > 0 {
+			fmt.Printf(" • %-24s: %s\n", info.Name, strings.Join(info.Namespaces, ", "))
+		} else {
+			fmt.Printf(" • %-24s: (No secrets stored)\n", info.Name)
+		}
+	}
+
+	if totalGlobalExpiring > 0 {
+		fmt.Printf("\n\033[33m⚠️  EXPIRATION WARNING: %d secret key(s) expiring within the next 7 days across all profiles!\033[0m\n", totalGlobalExpiring)
+		fmt.Println("Run 'sec ls --expiring 7d --profile <name>' for detailed inspection.")
+	}
+}
+
+func handleStatus(profile string, args []string) {
+	for _, arg := range args {
+		if arg == "--all" || arg == "-a" {
+			handleStatusAll()
+			return
+		}
+	}
+
 	resp, err := queryDaemon(profile, daemon.IPCRequest{Action: "status"})
 	if err != nil {
 		fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running. Please run 'sec open' to unlock the session."), "Run 'eval $(sec open)' to start/unlock the session.")

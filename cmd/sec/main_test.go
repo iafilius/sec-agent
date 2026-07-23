@@ -410,6 +410,14 @@ func TestMainIntegration(t *testing.T) {
 		t.Fatalf("sec get after rotation failed: %v, expected 'rotated-secret-val', got %q", err, string(getRotOut))
 	}
 
+	// 6t. Test v1.7.0 feature: sec status --all
+	statusAllCmd := exec.Command("./sec_test_bin", "status", "--all")
+	statusAllCmd.Env = testEnv
+	statusAllOut, err := statusAllCmd.Output()
+	if err != nil || !strings.Contains(string(statusAllOut), "Global Workstation Status") {
+		t.Fatalf("sec status --all failed: %v, out: %s", err, string(statusAllOut))
+	}
+
 	// Reset profile env to dev for remaining tests
 	resetProfCmd := exec.Command("./sec_test_bin", "profile", "set-env", "dev", "--profile", profile)
 	resetProfCmd.Env = testEnv

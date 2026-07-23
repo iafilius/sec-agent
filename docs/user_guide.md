@@ -478,6 +478,69 @@ sec ls --expiring 14d
 
 ---
 
+### 3.15. Global Workstation Status Dump (`sec status --all`) (v1.7.0)
+To inspect all registered project profiles, background daemon processes, session lock states, environment tiers, and namespace inventories in a single view:
+```bash
+sec status --all
+```
+Output:
+```text
+=== sec-agent Global Workstation Status & Inventory ===
+CLI Version:            v1.7.0 (Build Date: 2026-07-23)
+Config Directory:       /Users/username/.config/sec
+
+PROFILE NAME             ENV TIER   SESSION STATUS    STORED KEYS  EXPIRED
+--------------------------------------------------------------------------------
+default                  DEV🟢      UNLOCKED (TouchID) 14           0
+velocloud-provider-dev   DEV🟢      UNLOCKED (TouchID) 8            0
+velocloud-provider-prod  PROD🔴     LOCKED            6            1
+
+=== Key Vault Namespaces & Groups Across Profiles ===
+ • default                 : bgp/ (3), aws/ (2)
+ • velocloud-provider-dev  : orchestrator/ (2), database/ (1)
+ • velocloud-provider-prod : orchestrator/ (2), audit/ (4)
+```
+
+---
+
+### 3.16. Migration Example Prompts & Git History Security Protocol (v1.7.0)
+
+#### AI Assistant Migration Prompts
+When prompting AI coding assistants (such as Antigravity, GitHub Copilot, or Cursor) to onboard a repository or folder to `sec-agent`, use the following copy-pasteable prompt templates:
+
+* **Prompt A (Repository Onboarding)**:
+  > *"Migrate all plaintext credentials from `.env` in this workspace into a project-scoped `sec` vault profile named `<project-dev>`, sanitize `.env` to `<migrated_to_sec>` placeholders, and create a `.secrc` file in the project root."*
+
+* **Prompt B (Multi-File Sweep)**:
+  > *"Scan this repository for any `.env`, `.env.local`, or `.env.development` files. Migrate all credentials to `sec` under group prefix `app/env/`, sanitize local disk files, and configure `sec run -- <cmd>` in our Makefile/package.json."*
+
+#### Git History Exposure Caution & Remediation Protocol
+> [!CAUTION]
+> **Git History Exposure Warning**:
+> Running `sec migrate-local .env` sanitizes local disk files to `<migrated_to_sec>` placeholders. **However, if `.env` was previously committed to Git, those plaintext credentials STILL EXIST permanently in Git commit history!**
+
+**Remediation Steps**:
+1. **Rotate Credentials Immediately**: Assume any key ever committed to a Git repository is compromised.
+2. **Purge File from Git History**:
+   ```bash
+   pip install git-filter-repo
+   git filter-repo --path .env --invert-paths --force
+   ```
+3. **Force-Push Cleaned History to Remote**:
+   ```bash
+   git push origin --force --all --tags
+   ```
+
+---
+
+### 3.17. Project Vault Governance & Namespace Best Practices (v1.7.0)
+For clean, enterprise-grade secret governance across team projects:
+1. **One Profile Per Environment**: Create dedicated vault profiles per project and environment tier (`--profile velocloud-provider-dev`, `--profile velocloud-provider-prod`).
+2. **Namespace Group Prefixes**: Structure secret paths using functional group prefixes (`orchestrator/`, `database/`, `aws/`).
+3. **Repository `.secrc` Config**: Always commit a `.secrc` file to repository roots containing `{"profile": "<project-dev>", "prefix": "<namespace>"}` so developers and AI agents can execute `sec run -- <cmd>` without remembering flags.
+
+---
+
 ## 4. Troubleshooting & Verification
 
 ### Verifying Hardened Runtime

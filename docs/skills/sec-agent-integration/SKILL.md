@@ -200,7 +200,31 @@ sec rotate velocloud-provider-dev/vco_token
 sec ls --expiring 14d
 ```
 
-### 2.15. Session Restart & Locking
+### 2.15. Global Workstation Status Dump (`sec status --all`)
+```bash
+# Output single-pane-of-glass status matrix across all vault profiles and daemons
+sec status --all
+```
+*   **Global Diagnostics**: Discovers all registered profiles, checks background daemon socket PIDs, reports Touch ID session unlock state (`UNLOCKED` vs `LOCKED`), active/expired key counts, and namespace prefixes.
+
+### 2.16. Migration Prompts & Git History Security Protocol
+*   **AI Assistant Migration Prompt**:
+    > *"Migrate all plaintext credentials from `.env` in this workspace into a project-scoped `sec` vault profile named `<project-dev>`, sanitize `.env` to `<migrated_to_sec>` placeholders, and create a `.secrc` file in the project root."*
+*   **Git History Exposure Caution**:
+    > ⚠️ **CAUTION**: Running `sec migrate-local .env` sanitizes disk files to `<migrated_to_sec>` placeholders. **However, if `.env` was previously committed to Git, those credentials STILL EXIST in Git commit history!**
+    > Purge files from Git history using `git-filter-repo`:
+    > ```bash
+    > pip install git-filter-repo
+    > git filter-repo --path .env --invert-paths --force
+    > git push origin --force --all --tags
+    > ```
+
+### 2.17. Project Vault Governance Best Practices
+*   **One Profile Per Environment**: Always scope vaults per environment (`--profile <project>-dev`, `--profile <project>-prod`).
+*   **Namespace Prefixes**: Group secrets under functional namespace prefixes (`orchestrator/`, `database/`, `aws/`).
+*   **Workspace `.secrc`**: Always check for or create a `.secrc` file in repository roots to ensure seamless, flagless execution for team colleagues.
+
+### 2.18. Session Restart & Locking
 ```bash
 # Restart daemon, apply binary updates, and re-authenticate in one step
 eval $(sec restart)
