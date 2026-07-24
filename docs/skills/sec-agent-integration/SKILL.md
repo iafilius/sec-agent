@@ -278,11 +278,11 @@ sec-agent lock
 
 If a command fails, `sec-agent` returns programmatic JSON or text error blocks:
 
-| Error Code | Root Cause | Remediation Hint to User |
+| Error Code | Root Cause | Remediation Hint to User & AI Auto-Open Recovery |
 | :--- | :--- | :--- |
-| `DAEMON_NOT_RUNNING` | The background socket is inactive. | Ask user to run `eval $(sec-agent open)` or use `--auto-open` |
-| `SESSION_LOCKED` | Touch ID grace period expired or locked. | Ask user to run `eval $(sec-agent open)` |
-| `INVALID_TOKEN` | `SEC_SESSION_TOKEN` missing in shell. | Ask user to run `eval $(sec-agent open)` |
+| `DAEMON_NOT_RUNNING` | The background socket is inactive. | Ask user to run `eval $(sec-agent open)` or pass `--auto-open` |
+| `SESSION_LOCKED` | Touch ID grace period expired or locked. | Ask user to run `eval $(sec-agent open)` or pass `--auto-open` / `export SEC_AUTO_OPEN=1` |
+| `INVALID_TOKEN` / `ACCESS DENIED` | `SEC_SESSION_TOKEN` missing or mismatched in sub-shell. | Ask user to run `eval $(sec-agent open)`, or use `--auto-open` / `SEC_AUTO_OPEN=1` to auto-trigger Touch ID and update process token |
 | `SECRET_NOT_FOUND` | Path does not exist in store. | Ask user to check path or run `sec-agent set <path>` |
 | `ACCESS_DENIED_HIJACK` | Remote SSH or ScreenSharing detected. | Session locked automatically for anti-hijack security |
 
@@ -291,6 +291,9 @@ If a command fails, `sec-agent` returns programmatic JSON or text error blocks:
 ## 4. Key Takeaways for AI Assistants
 
 1. **Always Favor `sec-agent run -- <cmd>`**: Never ask users to write plaintext secrets to `.env` files.
-2. **Handle Locks Gracefully**: If a tool call errors with `DAEMON_NOT_RUNNING`, tell the user: *"Please run `eval $(sec-agent open)` in your terminal to unlock the Touch ID session."*
+2. **Handle Locks & Unset Session Tokens Gracefully**: If a tool call errors with `DAEMON_NOT_RUNNING` or `ACCESS DENIED: Invalid or missing session token`, either:
+   * Tell the user: *"Please run `eval $(sec-agent open)` in your terminal to authorize this shell session."*, OR
+   * Use `--auto-open` (e.g. `sec-agent set <path> --auto-open` or `export SEC_AUTO_OPEN=1`), which automatically triggers an inline Touch ID prompt, updates `SEC_SESSION_TOKEN` in process memory, and retries the command cleanly.
 3. **Use Scoped Profiles**: Always pass `--profile` or inspect `.secrc` to ensure secrets are isolated per project.
-4. **Use Interactive Prompts or Stdin for `sec-agent set`**: Avoid outputting raw secret strings in command arguments when adding keys.
+4. **Use Interactive Prompts or Stdin for `sec-agent set`**: Avoid outputting raw secret strings in command arguments when adding keys (use `--stdin` or interactive prompts).
+
