@@ -99,22 +99,60 @@ eval $(sec open)
 
 ### 2. Store and Retrieve Secrets
 ```bash
-# Store a secret
-sec set app-secrets/db-pass "my-super-secret-password"
+# 1. Interactive Hidden Prompt (RECOMMENDED - No Shell History / ps aux leakage)
+sec set app-secrets/db-pass
+# Enter secret value: [hidden]
+# Re-enter secret value: [hidden]
 
-# Retrieve a secret
-sec get app-secrets/db-pass
-# Output: my-super-secret-password
+# 2. Pipe from Stdin
+cat secret.txt | sec set app-secrets/db-pass --stdin
+
+# 3. Direct Positional Value
+sec set app-secrets/db-pass "my-super-secret-password"
 ```
 
-### 3. Run Applications (Frictionless Injection)
+> [!TIP]
+> **Shell History & Process List Security**: Passing secret values directly as CLI command-line positional arguments can be recorded in shell history (`.zsh_history`, `.bash_history`) or inspected by non-root OS processes via `ps aux`. For sensitive production keys, **always use the interactive prompt (`sec set <path>`) or piped stdin (`--stdin`)**.
+
+### 3. Run Applications (Frictionless Injection & Granular Scoping)
 Instead of sourcing `.env` files, execute commands directly in a wrapped environment. `sec` automatically translates paths like `app-secrets/db-pass` to uppercase environment variables (`APP_SECRETS_DB_PASS`):
 ```bash
+# Execute test process with secrets injected & auto-redacted in logs
 sec run -- go test -v ./...
-# Executes test process with APP_SECRETS_DB_PASS available in memory
+
+# Restrict injection strictly to specified keys (Principle of Least Privilege for AI subagents)
+sec run --allow-keys VCO_URL,VCO_ENTERPRISE_ID -- make test-unit
+
+# Inspect injection plan without executing command or prompting Touch ID
+sec run --dry-run -- make testacc
 ```
 
-### 4. Lock Session
+### 4. Automated Token Rotation & Expiring Inventory
+Register rotation hooks to rotate tokens in seconds and inspect expiring keys:
+```bash
+# Register token with custom rotation hook command
+sec set velocloud-provider-dev/vco_token "..." --expires 30d \
+  --rotate-cmd "sec run --profile velocloud-provider-dev -- curl -s -X POST \$VCO_URL/portal/rest/login/enterpriseLogin -d '{\"username\":\"admin\",\"password\":\"\$VCO_PASSWORD\"}' | jq -r .token" \
+  --rotate-ttl 30d
+
+# Trigger one-command token rotation
+sec rotate velocloud-provider-dev/vco_token
+
+# Inspect expiring keys across vault profiles
+sec ls --expiring 14d
+```
+
+### 5. Global Workstation Status & Entropy Linter
+Single-pane-of-glass status dump and side-channel safe entropy audit:
+```bash
+# Global status matrix across all vault profiles & background daemons
+sec status --all
+
+# Side-channel safe password entropy & weakness scan
+sec check --scan-weak
+```
+
+### 6. Lock Session
 Wipe decrypted credentials from system memory and lock the daemon:
 ```bash
 sec lock
@@ -123,7 +161,7 @@ sec lock
 
 ---
 
-## 🧹 Local Dotenv Migration
+## 🧹 Local Dotenv Migration & Git Security Protocol
 
 To clean up plaintext credentials in local folders, `sec migrate-local` automatically scans a dotenv file, securely stores all keys inside the enclave daemon, and replaces raw values with safe placeholders:
 
@@ -138,6 +176,20 @@ DATABASE_PASSWORD="<migrated_to_sec>"
 STRIPE_KEY="<migrated_to_sec>"
 ```
 *Note: Since standard dotenv libraries do not override existing process variables, running your app via `sec run -- <app>` automatically overrides these placeholders in memory with the actual secrets, requiring **zero codebase modifications**.*
+
+> [!CAUTION]
+> **Git History Exposure Warning**:
+> Running `sec migrate-local .env` sanitizes local disk files to `<migrated_to_sec>` placeholders. **However, if `.env` was previously committed to Git, those plaintext credentials STILL EXIST permanently in Git commit history!**
+>
+> **Remediation Protocol**:
+> 1. **Rotate Credentials Immediately**: Assume any key ever committed to Git is compromised.
+> 2. **Purge File from Git History**:
+>    ```bash
+>    pip install git-filter-repo
+>    git filter-repo --path .env --invert-paths --force
+>    git push origin --force --all --tags
+>    ```
+>    *Note: Force-pushing rewritten history requires **Repository Admin privileges** to bypass branch protection rules.*
 
 ---
 
@@ -260,4 +312,11 @@ In enterprise environments, developer laptops are often enrolled in Mobile Devic
 
 1.  **Hardware-Enforced Privacy**: Secrets are encrypted at rest using keys sealed inside the macOS Secure Enclave (`SecAccessControl`). Even if an MDM script or local admin process reads the database file (`secrets.enc`), it cannot decrypt the contents without physical Touch ID contact on the console.
 2.  **Remote Administration Intercepts**: Active corporate remote support sessions (such as `screensharingd` or `AppleVNCServer`) and remote SSH administration sessions (`SSH_CLIENT`, `SSH_TTY`) are automatically intercepted. The daemon instantly locks itself and purges decrypted keys from RAM, preventing remote support engineers or administrative monitoring software from viewing your secrets.
+
+---
+
+## 📄 License
+
+This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) file for details.
+Copyright (c) 2026 Arjan Filius.
 

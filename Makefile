@@ -2,7 +2,7 @@ VERSION := v1.9.0
 BUILD_DATE := $(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
 LDFLAGS := -ldflags "-X main.Version=$(VERSION) -X main.BuildDate=$(BUILD_DATE)"
 
-.PHONY: all build clean test codesign verify-sip sec-check sync
+.PHONY: all build clean test codesign verify-sip sec-check sync package
 
 all: build codesign
 
@@ -12,6 +12,17 @@ build:
 codesign: build
 	@echo "Signing binary with macOS Hardened Runtime..."
 	codesign --force --options runtime --sign - sec
+
+package:
+	@echo "=== Building Release Binaries & Tarballs for $(VERSION) ==="
+	rm -rf dist && mkdir -p dist
+	go build $(LDFLAGS) -o dist/sec cmd/sec/main.go
+	codesign --force --options runtime --sign - dist/sec
+	cp README.md dist/README.md
+	tar -czf dist/sec-agent_$(VERSION)_darwin_arm64.tar.gz -C dist sec README.md
+	rm -f dist/sec dist/README.md
+	cd dist && shasum -a 256 *.tar.gz > checksums.txt
+	@echo "=== Release packages generated in dist/ ==="
 
 clean:
 	rm -f sec
@@ -40,6 +51,6 @@ sync:
 	@echo "=== Syncing core codebase and packages to sec-agent/ ==="
 	cp -r cmd docs internal sec-agent/
 	rm -f sec-agent/docs/corporate_pitch_communications.md
-	cp go.mod go.sum Makefile sec-agent/
+	cp go.mod go.sum Makefile LICENSE README.md sec-agent/
 	@echo "=== Running sanity build & tests inside sec-agent/ ==="
 	cd sec-agent && make build codesign && make sec-check && go test -v ./...
