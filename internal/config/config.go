@@ -27,7 +27,45 @@ func GetConfigDir() (string, error) {
 		return "", fmt.Errorf("failed to create config directory %s: %w", dir, err)
 	}
 
+	_ = ensureConfigReadme(dir)
+
 	return dir, nil
+}
+
+func ensureConfigReadme(dir string) error {
+	readmePath := filepath.Join(dir, "README.md")
+	if _, err := os.Stat(readmePath); err == nil {
+		return nil
+	}
+
+	content := `# sec-agent Local User Data & Vault Configuration Directory
+
+This directory (~/.config/sec-agent/) was automatically created by **sec-agent** (macOS Enclave-Bound Session Agent).
+
+## 🛠️ Tool & Repository Information
+
+* **Tool Name**: sec-agent
+* **Official Repository**: https://github.com/iafilius/sec-agent
+* **Documentation**: https://github.com/iafilius/sec-agent/tree/master/docs
+* **License**: MIT License (Copyright (c) 2026 Arjan Filius)
+
+---
+
+## 📁 Directory Contents & Purpose
+
+* **secrets.enc**: AES-256-GCM encrypted database store holding your local secret keys and configuration entries. Encrypted at rest using a master key sealed inside the macOS **Secure Enclave** (SecAccessControl).
+* **secrets.enc.bak**: Automatic atomic backup copy created before database write operations.
+* **sec-agent.sock** (or sec-agent_<profile>.sock): Unix domain socket used for IPC communication between the sec-agent CLI utility and background session daemons.
+* **audit.log**: Security audit log tracking authentication events, query access counts, and session lock history.
+
+---
+
+## ⚠️ Security Notes
+
+1. **Do not delete secrets.enc**: Deleting this file will erase your stored encrypted credentials.
+2. **Secure Enclave Protection**: Secrets in secrets.enc cannot be decrypted without Touch ID console authentication on this hardware laptop.
+`
+	return os.WriteFile(readmePath, []byte(content), 0600)
 }
 
 // GetSocketPath returns the path to the Unix domain socket for the daemon.
