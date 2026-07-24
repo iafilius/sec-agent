@@ -278,11 +278,11 @@ sec-agent lock
 
 If a command fails, `sec-agent` returns programmatic JSON or text error blocks:
 
-| Error Code | Root Cause | Remediation Hint to User & AI Auto-Open Recovery |
+| Error Code | Root Cause | Remediation Policy for AI Assistants |
 | :--- | :--- | :--- |
-| `DAEMON_NOT_RUNNING` | The background socket is inactive. | Ask user to run `eval $(sec-agent open)` or pass `--auto-open` |
-| `SESSION_LOCKED` | Touch ID grace period expired or locked. | Ask user to run `eval $(sec-agent open)` or pass `--auto-open` / `export SEC_AUTO_OPEN=1` |
-| `INVALID_TOKEN` / `ACCESS DENIED` | `SEC_SESSION_TOKEN` missing or mismatched in sub-shell. | Ask user to run `eval $(sec-agent open)`, or use `--auto-open` / `SEC_AUTO_OPEN=1` to auto-trigger Touch ID and update process token |
+| `DAEMON_NOT_RUNNING` | The background socket is inactive. | Ask user **once** to run `eval $(sec-agent open)` in their terminal |
+| `SESSION_LOCKED` | Touch ID grace period expired or locked. | Ask user **once** to run `eval $(sec-agent open)` in their terminal |
+| `INVALID_TOKEN` / `ACCESS DENIED` | `SEC_SESSION_TOKEN` missing or mismatched in sub-shell. | Ask user **once** to run `eval $(sec-agent open)` in their terminal |
 | `SECRET_NOT_FOUND` | Path does not exist in store. | Ask user to check path or run `sec-agent set <path>` |
 | `ACCESS_DENIED_HIJACK` | Remote SSH or ScreenSharing detected. | Session locked automatically for anti-hijack security |
 
@@ -291,9 +291,12 @@ If a command fails, `sec-agent` returns programmatic JSON or text error blocks:
 ## 4. Key Takeaways for AI Assistants
 
 1. **Always Favor `sec-agent run -- <cmd>`**: Never ask users to write plaintext secrets to `.env` files.
-2. **Handle Locks & Unset Session Tokens Gracefully**: If a tool call errors with `DAEMON_NOT_RUNNING` or `ACCESS DENIED: Invalid or missing session token`, either:
-   * Tell the user: *"Please run `eval $(sec-agent open)` in your terminal to authorize this shell session."*, OR
-   * Use `--auto-open` (e.g. `sec-agent set <path> --auto-open` or `export SEC_AUTO_OPEN=1`), which automatically triggers an inline Touch ID prompt, updates `SEC_SESSION_TOKEN` in process memory, and retries the command cleanly.
+2. **REUSABLE SESSIONS (Strictly Forbidden to use `--auto-open` in AI Automation)**:
+   * **DO NOT pass `--auto-open` or set `SEC_AUTO_OPEN=1` in AI agent / subagent tool calls**. `--auto-open` triggers repetitive, unexpected Touch ID biometric popups on the user's laptop screen for every background command, causing severe "Fingerprint Fatigue".
+   * **The Reusable Session Model**: If a command fails with `DAEMON_NOT_RUNNING`, `SESSION_LOCKED`, or `ACCESS DENIED`, ask the user **once**:
+     > *"The `sec-agent` session is locked or uninitialized. Please run `eval $(sec-agent open)` in your terminal to authorize the session."*
+   * Once the user authorizes the session *once* with Touch ID, the background daemon session remains active and unlocked for the duration of the TTL. All subsequent AI tool calls reuse this unlocked session with zero biometric popups!
 3. **Use Scoped Profiles**: Always pass `--profile` or inspect `.secrc` to ensure secrets are isolated per project.
 4. **Use Interactive Prompts or Stdin for `sec-agent set`**: Avoid outputting raw secret strings in command arguments when adding keys (use `--stdin` or interactive prompts).
+
 
