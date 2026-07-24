@@ -545,6 +545,47 @@ For clean, enterprise-grade secret governance across team projects:
 
 ---
 
+### 3.18. Granular Key Scoping, Dry-Run Inspection & Entropy Audit (v1.8.0)
+
+#### Granular Subprocess Key Scoping (`sec run --allow-keys`)
+Enforce the Principle of Least Privilege (PoLP) by restricting child process injection exclusively to specified keys or environment variable aliases:
+```bash
+sec run --allow-keys VCO_URL,VCO_ENTERPRISE_ID -- make test-unit
+```
+
+#### Subprocess Injection Dry-Run (`sec run --dry-run`)
+Inspect target environment variable mappings and value lengths without executing the command or prompting for Touch ID authentication:
+```bash
+sec run --dry-run -- make testacc
+# === Dry-Run: Subprocess Secret Injection Plan ===
+# Target Command:     make testacc
+# Vault Profile:      velocloud-provider-dev (Tier: DEV)
+# INJECTED ENV VAR    VAULT KEY PATH                     VALUE PREVIEW
+# --------------------------------------------------------------------------------
+# VCO_URL             velocloud-provider-dev/vco_url     [REDACTED_BY_SEC] (28 chars)
+# VCO_TOKEN           velocloud-provider-dev/vco_token   [REDACTED_BY_SEC] (48 chars)
+```
+
+#### Side-Channel Safe Entropy Linter (`sec check --scan-weak`)
+Scan stored passwords against Shannon entropy thresholds ($H < 3.0$) and common weak dictionary defaults without revealing secret values, character counts, or raw metrics:
+```bash
+sec check --scan-weak
+# === Vault Secret Password Entropy & Weakness Scan ===
+# KEY PATH                            STATUS
+# ------------------------------------------------------------
+# database/dev_pass                   PASS [✓]
+# test/dummy_pass                     WEAK ENTROPY [⚠️]
+```
+
+#### Encrypted Vault Sync (`sec sync export / import`)
+Export and import encrypted vault packages for non-production team distribution:
+```bash
+sec sync export ./team-dev-vault.kdbx
+sec sync import ./team-dev-vault.kdbx
+```
+
+---
+
 ## 4. Troubleshooting & Verification
 
 ### Verifying Hardened Runtime

@@ -181,10 +181,28 @@ sec diff-profiles velocloud-provider-dev velocloud-provider-prod
 # Execute command with REAL-TIME SECRET REDACTION ENABLED BY DEFAULT in logs
 sec run -- make testacc
 
+# Restrict injection strictly to specified keys/aliases (Principle of Least Privilege)
+sec run --allow-keys VCO_URL,VCO_ENTERPRISE_ID -- make test-unit
+
+# Inspect injection mapping plan without executing command or prompting for Touch ID
+sec run --dry-run -- make testacc
+
 # Opt out of log redaction if raw output is required
 sec run --no-redact -- make testacc
 ```
 *   **Default-On Redaction**: Automatically intercepts child process `stdout` and `stderr` streams in real time and replaces active secret values with `[REDACTED_BY_SEC]` to guarantee zero log leaks in CI/CD or terminal scrollbacks.
+*   **Allowlist Scoping**: Restricts environment variable injection to specific keys for AI subagents or unit tests.
+*   **Dry-Run Inspection**: Previews the injection plan without starting the subprocess.
+
+### 2.14. Password Entropy Linter (`sec check --scan-weak`) & Encrypted Sync (`sec sync`)
+```bash
+# Run side-channel safe password entropy & weakness scan
+sec check --scan-weak
+
+# Export/import encrypted vault package for team distribution
+sec sync export ./team-dev-vault.kdbx
+sec sync import ./team-dev-vault.kdbx
+```
 
 ### 2.14. Automated Token Rotation (`sec rotate`) & Expiring Inventory (`sec ls --expiring`)
 ```bash

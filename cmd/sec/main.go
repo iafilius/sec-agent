@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
 	"os/exec"
@@ -32,7 +33,7 @@ import (
 
 var jsonErrors bool
 var (
-	Version   = "v1.7.0"
+	Version   = "v1.8.0"
 	BuildDate = "unknown"
 )
 
@@ -399,6 +400,12 @@ func main() {
 		handleBackup(profile, os.Args[2], explicitPassword)
 	case "profile":
 		handleProfile(profile, os.Args[2:])
+	case "sync":
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "Usage: sec sync export <file> | sec sync import <file>")
+			os.Exit(1)
+		}
+		handleSync(profile, os.Args[2:])
 	case "check":
 		handleCheck(profile, os.Args[2:])
 	case "restart":
@@ -457,9 +464,10 @@ func printUsage() {
 	fmt.Println("  gen <path> [--length N]         Generate random password and save to path (alias: generate)")
 	fmt.Println("  import <file> [--format <f>]    Bulk import secrets from JSON, Doppler, or AWS payloads")
 	fmt.Println("  profile [set-env dev|dta|prod] Manage profile metadata & environment classification")
-	fmt.Println("  check [--template <file>] [--required <keys>] Validate vault schema completeness")
+	fmt.Println("  check [--template <f>] [--scan-weak] Validate vault schema completeness or audit password entropy")
+	fmt.Println("  sync export|import <file>       Export/import encrypted vault package for team distribution")
 	fmt.Println("  load [<prefix>] [--format env|json] Batch-load scoped group secrets for shell sourcing")
-	fmt.Println("  run [--group <prefix>] [--confirm-prod] [--no-redact] [-- <cmd>] Execute command with secrets injected & auto-redacted in logs")
+	fmt.Println("  run [--group <p>] [--allow-keys k1,k2] [--dry-run] [--no-redact] -- <cmd> Execute process with secrets injected")
 	fmt.Println("  status                          Display session health, profile, and diagnostic metrics")
 	fmt.Println("  audit [--limit <n>] [--json]    View recent daemon security audit logs (alias: log)")
 	fmt.Println("  env [<prefix>]                   Output shell exports for secrets under prefix")
@@ -2009,6 +2017,8 @@ func (w *redactWriter) Write(p []byte) (n int, err error) {
 
 func handleRun(profile string, args []string) {
 	groupPrefix := ""
+	allowKeysStr := ""
+	dryRun := false
 	shouldRedact := true
 	var cmdArgs []string
 	foundSeparator := false
@@ -2024,6 +2034,13 @@ func handleRun(profile string, args []string) {
 				groupPrefix = args[i+1]
 				i++
 			}
+		} else if args[i] == "--allow-keys" {
+			if i+1 < len(args) {
+				allowKeysStr = args[i+1]
+				i++
+			}
+		} else if args[i] == "--dry-run" {
+			dryRun = true
 		} else if args[i] == "--no-redact" {
 			shouldRedact = false
 		} else if args[i] == "--redact" {
@@ -2036,14 +2053,18 @@ func handleRun(profile string, args []string) {
 				i++
 				continue
 			}
-			if args[i] == "--redact" || args[i] == "--no-redact" {
+			if args[i] == "--allow-keys" {
+				i++
+				continue
+			}
+			if args[i] == "--redact" || args[i] == "--no-redact" || args[i] == "--dry-run" {
 				continue
 			}
 			cmdArgs = append(cmdArgs, args[i])
 		}
 	}
 	if len(cmdArgs) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: sec run [--group <prefix>] [--profile <name>] [--confirm-prod] [--no-redact] -- <command> [args...]")
+		fmt.Fprintln(os.Stderr, "Usage: sec run [--group <prefix>] [--profile <name>] [--allow-keys <keys>] [--dry-run] [--confirm-prod] [--no-redact] -- <command> [args...]")
 		os.Exit(1)
 	}
 
@@ -2067,10 +2088,53 @@ func handleRun(profile string, args []string) {
 		os.Exit(1)
 	}
 
+	allowKeysSet := make(map[string]bool)
+	if allowKeysStr != "" {
+		for _, k := range strings.Split(allowKeysStr, ",") {
+			k = strings.TrimSpace(k)
+			if k != "" {
+				allowKeysSet[k] = true
+			}
+		}
+	}
+
+	if dryRun {
+		fmt.Println("=== Dry-Run: Subprocess Secret Injection Plan ===")
+		fmt.Printf("Target Command:     %s\n", strings.Join(cmdArgs, " "))
+		tier := getProfileEnvTier(profile)
+		if tier == "" {
+			tier = "dev"
+		}
+		fmt.Printf("Vault Profile:      %s (Tier: %s)\n", profile, strings.ToUpper(tier))
+		fmt.Printf("Redaction Enabled:  %v\n\n", shouldRedact)
+		fmt.Printf("%-24s %-36s %s\n", "INJECTED ENV VAR", "VAULT KEY PATH", "VALUE PREVIEW")
+		fmt.Println(strings.Repeat("-", 80))
+
+		count := 0
+		for path, entry := range resp.Secrets {
+			relPath := path
+			if groupPrefix != "" && strings.HasPrefix(path, groupPrefix) {
+				relPath = strings.TrimPrefix(path, groupPrefix)
+				relPath = strings.TrimPrefix(relPath, "/")
+			}
+			if relPath == "" {
+				relPath = path
+			}
+			envKey := pathToEnvKeyWithEntry(relPath, entry)
+			if len(allowKeysSet) > 0 && !allowKeysSet[envKey] && !allowKeysSet[path] && !allowKeysSet[relPath] {
+				continue
+			}
+			count++
+			fmt.Printf("%-24s %-36s [REDACTED_BY_SEC] (%d chars)\n", envKey, path, len(entry.Value))
+		}
+		fmt.Printf("\n[INFO] Dry-run completed. %d secret(s) ready to inject. No process executed.\n", count)
+		return
+	}
+
 	if groupPrefix == "" {
-		fmt.Fprintf(os.Stderr, "[INFO] No --group or .secrc specified: Injecting all %d active vault secret(s) into child process environment.\n", len(resp.Secrets))
+		fmt.Fprintf(os.Stderr, "[INFO] No --group or .secrc specified: Injecting active vault secret(s) into child process environment.\n")
 	} else {
-		fmt.Fprintf(os.Stderr, "[INFO] Injecting %d secret(s) matching group %q into child process environment.\n", len(resp.Secrets), groupPrefix)
+		fmt.Fprintf(os.Stderr, "[INFO] Injecting secret(s) matching group %q into child process environment.\n", groupPrefix)
 	}
 
 	env := os.Environ()
@@ -2085,6 +2149,9 @@ func handleRun(profile string, args []string) {
 			relPath = path
 		}
 		envKey := pathToEnvKeyWithEntry(relPath, entry)
+		if len(allowKeysSet) > 0 && !allowKeysSet[envKey] && !allowKeysSet[path] && !allowKeysSet[relPath] {
+			continue
+		}
 		env = append(env, fmt.Sprintf("%s=%s", envKey, entry.Value))
 		if len(entry.Value) > 3 {
 			secretVals = append(secretVals, entry.Value)
@@ -2398,12 +2465,44 @@ func handleRestore(profile string, filePath, explicitPassword string, args []str
 	fmt.Printf("Secrets restored successfully. Merged %d entries into active session.\n", len(secrets))
 }
 
+func handleSync(profile string, args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: sec sync export <file> | sec sync import <file>")
+		os.Exit(1)
+	}
+
+	subCmd := args[0]
+	switch subCmd {
+	case "export":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "Usage: sec sync export <file.kdbx>")
+			os.Exit(1)
+		}
+		outFile := args[1]
+		checkProductionGuard(profile, args)
+		handleBackup(profile, outFile, "")
+	case "import":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "Usage: sec sync import <file.kdbx>")
+			os.Exit(1)
+		}
+		inFile := args[1]
+		handleRestore(profile, inFile, "", args[2:])
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown sync action %q. Usage: sec sync export <file> | sec sync import <file>\n", subCmd)
+		os.Exit(1)
+	}
+}
+
 func handleCheck(profile string, args []string) {
+	scanWeak := false
 	templateFile := ""
 	var requiredKeys []string
 
 	for i := 0; i < len(args); i++ {
-		if args[i] == "--template" || args[i] == "-t" {
+		if args[i] == "--scan-weak" || args[i] == "-w" {
+			scanWeak = true
+		} else if args[i] == "--template" || args[i] == "-t" {
 			if i+1 < len(args) {
 				templateFile = args[i+1]
 				i++
@@ -2420,6 +2519,70 @@ func handleCheck(profile string, args []string) {
 				}
 			}
 		}
+	}
+
+	if scanWeak {
+		resp, err := queryDaemon(profile, daemon.IPCRequest{Action: "backup"})
+		if err != nil || !resp.Success {
+			fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running or locked for profile %q", profile), "Run 'eval $(sec open)' to unlock.")
+		}
+
+		fmt.Println("=== Vault Secret Password Entropy & Weakness Scan ===")
+		fmt.Printf("%-36s %s\n", "KEY PATH", "STATUS")
+		fmt.Println(strings.Repeat("-", 60))
+
+		weakCount := 0
+		passCount := 0
+		weakDict := []string{"admin123", "password", "p@ssword1", "123456", "secret", "test", "demo"}
+
+		var paths []string
+		for p := range resp.Secrets {
+			if !strings.HasPrefix(p, "__") {
+				paths = append(paths, p)
+			}
+		}
+		sort.Strings(paths)
+
+		for _, path := range paths {
+			entry := resp.Secrets[path]
+			val := strings.TrimSpace(entry.Value)
+			isWeak := false
+
+			if len(val) > 0 {
+				freq := make(map[rune]float64)
+				for _, r := range val {
+					freq[r]++
+				}
+				entropy := 0.0
+				valLen := float64(len(val))
+				for _, count := range freq {
+					p := count / valLen
+					entropy -= p * (math.Log2(p))
+				}
+				if entropy < 3.0 && len(val) < 16 {
+					isWeak = true
+				}
+			}
+
+			lowerVal := strings.ToLower(val)
+			for _, w := range weakDict {
+				if lowerVal == w || strings.Contains(lowerVal, w) {
+					isWeak = true
+					break
+				}
+			}
+
+			if isWeak {
+				weakCount++
+				fmt.Printf("%-36s \033[33mWEAK ENTROPY [⚠️]\033[0m\n", path)
+			} else {
+				passCount++
+				fmt.Printf("%-36s \033[32mPASS [✓]\033[0m\n", path)
+			}
+		}
+
+		fmt.Printf("\nSummary: %d key(s) PASS, %d key(s) WEAK ENTROPY.\n", passCount, weakCount)
+		return
 	}
 
 	if templateFile != "" {

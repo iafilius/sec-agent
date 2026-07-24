@@ -418,6 +418,28 @@ func TestMainIntegration(t *testing.T) {
 		t.Fatalf("sec status --all failed: %v, out: %s", err, string(statusAllOut))
 	}
 
+	// 6u. Test v1.8.0 features: sec run --allow-keys, sec run --dry-run, and sec check --scan-weak
+	dryRunCmd := exec.Command("./sec_test_bin", "run", "--dry-run", "--confirm-prod", "--profile", profile, "--", "echo", "hello")
+	dryRunCmd.Env = testEnv
+	dryRunOut, err := dryRunCmd.Output()
+	if err != nil || !strings.Contains(string(dryRunOut), "Subprocess Secret Injection Plan") {
+		t.Fatalf("sec run --dry-run failed: %v, out: %s", err, string(dryRunOut))
+	}
+
+	allowKeysCmd := exec.Command("./sec_test_bin", "run", "--allow-keys", "CUSTOM_BGP_ENV", "--confirm-prod", "--no-redact", "--profile", profile, "--", "env")
+	allowKeysCmd.Env = testEnv
+	allowKeysOut, err := allowKeysCmd.Output()
+	if err != nil || !strings.Contains(string(allowKeysOut), "CUSTOM_BGP_ENV=") {
+		t.Fatalf("sec run --allow-keys failed: %v, out: %s", err, string(allowKeysOut))
+	}
+
+	scanWeakCmd := exec.Command("./sec_test_bin", "check", "--scan-weak", "--profile", profile)
+	scanWeakCmd.Env = testEnv
+	scanWeakOut, err := scanWeakCmd.Output()
+	if err != nil || !strings.Contains(string(scanWeakOut), "Entropy & Weakness Scan") {
+		t.Fatalf("sec check --scan-weak failed: %v, out: %s", err, string(scanWeakOut))
+	}
+
 	// Reset profile env to dev for remaining tests
 	resetProfCmd := exec.Command("./sec_test_bin", "profile", "set-env", "dev", "--profile", profile)
 	resetProfCmd.Env = testEnv
