@@ -586,6 +586,39 @@ sec sync import ./team-dev-vault.kdbx
 
 ---
 
+### 3.19. Secret Ingestion Governance & Security Vector Matrix
+
+To protect local development credentials from side-channel leakage, `sec-agent` provides multiple secret ingestion methods. Each method balances security, human usability, and non-interactive automation:
+
+```
+                                  ┌───────────────────────────┐
+                                  │   SECRET INGESTION MODE   │
+                                  └─────────────┬─────────────┘
+                                                │
+                       ┌────────────────────────┼────────────────────────┐
+                       ▼                        ▼                        ▼
+           [ Interactive Hidden Prompt ]   [ Piped Stdin (--stdin) ]   [ Direct Positional Value ]
+                       │                        │                        │
+             • Terminal Echo Off      • Read from stdin stream • Simple CLI argument
+             • Zero ps aux leaks      • Zero ps aux leaks      • Visible in ps aux
+             • Zero .zsh_history      • Zero .zsh_history      • Logged in .zsh_history
+                       │                        │                        │
+                       ▼                        ▼                        ▼
+           [ RECOMMENDED: Humans ]   [ RECOMMENDED: AI / Scripts ] [ Ephemeral Dev Testing ]
+```
+
+#### Security Vector Comparison & Decision Matrix
+
+| Ingestion Method | Shell History Risk (`.zsh_history`) | Process Table Risk (`ps aux`) | Non-Interactive Script & AI Compatible? | Recommended Use Case & Persona | Why Preferred / Why Avoided |
+| :--- | :---: | :---: | :---: | :--- | :--- |
+| **`sec set <path>`** *(Interactive)* | **SAFE (0%)** | **SAFE (0%)** | ❌ Requires TTY | **Human Developers** | **PREFERRED for Humans**: Reads via `term.ReadPassword` with double confirmation. Value never touches `os.Args` or history logs. |
+| **`echo $VAL \| sec set <path> --stdin`** *(Piped Stdin)* | **SAFE (0%)** | **SAFE (0%)** | ✅ **100% Compatible** | **AI Subagents, Shell Scripts, CI/CD** | **PREFERRED for Automation & AI**: Fully non-interactive, reads directly from `stdin` stream without exposing raw keys in `ps aux` process lists. |
+| **`sec set <path> <value>`** *(Positional)* | ⚠️ Risk (CLI text) | ⚠️ Risk (Visible in `ps`) | ✅ **100% Compatible** | **Ephemeral Local PoCs** | **AVOID for Production Keys**: Handy for quick non-sensitive dev testing, but CLI text can be logged to `.zsh_history` or read by local processes via `ps aux`. |
+| **`sec gen <path> --length 32`** *(Generator)* | **SAFE (0%)** | **SAFE (0%)** | ✅ **100% Compatible** | **Random Password Creation** | **PREFERRED for New Keys**: Generates high-entropy passwords directly inside the enclave daemon without human or script handling. |
+| **`sec migrate-local .env`** *(Dotenv Import)* | **SAFE (0%)** | **SAFE (0%)** | ✅ **100% Compatible** | **Workspace Dotenv Cleanup** | **PREFERRED for Project Onboarding**: Ingests `.env` key-value pairs in bulk and sanitizes disk files to `<migrated_to_sec>` placeholders. |
+
+---
+
 ## 4. Troubleshooting & Verification
 
 ### Verifying Hardened Runtime
