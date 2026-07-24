@@ -288,12 +288,12 @@ Hardware security keys (such as YubiKeys using PGP or PKCS#11 modules) are often
 3. **Seamless Local Pipelines, Terraform & Script Integration**:
    * **YubiKey High-Friction Workflow**: YubiKeys cannot natively inject environment variables into child process trees. To pass secrets into local build scripts, `.env` loaders, or Infrastructure-as-Code tools (e.g., Terraform `TF_VAR_db_password`, AWS credentials, Docker Compose), developers are forced to write custom wrapper scripts around `gpg --decrypt` or `pkcs11-tool`. Every execution forces constant physical button taps or PIN prompts. If a developer enables PIN/touch caching to avoid tap fatigue, it opens a severe vulnerability where background scripts or remote SSH shells can steal credentials from the cached YubiKey session.
    * **`sec-agent` Frictionless Experience**:
-     * **Single Session Authorization**: Unlock your session once (`eval $(sec open)`) backed by a single Touch ID hardware check.
+     * **Single Session Authorization**: Unlock your session once (`eval $(sec-agent open)`) backed by a single Touch ID hardware check.
      * **Transparent Process Wrapper**: Execute any local pipeline, shell script, or Terraform command directly without modifying scripts or codebase files:
        ```bash
-       sec run -- terraform plan
-       sec run -- make deploy-staging
-       sec run -- docker compose up
+       sec-agent run -- terraform plan
+       sec-agent run -- make deploy-staging
+       sec-agent run -- docker compose up
        ```
      * **Automatic Key-to-Env Mapping**: Secret paths (e.g. `tf-vars/db-password`) are automatically converted to uppercase environment variables (`TF_VARS_DB_PASSWORD` or `AWS_SECRET_ACCESS_KEY`) in child process memory.
      * **Zero-Codebase Dotenv Overrides**: Automatically overrides `<migrated_to_sec>` placeholders in `.env` files in memory—requiring **zero code changes** in your application or build pipelines.
@@ -303,7 +303,7 @@ Hardware security keys (such as YubiKeys using PGP or PKCS#11 modules) are often
 
 ## 🤖 AI Agent Integration (Bundled Agent Skill)
 
-To make AI-assisted software development frictionless, `sec-agent` includes a pre-packaged **Agent Skill** (`docs/skills/sec-agent-integration/SKILL.md`). This enables AI coding assistants (such as Antigravity, Cursor, Claude Code, Windsurf, or custom agent frameworks) to use `sec` automatically across your project workspaces.
+To make AI-assisted software development frictionless, `sec-agent` includes a pre-packaged **Agent Skill** (`docs/skills/sec-agent-integration/SKILL.md`). This enables AI coding assistants (such as Antigravity, Cursor, Claude Code, Windsurf, or custom agent frameworks) to use `sec-agent` automatically across your project workspaces.
 
 ### Quick Skill Setup for AI Assistants:
 Simply copy or link the bundled skill into your agent's skills directory:
@@ -315,9 +315,9 @@ cp docs/skills/sec-agent-integration/SKILL.md ~/.gemini/config/skills/sec-agent-
 ```
 
 Once installed, your AI assistant will automatically:
-* Check daemon lock status (`sec version`) and prompt for `eval $(sec open)` when needed.
-* Wrap local test/build/deploy commands with `sec run -- <cmd>` to inject credentials in memory without creating plaintext `.env` files.
-* Help migrate legacy `.env` files using `sec migrate-local`.
+* Check daemon lock status (`sec-agent version`) and prompt for `eval $(sec-agent open)` when needed.
+* Wrap local test/build/deploy commands with `sec-agent run -- <cmd>` to inject credentials in memory without creating plaintext `.env` files.
+* Help migrate legacy `.env` files using `sec-agent migrate-local`.
 
 ---
 
