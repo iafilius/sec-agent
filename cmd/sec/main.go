@@ -309,11 +309,20 @@ func main() {
 		}
 		handleGet(profile, os.Args[2], os.Args[3:])
 	case "set":
-		if len(os.Args) < 4 {
-			fmt.Fprintln(os.Stderr, "Usage: sec set <path> <value> [--comment <comment>] [--meta key=value ...]")
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "Usage: sec set <path> [<value>] [--stdin] [--comment <comment>] [--meta key=value ...]")
 			os.Exit(1)
 		}
-		handleSet(profile, os.Args[2], os.Args[3], os.Args[4:])
+		path := os.Args[2]
+		val := ""
+		args := []string{}
+		if len(os.Args) >= 4 && !strings.HasPrefix(os.Args[3], "-") {
+			val = os.Args[3]
+			args = os.Args[4:]
+		} else {
+			args = os.Args[3:]
+		}
+		handleSet(profile, path, val, args)
 	case "mv", "rename":
 		if len(os.Args) < 4 {
 			fmt.Fprintln(os.Stderr, "Usage: sec mv <old-path> <new-path> [--prefix]")
@@ -822,6 +831,46 @@ func handleSet(profile string, path, value string, args []string) {
 	comment := ""
 	metadata := make(map[string]string)
 	expiresStr := ""
+	useStdin := false
+
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--stdin" {
+			useStdin = true
+		}
+	}
+
+	if value == "-" || useStdin {
+		r := bufio.NewReader(os.Stdin)
+		input, err := r.ReadString('\n')
+		if err != nil && err != io.EOF {
+			fail("STDIN_READ_ERROR", fmt.Errorf("failed to read secret from stdin: %v", err), "")
+		}
+		value = strings.TrimRight(input, "\r\n")
+	} else if value == "" {
+		if !term.IsTerminal(int(os.Stdin.Fd())) {
+			fail("MISSING_ARGUMENT", fmt.Errorf("secret value required for %q. Pass value, pipe stdin (--stdin), or run interactively", path), "Usage: sec set <path> or echo val | sec set <path> --stdin")
+		}
+		fmt.Fprintf(os.Stderr, "Enter secret value for %q: ", path)
+		bytePass, err := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Fprintln(os.Stderr)
+		if err != nil {
+			fail("READ_PASSWORD_ERROR", fmt.Errorf("failed to read password: %v", err), "")
+		}
+		val1 := string(bytePass)
+
+		fmt.Fprintf(os.Stderr, "Re-enter secret value for %q: ", path)
+		bytePass2, err := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Fprintln(os.Stderr)
+		if err != nil {
+			fail("READ_PASSWORD_ERROR", fmt.Errorf("failed to read password: %v", err), "")
+		}
+		val2 := string(bytePass2)
+
+		if val1 != val2 {
+			fail("PASSWORD_MISMATCH", fmt.Errorf("entered secret values do not match"), "Please re-run sec set and enter matching values.")
+		}
+		value = val1
+	}
 
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--comment" || args[i] == "-c" {

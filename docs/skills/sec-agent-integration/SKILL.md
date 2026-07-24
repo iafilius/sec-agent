@@ -52,7 +52,20 @@ sec run --group my-project/terraform/acceptance -- terraform plan
 # Export shell environment variables for a specific purpose/group (eval friendly)
 eval $(sec load my-project/terraform/acceptance)
 
-# Query a group of secrets matching a path prefix
+### 2.3. Storing Secrets Securely (Interactive Prompt & Stdin)
+```bash
+# 1. Interactive Hidden Prompt (Prevents shell history & ps aux process list leakage)
+sec set app-secrets/db-pass
+
+# 2. Pipe secret value from Stdin
+echo "secret-value" | sec set app-secrets/db-pass --stdin
+
+# 3. Direct Positional Value
+sec set app-secrets/db-pass "secret-value"
+```
+*   **Security Best Practice**: Avoid passing sensitive secret values directly as positional arguments in production, as command-line arguments can be logged to `.zsh_history` or observed via `ps aux`. Use interactive prompts or `--stdin` for high-security credentials.
+
+### 2.4. Query a group of secrets matching a path prefix
 sec get my-project/terraform/acceptance/ --prefix [--json]
 ```
 
