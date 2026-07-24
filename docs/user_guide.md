@@ -461,20 +461,28 @@ When running `sec run` or `sec get` against a profile tagged as `prod`:
 ---
 
 ### 3.14. Automated Token Rotation & Expiring Inventory (v1.6.0)
-To ensure zero-downtime token management, `sec` supports registering custom rotation commands and inspecting expiring vault entries:
+To ensure zero-downtime token management, `sec-agent` supports registering custom rotation commands and inspecting expiring vault entries:
 
-#### Secret Rotation Hook Registration (`sec set --rotate-cmd`)
+#### Secret Rotation Hook Registration (`sec-agent set --rotate-cmd`)
 Bind a custom rotation script command and rotation TTL duration to a secret entry:
 ```bash
-sec set velocloud-provider-dev/vco_token "eyJhbGci..." --expires 30d \
-  --rotate-cmd "sec run --profile velocloud-provider-dev -- curl -s -X POST \$VCO_URL/portal/rest/login/enterpriseLogin -d '{\"username\":\"admin\",\"password\":\"\$VCO_PASSWORD\"}' | jq -r .token" \
+sec-agent set velocloud-provider-dev/vco_token "eyJhbGci..." --expires 30d \
+  --rotate-cmd "sec-agent run --profile velocloud-provider-dev -- curl -s -X POST \$VCO_URL/portal/rest/login/enterpriseLogin -d '{\"username\":\"admin\",\"password\":\"\$VCO_PASSWORD\"}' | jq -r .token" \
   --rotate-ttl 30d
 ```
 
-#### Automated Token Rotation (`sec rotate <path>`)
+> [!WARNING]
+> **Token Rotation Dependency & Prerequisites**:
+> In many enterprise systems (e.g. VeloCloud VCO, OAuth2 Password Grants, or Cloud IAM), **an expired token cannot renew itself using just the expired token value**.
+> 
+> To ensure seamless rotation:
+> 1. Store the underlying primary authentication credentials (e.g., `vco_username` and `vco_password`) in the same vault profile.
+> 2. Wrap your `--rotate-cmd` with `sec-agent run --profile <profile> -- <cmd>`. This allows the rotation script to receive `$VCO_USERNAME` and `$VCO_PASSWORD` in memory to authenticate to the login endpoint and issue a fresh token.
+
+#### Automated Token Rotation (`sec-agent rotate <path>`)
 Triggers execution of the registered rotation script in a memory-isolated process container, captures the new token string from stdout, updates the vault entry, and resets the expiration timer:
 ```bash
-sec rotate velocloud-provider-dev/vco_token
+sec-agent rotate velocloud-provider-dev/vco_token
 # [INFO] Executing rotation hook for 'velocloud-provider-dev/vco_token'...
 # [✓] Secret 'velocloud-provider-dev/vco_token' successfully rotated!
 # [✓] Expiration timer updated to: 2026-08-22T20:00:00Z
@@ -649,6 +657,40 @@ To protect local development credentials from side-channel leakage, `sec-agent` 
 | **`sec set <path> <value>`** *(Positional)* | ⚠️ Risk (CLI text) | ⚠️ Risk (Visible in `ps`) | ✅ **100% Compatible** | **Ephemeral Local PoCs** | **AVOID for Production Keys**: Handy for quick non-sensitive dev testing, but CLI text can be logged to `.zsh_history` or read by local processes via `ps aux`. |
 | **`sec gen <path> --length 32`** *(Generator)* | **SAFE (0%)** | **SAFE (0%)** | ✅ **100% Compatible** | **Random Password Creation** | **PREFERRED for New Keys**: Generates high-entropy passwords directly inside the enclave daemon without human or script handling. |
 | **`sec migrate-local .env`** *(Dotenv Import)* | **SAFE (0%)** | **SAFE (0%)** | ✅ **100% Compatible** | **Workspace Dotenv Cleanup** | **PREFERRED for Project Onboarding**: Ingests `.env` key-value pairs in bulk and sanitizes disk files to `<migrated_to_sec>` placeholders. |
+
+---
+
+### 3.20. Post-Quantum Cryptography (PQC) Readiness & Decoupled Cryptography Architecture
+
+`sec-agent` is engineered with a **forward-looking, modular cryptographic threat model**:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    SEC-AGENT DECOUPLED CRYPTO ARCHITECTURE                 │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+  FRONTEND & CLI INTERFACE (STABLE & UNTOUCHED BY CRYPTO UPGRADES)
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ sec-agent open  │  sec-agent run  │  sec-agent check  │  AI Agent Skill │
+  └─────────────────────────────────────────────────────────────────────────┘
+                                     │
+                    IPC / System Calls (Stable Contract)
+                                     │
+  BACKEND CRYPTOGRAPHIC ENGINE (ISOLATED IN internal/crypto/)
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ CURRENT: AES-256-GCM + Secure Enclave + Argon2 / PBKDF2                 │
+  ├─────────────────────────────────────────────────────────────────────────┤
+  │ FUTURE PQC UPGRADE: NIST Post-Quantum Algorithms (ML-KEM / Kyber, etc.) │
+  └─────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 1. Threat Model for Stolen Database Payloads (`secrets.enc`)
+Exposing the encrypted database file `secrets.enc` (for instance, via a compromised corporate laptop, IT remote support backup, or MDM software inventory scanner) yields **zero actionable plaintext data**. Payloads are encrypted at rest using AES-256-GCM sealed inside the macOS Secure Enclave. AES-256 provides **128 bits of post-quantum security** against Grover's quantum search algorithm, rendering brute-force attacks mathematically impossible with both classical and near-term quantum supercomputers.
+
+#### 2. Decoupled Architecture for Seamless PQC Upgrades
+The CLI command parser (`cmd/sec/main.go`), IPC socket protocols, `.secrc` loaders, and AI Agent Skills are strictly decoupled from the internal cryptographic engine (`internal/crypto/crypto.go`). 
+
+If future breakthroughs in quantum computing require upgrading to NIST-standardized Post-Quantum Cryptography (PQC) algorithms (such as ML-KEM/Kyber or ML-DSA/Dilithium), **the backend cryptographic engine can be upgraded inside `internal/crypto` without breaking CLI flags, shell wrappers, or AI Agent Skills.**
 
 ---
 

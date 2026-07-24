@@ -4,7 +4,7 @@
 [![Security: Hardware Enclave](https://img.shields.io/badge/Security-Secure%20Enclave-red.svg?style=flat-square)](https://developer.apple.com/documentation/security)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg?style=flat-square)](LICENSE)
 
-`sec` is a fully local, offline-first credentials manager designed to protect local developer secrets (such as API keys, database credentials, and cloud tokens) from session takeover vectors (e.g. hijacked terminal sessions, remote SSH shell attackers, or administrative screen monitoring).
+`sec-agent` is a fully local, offline-first credentials manager designed to protect local developer secrets (such as API keys, database credentials, and cloud tokens) from session takeover vectors (e.g. hijacked terminal sessions, remote SSH shell attackers, or administrative screen monitoring).
 
 It functions similarly to `ssh-agent` or `gpg-agent`, but is engineered specifically for secure secret, variable, and key-value retrieval—completely eliminating the need for plaintext passwords or stored credentials on disk, even across local development environments.
 
@@ -38,13 +38,13 @@ SEC-AGENT (Secure Enclave Model)
 * **No Plaintext Keys on Disk**: Zero secret key files, API tokens, or certificates sit anywhere on your filesystem.
 * **Hardware-Anchored Silicon Storage**: Master keys are generated and sealed inside the **macOS Secure Enclave**. The master key never touches the disk.
 * **Biometric Physical Presence Gate**: Decrypting secrets requires physical Touch ID sensor contact on the laptop console. Software scripts and remote attackers cannot fake physical presence.
-* **Zero-Friction PoC/Dev Adoption**: Drop it into any local development project or PoC in 30 seconds with `sec migrate-local .env`—requiring **zero cloud setup, zero API tokens, and zero codebase modifications.**
+* **Zero-Friction PoC/Dev Adoption**: Drop it into any local development project or PoC in 30 seconds with `sec-agent migrate-local .env`—requiring **zero cloud setup, zero API tokens, and zero codebase modifications.**
 
 ---
 
 ## 🔒 Security Architecture
 
-`sec` is built on a **secure-by-design** model to prevent credential leakage:
+`sec-agent` is built on a **secure-by-design** model to prevent credential leakage:
 
 ```
                     [ ATTACKER IN SSH SESSION ]
@@ -68,6 +68,7 @@ SEC-AGENT (Secure Enclave Model)
 *   **Disaster-Proof Write Transactions**: All filesystem mutations (database saves, dotenv migrations, KeePassXC exports) utilize atomic sibling renames. The payload is written to a temporary file, flushed to storage blocks via `fsync()`, and atomically replaced. Profile-isolated backups of the last 10 database snapshots are rotated automatically under `~/.config/sec-agent/backups/<profile>/`.
 *   **SMP & Parallel Concurrency Resilient**: Built with goroutine-per-connection Unix sockets and `sync.Mutex` in-memory guards. Fully resistant to race conditions under high-throughput parallel execution (e.g. `make -j8`, concurrent `terraform plan`, or multi-agent AI swarm workloads).
 *   **Hardened Runtime Isolation**: The daemon executes under macOS Hardened Runtime protections with no debugging entitlements. System Integrity Protection (SIP) blocks standard user-space debuggers and memory readers (including root UID 0) from inspecting its memory.
+*   **Post-Quantum Cryptography (PQC) & Decoupled Architecture**: Database payloads (`secrets.enc`) are encrypted at rest with AES-256-GCM (offering 128-bit post-quantum security against Grover's algorithm). Exposing the encrypted file to local MDM scanners or IT backups yields zero usable data. Furthermore, the backend crypto engine (`internal/crypto/`) is strictly decoupled from the CLI/IPC layer, ensuring future NIST PQC algorithm upgrades (e.g. ML-KEM/Kyber) require zero changes to CLI flags, shell wrappers, or AI Agent Skills.
 *   **Offline First**: No cloud synchronization, no third-party APIs, and zero SaaS dependency.
 
 ---
