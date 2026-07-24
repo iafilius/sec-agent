@@ -39,6 +39,7 @@ sync:
 	rm -rf sec-agent/backup sec-agent/biometrics sec-agent/config sec-agent/crypto sec-agent/daemon sec-agent/keychain sec-agent/store sec-agent/main.go sec-agent/main_test.go sec-agent/migration_test.go
 	@echo "=== Syncing core codebase and packages to sec-agent/ ==="
 	cp -r cmd docs internal sec-agent/
+	rm -f sec-agent/docs/corporate_pitch_communications.md
 	cp go.mod go.sum Makefile sec-agent/
 	@echo "=== Running sanity build & tests inside sec-agent/ ==="
 	cd sec-agent && make build codesign && make sec-check && go test -v ./...

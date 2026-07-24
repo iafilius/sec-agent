@@ -14,3 +14,7 @@ sec_migration_test_bin2
 .vscode/
 *.code-workspace
 .DS_Store
+
+# Private corporate pitch / internal notes
+docs/corporate_pitch_communications.md
+*.private.md
