@@ -18,6 +18,20 @@ Unlike standard tools, `sec` uses a **hybrid biometric and memory-isolated agent
 
 ## 2. Installation & Build
 
+### 2.1. Installing via Homebrew (Recommended)
+```bash
+# Add Homebrew tap and install sec-agent
+brew install iafilius/tap/sec-agent
+```
+
+### 2.2. Pre-built Binary Tarball
+Download pre-compiled, macOS Hardened Runtime signed binary tarballs from [GitHub Releases](https://github.com/iafilius/sec-agent/releases/latest):
+```bash
+tar -xzf sec-agent_v1.9.1_darwin_arm64.tar.gz
+sudo mv sec-agent /usr/local/bin/
+```
+
+### 2.3. Building from Source
 Compile and codesign the binary with Hardened Runtime using the provided Makefile:
 
 ```bash
@@ -25,7 +39,7 @@ Compile and codesign the binary with Hardened Runtime using the provided Makefil
 make clean build codesign
 ```
 
-This compiles the `sec` binary and signs it with the ad-hoc hardened runtime signature flags. You can move the compiled binary to a directory in your PATH (e.g., `/usr/local/bin/sec` or `~/bin/sec`).
+This compiles the `sec-agent` binary and signs it with macOS Hardened Runtime flags.
 
 ---
 

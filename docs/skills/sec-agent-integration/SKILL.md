@@ -180,34 +180,48 @@ sec run --confirm-prod --profile velocloud-provider-prod -- terraform apply
 *   Displays visual terminal badges (`🟢 [ENV: DEV]`, `🟡 [ENV: STAGING]`, `🔴 [ENV: PROD - CAUTION!]`).
 
 ### 2.12. Time-Bound Secret Leases (`sec lease`)
+### 2.12. Time-Bound Secret Leases (`sec-agent lease`)
 ```bash
 # Grant a 15-minute temporary lease token for an AI subagent or background task
-lease_token=$(sec lease velocloud-provider-dev/vco_token --ttl 15m)
+lease_token=$(sec-agent lease velocloud-provider-dev/vco_token --ttl 15m)
 ```
 *   **Why Use Leases**: Delegate temporary credential access to autonomous AI subagents or background test scripts with **zero credential lingering**. The lease token self-destructs automatically after the specified TTL expires.
 
-### 2.13. Cross-Profile Matrix Diffing (`sec diff-profiles`) & Real-Time Stream Redactor (`sec run`)
+### 2.13. Cross-Profile Matrix Diffing (`sec-agent diff-profiles`) & Real-Time Stream Redactor (`sec-agent run`)
 ```bash
-# Compare structural key alignment between dev and prod profiles
-sec diff-profiles velocloud-provider-dev velocloud-provider-prod
+# Check CLI binary version and background daemon state
+sec-agent version
 
-# Execute command with REAL-TIME SECRET REDACTION ENABLED BY DEFAULT in logs
-sec run -- make testacc
+# Unlock/authorize session using Touch ID (outputs export SEC_SESSION_TOKEN="...")
+eval $(sec-agent open)
 
-# Restrict injection strictly to specified keys/aliases (Principle of Least Privilege)
-sec run --allow-keys VCO_URL,VCO_ENTERPRISE_ID -- make test-unit
+# Retrieve a secret by key path
+sec-agent get velocloud-provider-dev/vco_token
 
-# Inspect injection mapping plan without executing command or prompting for Touch ID
-sec run --dry-run -- make testacc
+# Store a secret interactively (hidden prompt) or via stdin
+sec-agent set velocloud-provider-dev/vco_token "token-val-123"
+echo "token-val-123" | sec-agent set velocloud-provider-dev/vco_token --stdin
 
-# Opt out of log redaction if raw output is required
-sec run --no-redact -- make testacc
+# Execute command with secret injection (Memory override)
+sec-agent run -- make testacc
+
+# Execute command with restricted allowed keys (Principle of Least Privilege)
+sec-agent run --allow-keys VCO_URL,VCO_ENTERPRISE_ID -- make test-unit
+
+# Inspect injection mapping plan without Touch ID or running process
+sec-agent run --dry-run -- make testacc
+
+# Run dual-engine workstation shell history leak audit (.zsh_history)
+sec-agent check --leaks
+
+# Lock session and flush master keys from RAM
+sec-agent lock
 ```
 *   **Default-On Redaction**: Automatically intercepts child process `stdout` and `stderr` streams in real time and replaces active secret values with `[REDACTED_BY_SEC]` to guarantee zero log leaks in CI/CD or terminal scrollbacks.
 *   **Allowlist Scoping**: Restricts environment variable injection to specific keys for AI subagents or unit tests.
 *   **Dry-Run Inspection**: Previews the injection plan without starting the subprocess.
 
-### 2.14. Password Entropy Linter (`sec check --scan-weak`) & History Leak Audit (`sec check --leaks`)
+### 2.14. Password Entropy Linter (`sec-agent check --scan-weak`) & History Leak Audit (`sec-agent check --leaks`)
 ```bash
 # Run side-channel safe password entropy & weakness scan
 sec check --scan-weak

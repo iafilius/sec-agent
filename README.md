@@ -71,12 +71,25 @@ SEC-AGENT (Secure Enclave Model)
 
 ---
 
-## ⚙️ Installation & Build
+## ⚙️ Installation
 
-Compile and sign the binary using the macOS Hardened Runtime:
-
+### Option 1: Install via Homebrew (RECOMMENDED for macOS)
 ```bash
-# Build and codesign the binary
+# Add Homebrew tap and install sec-agent
+brew install iafilius/tap/sec-agent
+```
+
+### Option 2: Pre-built Signed Binary Release
+Download the latest pre-compiled, macOS Hardened Runtime signed binary tarball from [GitHub Releases](https://github.com/iafilius/sec-agent/releases/latest):
+```bash
+# Extract and install binary to /usr/local/bin
+tar -xzf sec-agent_v1.9.1_darwin_arm64.tar.gz
+sudo mv sec-agent /usr/local/bin/
+```
+
+### Option 3: Build from Source
+```bash
+# Clone repository and compile with macOS Hardened Runtime signature
 make build codesign
 
 # Run security static analysis checks (vet, vulncheck, gosec)
@@ -85,6 +98,9 @@ make sec-check
 # Run tests
 make test
 ```
+
+> [!NOTE]
+> **Zero Name Collision**: The CLI binary executable is named **`sec-agent`** to avoid conflicts with Homebrew's existing Perl `sec` (Simple Event Correlator) package. If you do not have the Perl `sec` tool installed and prefer 3-letter typing, you can optionally add `alias sec=sec-agent` in your `~/.zshrc`.
 
 ---
 

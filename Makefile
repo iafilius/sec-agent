@@ -1,4 +1,4 @@
-VERSION := v1.9.0
+VERSION := v1.9.1
 BUILD_DATE := $(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
 LDFLAGS := -ldflags "-X main.Version=$(VERSION) -X main.BuildDate=$(BUILD_DATE)"
 
@@ -7,35 +7,35 @@ LDFLAGS := -ldflags "-X main.Version=$(VERSION) -X main.BuildDate=$(BUILD_DATE)"
 all: build codesign
 
 build:
-	go build $(LDFLAGS) -o sec cmd/sec/main.go
+	go build $(LDFLAGS) -o sec-agent cmd/sec/main.go
 
 codesign: build
 	@echo "Signing binary with macOS Hardened Runtime..."
-	codesign --force --options runtime --sign - sec
+	codesign --force --options runtime --sign - sec-agent
 
 package:
 	@echo "=== Building Release Binaries & Tarballs for $(VERSION) ==="
 	rm -rf dist && mkdir -p dist
-	go build $(LDFLAGS) -o dist/sec cmd/sec/main.go
-	codesign --force --options runtime --sign - dist/sec
+	go build $(LDFLAGS) -o dist/sec-agent cmd/sec/main.go
+	codesign --force --options runtime --sign - dist/sec-agent
 	cp README.md dist/README.md
-	tar -czf dist/sec-agent_$(VERSION)_darwin_arm64.tar.gz -C dist sec README.md
-	rm -f dist/sec dist/README.md
+	tar -czf dist/sec-agent_$(VERSION)_darwin_arm64.tar.gz -C dist sec-agent README.md
+	rm -f dist/sec-agent dist/README.md
 	cd dist && shasum -a 256 *.tar.gz > checksums.txt
 	@echo "=== Release packages generated in dist/ ==="
 
 clean:
-	rm -f sec
-	rm -rf ~/.config/sec/sec.sock
+	rm -f sec sec-agent
+	rm -rf ~/.config/sec/sec.sock ~/.config/sec-agent/sec-agent.sock
 
 test:
 	go test -v ./...
 
 verify-sip: build codesign
 	@echo "Verifying codesign entitlements and flags..."
-	codesign -d --verbose sec
+	codesign -d --verbose sec-agent
 	@echo "Attempting to inspect with lldb (expected to fail if SIP is enabled and Hardened Runtime is active)..."
-	@echo "Run: lldb -batch -o 'process launch' ./sec"
+	@echo "Run: lldb -batch -o 'process launch' ./sec-agent"
 
 sec-check:
 	@echo "=== Running Go Vet ==="

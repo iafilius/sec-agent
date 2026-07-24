@@ -214,8 +214,8 @@ EMPTY_VAL=
 	if errResp.Error.Code != "INVALID_TOKEN" {
 		t.Errorf("expected error code 'INVALID_TOKEN', got %q", errResp.Error.Code)
 	}
-	if !strings.Contains(errResp.Error.Remediation, "eval $(sec open)") {
-		t.Errorf("expected remediation hint to contain 'eval $(sec open)', got %q", errResp.Error.Remediation)
+	if !strings.Contains(errResp.Error.Remediation, "eval $(sec-agent open)") {
+		t.Errorf("expected remediation hint to contain 'eval $(sec-agent open)', got %q", errResp.Error.Remediation)
 	}
 
 	// Test version output when daemon matches

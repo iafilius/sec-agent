@@ -34,7 +34,7 @@ import (
 
 var jsonErrors bool
 var (
-	Version   = "v1.9.0"
+	Version   = "v1.9.1"
 	BuildDate = "unknown"
 )
 
@@ -51,16 +51,16 @@ type JSONError struct {
 
 func mapDaemonError(errStr string) (code string, remediation string) {
 	if strings.Contains(errStr, "Invalid or missing session token") || strings.Contains(errStr, "invalid or missing session token") {
-		return "INVALID_TOKEN", "Run 'eval $(sec open)' to authorize your shell session."
+		return "INVALID_TOKEN", "Run 'eval $(sec-agent open)' to authorize your shell session."
 	}
 	if strings.Contains(errStr, "locked or expired") || strings.Contains(errStr, "locked") {
-		return "SESSION_LOCKED", "Run 'eval $(sec open)' to unlock and authorize your shell session."
+		return "SESSION_LOCKED", "Run 'eval $(sec-agent open)' to unlock and authorize your shell session."
 	}
 	if strings.Contains(errStr, "expired") {
 		return "SECRET_EXPIRED", "Pass the '--show-expired' flag to retrieve this secret."
 	}
 	if strings.Contains(errStr, "not found") {
-		return "SECRET_NOT_FOUND", "Verify the path or run 'sec set' to store the key."
+		return "SECRET_NOT_FOUND", "Verify the path or run 'sec-agent set' to store the key."
 	}
 	if strings.Contains(errStr, "hijacking") || strings.Contains(errStr, "ScreenSharing") {
 		return "ACCESS_DENIED_HIJACK", "Remote connections or active screen sharing are blocked."
@@ -176,15 +176,15 @@ func printUsageJSON() {
   "error_codes": {
     "DAEMON_NOT_RUNNING": {
       "description": "The background socket daemon is inactive.",
-      "remediation": "eval $(sec open)"
+      "remediation": "eval $(sec-agent open)"
     },
     "SESSION_LOCKED": {
       "description": "The session has been cleared/locked or is expired.",
-      "remediation": "eval $(sec open)"
+      "remediation": "eval $(sec-agent open)"
     },
     "INVALID_TOKEN": {
       "description": "The calling session does not present a valid SEC_SESSION_TOKEN.",
-      "remediation": "eval $(sec open)"
+      "remediation": "eval $(sec-agent open)"
     },
     "SECRET_NOT_FOUND": {
       "description": "The requested secret path does not exist."
@@ -457,7 +457,7 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Println("Usage: sec [--profile <name> | -P <name>] [--auto-open] <command> [args]")
+	fmt.Println("Usage: sec-agent [--profile <name> | -P <name>] [--auto-open] <command> [args]")
 	fmt.Println("Commands:")
 	fmt.Println("  open [--ttl <duration>] [--grace <duration>] Initialize/unlock the secrets session using Touch ID")
 	fmt.Println("  get <path> [--prefix] [--json | --comment | --meta <key> | -r] Retrieve a secret or group of secrets")
