@@ -577,6 +577,25 @@ sec check --scan-weak
 # test/dummy_pass                     WEAK ENTROPY [⚠️]
 ```
 
+#### Workstation Shell History Leak Audit (`sec check --leaks`)
+Scan local shell history files (`.zsh_history`, `.bash_history`, `.config/fish/fish_history`) using a dual-engine architecture combining exact vault secret matching and regex rules:
+```bash
+sec check --leaks
+# === 🛡️ Workstation Shell History & Secret Leak Audit ===
+# Auditing discovered history files: ~/.zsh_history, ~/.bash_history
+#
+# ⚠️  [FOUND] 1 Potential Secret Leak(s) Detected!
+#
+# 1. Vault Exact Match
+#    • Secret Path:   velocloud-provider-dev/vco_password
+#    • Location:      ~/.zsh_history (Line 842)
+#    • Leaked Snippet: sec set velocloud-provider-dev/vco_password [REDACTED_BY_SEC]
+#
+# === 🛠️ Recommended Safe Remediation Commands ===
+#   LC_ALL=C sed -i '' '842d' ~/.zsh_history
+#   history -r
+```
+
 #### Encrypted Vault Sync (`sec sync export / import`)
 Export and import encrypted vault packages for non-production team distribution:
 ```bash

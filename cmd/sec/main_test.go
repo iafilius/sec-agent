@@ -440,6 +440,13 @@ func TestMainIntegration(t *testing.T) {
 		t.Fatalf("sec check --scan-weak failed: %v, out: %s", err, string(scanWeakOut))
 	}
 
+	scanLeaksCmd := exec.Command("./sec_test_bin", "check", "--leaks", "--profile", profile)
+	scanLeaksCmd.Env = testEnv
+	scanLeaksOut, err := scanLeaksCmd.Output()
+	if err != nil || !strings.Contains(string(scanLeaksOut), "Workstation Shell History & Secret Leak Audit") {
+		t.Fatalf("sec check --leaks failed: %v, out: %s", err, string(scanLeaksOut))
+	}
+
 	// Reset profile env to dev for remaining tests
 	resetProfCmd := exec.Command("./sec_test_bin", "profile", "set-env", "dev", "--profile", profile)
 	resetProfCmd.Env = testEnv

@@ -412,3 +412,32 @@ func (es *EncryptedStore) CopyPrefix(srcPrefix, dstPrefix string) (int, error) {
 	return count, nil
 }
 
+// HistoryFile represents a discovered shell history file.
+type HistoryFile struct {
+	ShellName string
+	Path      string
+}
+
+// DiscoverShellHistoryFiles searches home directory for .zsh_history, .bash_history, .histfile, and fish_history.
+func DiscoverShellHistoryFiles() []HistoryFile {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+
+	candidates := []HistoryFile{
+		{ShellName: "zsh", Path: filepath.Join(home, ".zsh_history")},
+		{ShellName: "bash", Path: filepath.Join(home, ".bash_history")},
+		{ShellName: "zsh", Path: filepath.Join(home, ".histfile")},
+		{ShellName: "fish", Path: filepath.Join(home, ".config", "fish", "fish_history")},
+	}
+
+	var found []HistoryFile
+	for _, c := range candidates {
+		if fi, err := os.Stat(c.Path); err == nil && !fi.IsDir() {
+			found = append(found, c)
+		}
+	}
+	return found
+}
+

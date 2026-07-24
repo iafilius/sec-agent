@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"runtime/debug"
 	"secure_secrets/internal/backup"
@@ -33,7 +34,7 @@ import (
 
 var jsonErrors bool
 var (
-	Version   = "v1.8.0"
+	Version   = "v1.9.0"
 	BuildDate = "unknown"
 )
 
@@ -473,7 +474,7 @@ func printUsage() {
 	fmt.Println("  gen <path> [--length N]         Generate random password and save to path (alias: generate)")
 	fmt.Println("  import <file> [--format <f>]    Bulk import secrets from JSON, Doppler, or AWS payloads")
 	fmt.Println("  profile [set-env dev|dta|prod] Manage profile metadata & environment classification")
-	fmt.Println("  check [--template <f>] [--scan-weak] Validate vault schema completeness or audit password entropy")
+	fmt.Println("  check [--template <f>] [--scan-weak] [--leaks] Validate schema, audit entropy, or scan history for leaks")
 	fmt.Println("  sync export|import <file>       Export/import encrypted vault package for team distribution")
 	fmt.Println("  load [<prefix>] [--format env|json] Batch-load scoped group secrets for shell sourcing")
 	fmt.Println("  run [--group <p>] [--allow-keys k1,k2] [--dry-run] [--no-redact] -- <cmd> Execute process with secrets injected")
@@ -2545,12 +2546,15 @@ func handleSync(profile string, args []string) {
 
 func handleCheck(profile string, args []string) {
 	scanWeak := false
+	scanLeaks := false
 	templateFile := ""
 	var requiredKeys []string
 
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--scan-weak" || args[i] == "-w" {
 			scanWeak = true
+		} else if args[i] == "--scan-leaks" || args[i] == "--leaks" || args[i] == "-l" || args[i] == "--history" {
+			scanLeaks = true
 		} else if args[i] == "--template" || args[i] == "-t" {
 			if i+1 < len(args) {
 				templateFile = args[i+1]
@@ -2568,6 +2572,11 @@ func handleCheck(profile string, args []string) {
 				}
 			}
 		}
+	}
+
+	if scanLeaks {
+		handleCheckLeaks(profile)
+		return
 	}
 
 	if scanWeak {
@@ -2686,12 +2695,150 @@ func handleCheck(profile string, args []string) {
 	}
 
 	if missingCount > 0 {
-		fmt.Printf("\nError: %d required secret key/alias missing from profile %q.\n", missingCount, profile)
-		checkExpirationWarnings(resp.Secrets)
+		fmt.Printf("\n\033[31mError: Missing %d required secret(s).\033[0m\n", missingCount)
 		os.Exit(1)
 	}
-	fmt.Printf("\nSuccess: All %d required keys/aliases present in profile %q.\n", len(requiredKeys), profile)
+	fmt.Printf("\n\033[32mSuccess: All %d required keys/aliases present in session.\033[0m\n", len(requiredKeys))
 	checkExpirationWarnings(resp.Secrets)
+}
+
+type LeakMatch struct {
+	MatchType   string
+	Path        string
+	LineNumber  int
+	SecretPath  string
+	PatternName string
+	LineSnippet string
+	RedactedVal string
+}
+
+func handleCheckLeaks(profile string) {
+	resp, err := queryDaemon(profile, daemon.IPCRequest{Action: "backup"})
+	if err != nil || !resp.Success {
+		fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running or locked for profile %q", profile), "Run 'eval $(sec open)' to unlock.")
+	}
+
+	historyFiles := store.DiscoverShellHistoryFiles()
+	fmt.Println("=== 🛡️ Workstation Shell History & Secret Leak Audit ===")
+	if len(historyFiles) == 0 {
+		fmt.Println("No shell history files (.zsh_history, .bash_history, fish_history) discovered in home directory.")
+		return
+	}
+
+	fmt.Print("Auditing discovered history files: ")
+	var filePaths []string
+	for _, h := range historyFiles {
+		filePaths = append(filePaths, h.Path)
+	}
+	fmt.Println(strings.Join(filePaths, ", "))
+
+	secretValues := make(map[string]string)
+	for keyPath, entry := range resp.Secrets {
+		val := strings.TrimSpace(entry.Value)
+		if len(val) > 4 && val != "<migrated_to_sec>" {
+			secretValues[val] = keyPath
+		}
+	}
+
+	regexPatterns := []struct {
+		Name  string
+		Regex *regexp.Regexp
+	}{
+		{Name: "AWS Access Key ID", Regex: regexp.MustCompile(`AKIA[0-9A-Z]{16}`)},
+		{Name: "GitHub Personal Access Token", Regex: regexp.MustCompile(`ghp_[a-zA-Z0-9]{36}|github_pat_[a-zA-Z0-9]{22}_[a-zA-Z0-9]{59}`)},
+		{Name: "Stripe Live Secret Key", Regex: regexp.MustCompile(`sk_live_[0-9a-zA-Z]{24}`)},
+		{Name: "Slack Webhook URL", Regex: regexp.MustCompile(`https://hooks\.slack\.com/services/T[a-zA-Z0-9_]+/B[a-zA-Z0-9_]+/[a-zA-Z0-9_]+`)},
+		{Name: "Database Connection URI", Regex: regexp.MustCompile(`(postgres|mysql|mongodb)://[^:]+:[^@]+@[^/]+`)},
+	}
+
+	var matches []LeakMatch
+
+	for _, hf := range historyFiles {
+		// #nosec G304 G703
+		f, err := os.Open(hf.Path)
+		if err != nil {
+			continue
+		}
+		scanner := bufio.NewScanner(f)
+		lineNum := 0
+		for scanner.Scan() {
+			lineNum++
+			line := scanner.Text()
+			cleanLine := line
+			if hf.ShellName == "zsh" && strings.HasPrefix(line, ": ") {
+				if idx := strings.Index(line, ";"); idx != -1 {
+					cleanLine = line[idx+1:]
+				}
+			}
+
+			// Engine 1: Exact Vault Secret Matching
+			for secVal, secPath := range secretValues {
+				if strings.Contains(cleanLine, secVal) {
+					redactSnippet := strings.ReplaceAll(cleanLine, secVal, "[REDACTED_BY_SEC]")
+					matches = append(matches, LeakMatch{
+						MatchType:   "Vault Exact Match",
+						Path:        hf.Path,
+						LineNumber:  lineNum,
+						SecretPath:  secPath,
+						LineSnippet: redactSnippet,
+						RedactedVal: secVal,
+					})
+				}
+			}
+
+			// Engine 2: Regex Matching
+			for _, pat := range regexPatterns {
+				if found := pat.Regex.FindString(cleanLine); found != "" {
+					alreadyMatched := false
+					for _, m := range matches {
+						if m.Path == hf.Path && m.LineNumber == lineNum {
+							alreadyMatched = true
+							break
+						}
+					}
+					if !alreadyMatched {
+						redactSnippet := strings.ReplaceAll(cleanLine, found, "[REDACTED_BY_SEC]")
+						matches = append(matches, LeakMatch{
+							MatchType:   "Regex Match",
+							Path:        hf.Path,
+							LineNumber:  lineNum,
+							PatternName: pat.Name,
+							LineSnippet: redactSnippet,
+							RedactedVal: found,
+						})
+					}
+				}
+			}
+		}
+		_ = f.Close()
+	}
+
+	if len(matches) == 0 {
+		fmt.Println("\n\033[32m[PASS] Zero secret leaks detected across shell history files.\033[0m")
+		return
+	}
+
+	fmt.Printf("\n\033[1;31m⚠️  [FOUND] %d Potential Secret Leak(s) Detected!\033[0m\n\n", len(matches))
+	for i, m := range matches {
+		fmt.Printf("%d. \033[1m%s\033[0m\n", i+1, m.MatchType)
+		if m.SecretPath != "" {
+			fmt.Printf("   • Secret Path:   %s\n", m.SecretPath)
+		}
+		if m.PatternName != "" {
+			fmt.Printf("   • Pattern:       %s\n", m.PatternName)
+		}
+		fmt.Printf("   • Location:      %s (Line %d)\n", m.Path, m.LineNumber)
+		fmt.Printf("   • Leaked Snippet: %s\n\n", m.LineSnippet)
+	}
+
+	fmt.Println("--------------------------------------------------------------------------------")
+	fmt.Println("=== 🛠️ Recommended Safe Remediation Commands ===")
+	fmt.Println("Run the following commands to safely purge leaked history entries:")
+	for _, m := range matches {
+		fmt.Printf("  LC_ALL=C sed -i '' '%dd' %s\n", m.LineNumber, m.Path)
+	}
+	fmt.Println("\nThen reload active shell history in memory:")
+	fmt.Println("  history -r")
 }
 
 func handleRestart(profile string) {

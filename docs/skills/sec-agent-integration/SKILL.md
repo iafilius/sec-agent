@@ -207,10 +207,13 @@ sec run --no-redact -- make testacc
 *   **Allowlist Scoping**: Restricts environment variable injection to specific keys for AI subagents or unit tests.
 *   **Dry-Run Inspection**: Previews the injection plan without starting the subprocess.
 
-### 2.14. Password Entropy Linter (`sec check --scan-weak`) & Encrypted Sync (`sec sync`)
+### 2.14. Password Entropy Linter (`sec check --scan-weak`) & History Leak Audit (`sec check --leaks`)
 ```bash
 # Run side-channel safe password entropy & weakness scan
 sec check --scan-weak
+
+# Run dual-engine workstation shell history leak audit (.zsh_history, .bash_history)
+sec check --leaks
 
 # Export/import encrypted vault package for team distribution
 sec sync export ./team-dev-vault.kdbx
