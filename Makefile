@@ -54,3 +54,18 @@ sync:
 	cp go.mod go.sum Makefile LICENSE README.md sec-agent/
 	@echo "=== Running sanity build & tests inside sec-agent/ ==="
 	cd sec-agent && make build codesign && make sec-check && go test -v ./...
+
+release-brew: package
+	@echo "=== Updating Homebrew Formula & Tap Repository ==="
+	@SHA=$$(shasum -a 256 dist/sec-agent_$(VERSION)_darwin_arm64.tar.gz | awk '{print $$1}'); \
+	sed -i '' "s|url \".*\"|url \"https://github.com/iafilius/sec-agent/releases/download/$(VERSION)/sec-agent_$(VERSION)_darwin_arm64.tar.gz\"|g" Formula/sec-agent.rb; \
+	sed -i '' "s|sha256 \".*\"|sha256 \"$$SHA\"|g" Formula/sec-agent.rb; \
+	sed -i '' "s|assert_match \".*\"|assert_match \"$(VERSION)\"|g" Formula/sec-agent.rb; \
+	mkdir -p sec-agent/Formula && cp Formula/sec-agent.rb sec-agent/Formula/sec-agent.rb; \
+	if [ -d "scratch/homebrew-tap" ]; then \
+		cp Formula/sec-agent.rb scratch/homebrew-tap/Formula/sec-agent.rb; \
+		git -C scratch/homebrew-tap pull --rebase origin main 2>/dev/null || true; \
+		git -C scratch/homebrew-tap add Formula/sec-agent.rb; \
+		git -C scratch/homebrew-tap commit -m "chore(brew): Update sec-agent formula to $(VERSION)" 2>/dev/null || true; \
+		git -C scratch/homebrew-tap push origin main 2>/dev/null || true; \
+	fi
