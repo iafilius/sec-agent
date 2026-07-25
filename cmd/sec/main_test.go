@@ -487,6 +487,114 @@ func TestMainIntegration(t *testing.T) {
 	if err == nil {
 		t.Errorf("expected query on locked session to fail, but it succeeded")
 	}
+
+	// 9. Test 6: Verify non-interactive execution with --auto-open or SEC_AUTO_OPEN=1 fails safely without unlocking
+	autoOpenBlockedCmd := exec.Command("./sec_test_bin", "--auto-open", "get", "other-category/test-key", "--profile", profile)
+	autoOpenBlockedCmd.Env = testEnv
+	_, err = autoOpenBlockedCmd.Output()
+	if err == nil {
+		t.Errorf("expected --auto-open query in non-interactive mode on locked session to fail, but it succeeded")
+	}
+}
+
+func TestInitSkillInstallerAndBackupList(t *testing.T) {
+	tmpHome := t.TempDir()
+	gopath := os.Getenv("GOPATH")
+	if gopath == "" {
+		gopath = filepath.Join(os.Getenv("HOME"), "go")
+	}
+	gocache := os.Getenv("GOCACHE")
+	env := append(os.Environ(), "HOME="+tmpHome, "GOPATH="+gopath, "GOCACHE="+gocache)
+
+	// Build CLI binary
+	binPath := filepath.Join(tmpHome, "sec_test_init_bin")
+	buildCmd := exec.Command("go", "build", "-o", binPath, "main.go")
+	buildCmd.Env = env
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build CLI test binary: %v\nOutput:\n%s", err, out)
+	}
+
+	// 1. Uninitialized vault pre-flight guard check
+	uninitCmd := exec.Command(binPath, "get", "some/key")
+	uninitCmd.Env = env
+	out, err := uninitCmd.CombinedOutput()
+	if err == nil {
+		t.Errorf("expected get command on uninitialized vault to fail, but it succeeded")
+	}
+	if !strings.Contains(string(out), "uninitialized") {
+		t.Errorf("expected uninitialized error output, got: %s", string(out))
+	}
+
+	// 2. Test JSON error formatting on uninitialized vault
+	uninitJSONCmd := exec.Command(binPath, "get", "some/key", "--json")
+	uninitJSONCmd.Env = env
+	out, err = uninitJSONCmd.CombinedOutput()
+	if err == nil {
+		t.Errorf("expected get --json on uninitialized vault to fail, but it succeeded")
+	}
+	if !strings.Contains(string(out), "VAULT_UNINITIALIZED") || !strings.Contains(string(out), "\"success\":false") {
+		t.Errorf("expected structured JSON error output, got: %s", string(out))
+	}
+
+	// 3. Test init with --skill flag
+	initCmd := exec.Command(binPath, "init", "--skill", "antigravity", "--scope", "global")
+	initCmd.Env = env
+	out, err = initCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sec-agent init failed: %v\nOutput: %s", err, out)
+	}
+	if !strings.Contains(string(out), "Vault configuration directory initialized") {
+		t.Errorf("unexpected init output: %s", string(out))
+	}
+
+	// Verify skill file was created in tmpHome/.gemini/config/skills/
+	skillPath := filepath.Join(tmpHome, ".gemini", "config", "skills", "sec-agent-integration", "SKILL.md")
+	if _, err := os.Stat(skillPath); os.IsNotExist(err) {
+		t.Errorf("expected skill file to exist at %s, but missing", skillPath)
+	}
+
+	// 3. Test skill status
+	statusCmd := exec.Command(binPath, "skill", "status")
+	statusCmd.Env = env
+	out, err = statusCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sec-agent skill status failed: %v\nOutput: %s", err, out)
+	}
+	if !strings.Contains(string(out), "antigravity") {
+		t.Errorf("expected skill status to list antigravity, got: %s", string(out))
+	}
+
+	// 4. Test backup list
+	backupListCmd := exec.Command(binPath, "backup", "list")
+	backupListCmd.Env = env
+	out, err = backupListCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sec-agent backup list failed: %v\nOutput: %s", err, out)
+	}
+	if !strings.Contains(string(out), "Vault Snapshots & Backups") {
+		t.Errorf("expected backup list header, got: %s", string(out))
+	}
+
+	// 5. Test init --non-interactive
+	nonIntInitCmd := exec.Command(binPath, "init", "--non-interactive")
+	nonIntInitCmd.Env = env
+	out, err = nonIntInitCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sec-agent init --non-interactive failed: %v\nOutput: %s", err, out)
+	}
+	if !strings.Contains(string(out), "Vault configuration directory initialized") {
+		t.Errorf("unexpected non-interactive init output: %s", string(out))
+	}
+
+	// 7. Test status --quick
+	quickStatusCmd := exec.Command(binPath, "status", "--quick")
+	quickStatusCmd.Env = env
+	out, err = quickStatusCmd.CombinedOutput()
+	if err == nil {
+		if !strings.Contains(string(out), "socket not found") && !strings.Contains(string(out), "DAEMON_NOT_RUNNING") {
+			t.Errorf("expected quick status output for socket check, got: %s", string(out))
+		}
+	}
 }
 
 func TestPathToEnvKey(t *testing.T) {

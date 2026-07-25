@@ -6,6 +6,23 @@ import (
 	"path/filepath"
 )
 
+// IsConfigDirInitialized returns true if ~/.config/sec-agent/ or legacy ~/.config/sec/ exists.
+func IsConfigDirInitialized() bool {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	dir := filepath.Join(home, ".config", "sec-agent")
+	legacyDir := filepath.Join(home, ".config", "sec")
+	if _, err := os.Stat(dir); err == nil {
+		return true
+	}
+	if _, err := os.Stat(legacyDir); err == nil {
+		return true
+	}
+	return false
+}
+
 // GetConfigDir returns the path to ~/.config/sec-agent/, automatically migrating from ~/.config/sec/ if present.
 func GetConfigDir() (string, error) {
 	home, err := os.UserHomeDir()

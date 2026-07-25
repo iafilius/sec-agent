@@ -1,4 +1,4 @@
-VERSION := v1.9.1
+VERSION := v1.9.2
 BUILD_DATE := $(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
 LDFLAGS := -ldflags "-X main.Version=$(VERSION) -X main.BuildDate=$(BUILD_DATE)"
 
@@ -7,11 +7,11 @@ LDFLAGS := -ldflags "-X main.Version=$(VERSION) -X main.BuildDate=$(BUILD_DATE)"
 all: build codesign
 
 build:
-	go build $(LDFLAGS) -o sec-agent cmd/sec/main.go
+	go build $(LDFLAGS) -o sec cmd/sec/main.go
 
 codesign: build
 	@echo "Signing binary with macOS Hardened Runtime..."
-	codesign --force --options runtime --sign - sec-agent
+	codesign --force --options runtime --sign - sec
 
 package:
 	@echo "=== Building Release Binaries & Tarballs for $(VERSION) ==="

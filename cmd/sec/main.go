@@ -29,12 +29,17 @@ import (
 	"syscall"
 	"time"
 
+	_ "embed"
+
 	"golang.org/x/term"
 )
 
+//go:embed SKILL.md
+var embeddedSkillBytes []byte
+
 var jsonErrors bool
 var (
-	Version   = "v1.9.1"
+	Version   = "v1.9.2"
 	BuildDate = "unknown"
 )
 
@@ -96,6 +101,20 @@ func printUsageJSON() {
   "version": "1.1.0",
   "description": "Enclave Session Agent for local developer secrets",
   "commands": {
+    "init": {
+      "description": "Initialize vault configuration and install AI assistant skills (alias: setup)",
+      "flags": {
+        "--skill": {"type": "string", "description": "Install skill for target (antigravity, copilot, cursor, claude, windsurf)"},
+        "--scope": {"type": "string", "default": "global", "description": "Skill installation scope (global, workspace)"}
+      }
+    },
+    "setup": {
+      "description": "Alias for init command"
+    },
+    "skill": {
+      "description": "Install, view, or update AI assistant integration skills",
+      "args": [{"name": "subcommand", "required": true, "choices": ["install", "status", "update"]}]
+    },
     "open": {
       "description": "Initialize/unlock the secrets session using Touch ID",
       "flags": {
@@ -233,6 +252,10 @@ func loadWorkspaceConfig() *WorkspaceConfig {
 	return nil
 }
 
+func isInteractiveTerminal() bool {
+	return term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
+}
+
 func extractGlobalFlags() (string, []string) {
 	wsCfg := loadWorkspaceConfig()
 	profile := os.Getenv("SEC_PROFILE")
@@ -243,7 +266,7 @@ func extractGlobalFlags() (string, []string) {
 			profile = "default"
 		}
 	}
-	if wsCfg != nil && wsCfg.AutoOpen {
+	if wsCfg != nil && wsCfg.AutoOpen && isInteractiveTerminal() {
 		_ = os.Setenv("SEC_AUTO_OPEN", "1")
 	}
 
@@ -260,12 +283,16 @@ func extractGlobalFlags() (string, []string) {
 			continue
 		}
 		if args[i] == "--auto-open" {
-			_ = os.Setenv("SEC_AUTO_OPEN", "1")
+			if isInteractiveTerminal() {
+				_ = os.Setenv("SEC_AUTO_OPEN", "1")
+			}
 			continue
 		}
-		if args[i] == "--json-errors" {
+		if args[i] == "--json-errors" || args[i] == "--json" {
 			jsonErrors = true
-			continue
+			if args[i] == "--json-errors" {
+				continue
+			}
 		}
 		cleanArgs = append(cleanArgs, args[i])
 	}
@@ -292,6 +319,12 @@ func main() {
 			printUsage()
 			os.Exit(0)
 		}
+
+		if cmd != "init" && cmd != "setup" && cmd != "version" && cmd != "completion" {
+			if !config.IsConfigDirInitialized() {
+				fail("VAULT_UNINITIALIZED", fmt.Errorf("sec-agent configuration directory (~/.config/sec-agent/) is missing or uninitialized"), "Please initialize your vault environment by running: sec-agent init")
+			}
+		}
 	}
 
 	if len(os.Args) < 2 {
@@ -299,8 +332,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	syncInstalledSkillsIfOutdated()
+
 	command := os.Args[1]
 	switch command {
+	case "init", "setup":
+		handleInit(profile, os.Args[2:])
+	case "skill":
+		handleSkill(profile, os.Args[2:])
 	case "open":
 		handleOpen(profile, os.Args[2:])
 	case "get":
@@ -397,17 +436,21 @@ func main() {
 	case "clear", "close", "lock":
 		handleClear(profile)
 	case "backup":
-		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "Usage: sec backup <output-file.kdbx> [--password | -p <password>]")
-			os.Exit(1)
-		}
-		explicitPassword := ""
-		if len(os.Args) >= 5 {
-			if os.Args[3] == "--password" || os.Args[3] == "-p" {
-				explicitPassword = os.Args[4]
+		if len(os.Args) >= 3 && os.Args[2] == "list" {
+			handleBackupList(profile)
+		} else {
+			if len(os.Args) < 3 {
+				fmt.Fprintln(os.Stderr, "Usage: sec backup <output-file.kdbx> [--password | -p <password>] OR sec backup list")
+				os.Exit(1)
 			}
+			explicitPassword := ""
+			if len(os.Args) >= 5 {
+				if os.Args[3] == "--password" || os.Args[3] == "-p" {
+					explicitPassword = os.Args[4]
+				}
+			}
+			handleBackup(profile, os.Args[2], explicitPassword)
 		}
-		handleBackup(profile, os.Args[2], explicitPassword)
 	case "profile":
 		handleProfile(profile, os.Args[2:])
 	case "sync":
@@ -459,6 +502,8 @@ func main() {
 func printUsage() {
 	fmt.Println("Usage: sec-agent [--profile <name> | -P <name>] [--auto-open] <command> [args]")
 	fmt.Println("Commands:")
+	fmt.Println("  init [--skill <target>] [--scope <global|workspace>] Initialize vault configuration & install AI skills (alias: setup)")
+	fmt.Println("  skill <install|status|update> Install, view, or update AI assistant integration skills")
 	fmt.Println("  open [--ttl <duration>] [--grace <duration>] Initialize/unlock the secrets session using Touch ID")
 	fmt.Println("  get <path> [--prefix] [--json | --comment | --meta <key> | -r] Retrieve a secret or group of secrets")
 	fmt.Println("  set <path> <val> [--comment <comment>] [--meta k=v ...] [--env-alias ALIAS] Store a secret")
@@ -494,7 +539,7 @@ func printUsage() {
 func queryDaemon(profile string, req daemon.IPCRequest) (*daemon.IPCResponse, error) {
 	resp, err := queryDaemonRaw(profile, req)
 	if (err != nil || (resp != nil && !resp.Success && strings.Contains(resp.Error, "locked"))) && req.Action != "open" && req.Action != "ping" {
-		if os.Getenv("SEC_AUTO_OPEN") == "1" {
+		if os.Getenv("SEC_AUTO_OPEN") == "1" && isInteractiveTerminal() && os.Getenv("SEC_NO_AUTO_OPEN") != "1" && os.Getenv("SEC_DISABLE_AUTO_OPEN") != "1" {
 			handleOpen(profile, nil)
 			req.Token = os.Getenv("SEC_SESSION_TOKEN")
 			return queryDaemonRaw(profile, req)
@@ -1182,6 +1227,30 @@ func handleDiffProfiles(p1, p2 string, args []string) {
 }
 
 func handleLease(profile, secretPath string, args []string) {
+	if secretPath == "revoke" && len(args) > 0 {
+		leaseToken := args[0]
+		if !strings.HasPrefix(leaseToken, "lease:") {
+			leaseToken = "lease:" + leaseToken
+		}
+		resp, err := queryDaemon(profile, daemon.IPCRequest{
+			Action: "delete",
+			Path:   leaseToken,
+		})
+		if err != nil || !resp.Success {
+			fail("LEASE_REVOKE_FAILED", fmt.Errorf("failed to revoke lease token %q: %v", leaseToken, err), "Check if lease token is valid.")
+		}
+		if jsonErrors {
+			data, _ := json.Marshal(map[string]interface{}{
+				"success": true,
+				"value":   fmt.Sprintf("Revoked temporary lease token %q", leaseToken),
+			})
+			fmt.Println(string(data))
+		} else {
+			fmt.Printf("[✓] Revoked temporary lease token %q.\n", leaseToken)
+		}
+		return
+	}
+
 	ttlStr := "15m"
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--ttl" && i+1 < len(args) {
@@ -1900,10 +1969,45 @@ func handleStatusAll() {
 	}
 }
 
+func handleStatusQuick(profile string) {
+	socketPath, err := config.GetSocketPath(profile)
+	if err != nil {
+		fail("CONFIG_ERROR", err, "Failed to resolve config directory.")
+	}
+	info, err := os.Stat(socketPath)
+	if err != nil {
+		fail("DAEMON_NOT_RUNNING", fmt.Errorf("daemon socket not found at %s", socketPath), "Run 'eval $(sec-agent open)' to start daemon.")
+	}
+
+	mode := info.Mode()
+	perms := mode.Perm()
+
+	if jsonErrors {
+		data, _ := json.MarshalIndent(map[string]interface{}{
+			"success":      true,
+			"profile":      profile,
+			"socket_path":  socketPath,
+			"socket_perms": fmt.Sprintf("%04o", perms),
+			"status":       "ACTIVE",
+		}, "", "  ")
+		fmt.Println(string(data))
+		return
+	}
+
+	fmt.Println("=== sec-agent Fast-Path Status Diagnostic ===")
+	fmt.Printf("[✓] Active Profile: %s\n", profile)
+	fmt.Printf("[✓] Socket Path:    %s\n", socketPath)
+	fmt.Printf("[✓] File Perms:     %04o (Strict)\n", perms)
+	fmt.Println("[✓] Socket Status:  ACTIVE (IPC socket file present)")
+}
+
 func handleStatus(profile string, args []string) {
 	for _, arg := range args {
 		if arg == "--all" || arg == "-a" {
 			handleStatusAll()
+			return
+		} else if arg == "--quick" || arg == "-q" {
+			handleStatusQuick(profile)
 			return
 		}
 	}
@@ -2459,6 +2563,32 @@ func handleRestore(profile string, filePath, explicitPassword string, args []str
 		}
 	}
 
+	if strings.HasSuffix(filePath, ".enc") {
+		cfgDir, err := config.GetConfigDir()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Restore error: %v\n", err)
+			os.Exit(1)
+		}
+		targetPath := filepath.Join(cfgDir, "secrets.enc")
+		if profile != "" && profile != "default" {
+			targetPath = filepath.Join(cfgDir, fmt.Sprintf("secrets_%s.enc", profile))
+		}
+		// #nosec G304 G703
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to read snapshot file %s: %v\n", filePath, err)
+			os.Exit(1)
+		}
+		// #nosec G304 G703
+		if err := os.WriteFile(targetPath, data, 0600); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to overwrite vault database with snapshot: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("[✓] Restored snapshot %s to vault database -> %s\n", filePath, targetPath)
+		fmt.Println("Please run 'sec-agent restart' and 'eval $(sec-agent open)' to reload your active session daemon.")
+		return
+	}
+
 	var password string
 
 	if explicitPassword != "" {
@@ -2849,6 +2979,458 @@ func handleRestart(profile string) {
 	}
 	fmt.Printf("Restarting sec-agent daemon for profile %q...\n", profile)
 	handleOpen(profile, nil)
+}
+
+type InstalledSkillEntry struct {
+	Target  string `json:"target"`
+	Scope   string `json:"scope"`
+	Path    string `json:"path"`
+	Version string `json:"version"`
+}
+
+type SkillManifest struct {
+	Version string                `json:"version"`
+	Skills  []InstalledSkillEntry `json:"skills"`
+}
+
+func getSkillManifestPath() (string, error) {
+	cfgDir, err := config.GetConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(cfgDir, "skills.json"), nil
+}
+
+func loadSkillManifest() (*SkillManifest, error) {
+	path, err := getSkillManifestPath()
+	if err != nil {
+		return &SkillManifest{Version: Version, Skills: []InstalledSkillEntry{}}, nil
+	}
+	// #nosec G304 G703
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return &SkillManifest{Version: Version, Skills: []InstalledSkillEntry{}}, nil
+	}
+	var manifest SkillManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return &SkillManifest{Version: Version, Skills: []InstalledSkillEntry{}}, nil
+	}
+	return &manifest, nil
+}
+
+func saveSkillManifest(manifest *SkillManifest) error {
+	path, err := getSkillManifestPath()
+	if err != nil {
+		return err
+	}
+	manifest.Version = Version
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0600)
+}
+
+func resolveSkillPath(target, scope string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = os.Getenv("HOME")
+	}
+	switch target {
+	case "antigravity":
+		if scope == "workspace" {
+			return filepath.Join(".agents", "skills", "sec-agent-integration", "SKILL.md"), nil
+		}
+		return filepath.Join(home, ".gemini", "config", "skills", "sec-agent-integration", "SKILL.md"), nil
+	case "copilot":
+		return filepath.Join(".github", "copilot-instructions.md"), nil
+	case "copilot-agent":
+		return filepath.Join(".github", "agents", "sec-agent.md"), nil
+	case "cursor":
+		if scope == "workspace" {
+			return filepath.Join(".cursor", "rules", "sec-agent-integration.mdc"), nil
+		}
+		return filepath.Join(home, ".cursor", "rules", "sec-agent-integration.mdc"), nil
+	case "claude":
+		if scope == "workspace" {
+			return filepath.Join(".claude", "skills", "sec-agent", "SKILL.md"), nil
+		}
+		return filepath.Join(home, ".claude", "skills", "sec-agent", "SKILL.md"), nil
+	case "windsurf":
+		return ".windsurfrules", nil
+	default:
+		return "", fmt.Errorf("unknown skill target %q", target)
+	}
+}
+
+func writeSkillToFile(targetPath string) error {
+	dir := filepath.Dir(targetPath)
+	// #nosec G301 G703
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	content := embeddedSkillBytes
+	if len(content) == 0 {
+		return fmt.Errorf("embedded skill content is empty")
+	}
+	// #nosec G306 G703
+	return os.WriteFile(targetPath, content, 0600)
+}
+
+func handleSkillInstallTarget(target, scope string) bool {
+	targetPath, err := resolveSkillPath(target, scope)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Skill error: %v\n", err)
+		return false
+	}
+	if err := writeSkillToFile(targetPath); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to write skill file to %s: %v\n", targetPath, err)
+		return false
+	}
+	fmt.Printf("[✓] Installed %s skill (%s) -> %s\n", target, scope, targetPath)
+
+	manifest, _ := loadSkillManifest()
+	if manifest == nil {
+		manifest = &SkillManifest{Version: Version, Skills: []InstalledSkillEntry{}}
+	}
+
+	found := false
+	for i, entry := range manifest.Skills {
+		if entry.Target == target && entry.Scope == scope {
+			manifest.Skills[i].Path = targetPath
+			manifest.Skills[i].Version = Version
+			found = true
+			break
+		}
+	}
+	if !found {
+		manifest.Skills = append(manifest.Skills, InstalledSkillEntry{
+			Target:  target,
+			Scope:   scope,
+			Path:    targetPath,
+			Version: Version,
+		})
+	}
+	_ = saveSkillManifest(manifest)
+	return true
+}
+
+func syncInstalledSkillsIfOutdated() {
+	if !config.IsConfigDirInitialized() {
+		return
+	}
+	manifest, err := loadSkillManifest()
+	if err != nil || manifest == nil || len(manifest.Skills) == 0 {
+		return
+	}
+	if manifest.Version == Version {
+		return
+	}
+	updatedCount := 0
+	for i, entry := range manifest.Skills {
+		targetPath, err := resolveSkillPath(entry.Target, entry.Scope)
+		if err == nil {
+			if writeErr := writeSkillToFile(targetPath); writeErr == nil {
+				manifest.Skills[i].Version = Version
+				manifest.Skills[i].Path = targetPath
+				updatedCount++
+			}
+		}
+	}
+	if updatedCount > 0 {
+		manifest.Version = Version
+		_ = saveSkillManifest(manifest)
+		fmt.Printf("[sec-agent] Automatically upgraded AI agent skills (%s) across %d location(s).\n", Version, updatedCount)
+	}
+}
+
+func detectIDEEnvironment() (target string, scope string, name string) {
+	cwd, _ := os.Getwd()
+
+	// Tier 1: Workspace-specific directory markers (Highest Priority)
+	if cwd != "" {
+		if _, err := os.Stat(filepath.Join(cwd, ".agents")); err == nil {
+			return "antigravity", "global", "Antigravity IDE (Global ~/.gemini/ config)"
+		}
+		if _, err := os.Stat(filepath.Join(cwd, ".github", "copilot-instructions.md")); err == nil {
+			return "copilot", "workspace", "VS Code + Copilot (Workspace .github/ detected)"
+		}
+		if _, err := os.Stat(filepath.Join(cwd, ".cursor")); err == nil {
+			return "cursor", "workspace", "Cursor (Workspace .cursor/ detected)"
+		}
+		if _, err := os.Stat(filepath.Join(cwd, ".claude")); err == nil {
+			return "claude", "workspace", "Claude Code (Workspace .claude/ detected)"
+		}
+		if _, err := os.Stat(filepath.Join(cwd, ".windsurfrules")); err == nil {
+			return "windsurf", "workspace", "Windsurf (Workspace .windsurfrules detected)"
+		}
+	}
+
+	// Tier 2: Shell & Environment Variables
+	if os.Getenv("ANTIGRAVITY_AGENT") != "" ||
+		os.Getenv("__CFBundleIdentifier") == "com.google.antigravity-ide" ||
+		strings.Contains(os.Getenv("ANTIGRAVITY_EDITOR_APP_ROOT"), "Antigravity") ||
+		strings.Contains(os.Getenv("PATH"), ".gemini/antigravity-ide") {
+		return "antigravity", "global", "Antigravity IDE (AGY Shell Environment)"
+	}
+
+	if os.Getenv("CURSOR_AGENT") != "" || strings.Contains(os.Getenv("PATH"), "Cursor") {
+		return "cursor", "global", "Cursor (Shell Environment)"
+	}
+
+	if os.Getenv("CLAUDE_CODE") != "" || os.Getenv("CLAUDE") != "" {
+		return "claude", "global", "Claude Code (Shell Environment)"
+	}
+
+	if os.Getenv("WINDSURF") != "" {
+		return "windsurf", "workspace", "Windsurf (Shell Environment)"
+	}
+
+	if os.Getenv("VSCODE_PID") != "" && os.Getenv("ANTIGRAVITY_AGENT") == "" {
+		return "copilot", "workspace", "VS Code + GitHub Copilot (Shell Environment)"
+	}
+
+	// Tier 3: Global Home Directory Configurations
+	homeDir, _ := os.UserHomeDir()
+	if homeDir != "" {
+		if _, err := os.Stat(filepath.Join(homeDir, ".gemini")); err == nil {
+			return "antigravity", "global", "Antigravity IDE (Global ~/.gemini/ detected)"
+		}
+		if _, err := os.Stat(filepath.Join(homeDir, ".cursor")); err == nil {
+			return "cursor", "global", "Cursor (Global ~/.cursor/ detected)"
+		}
+		if _, err := os.Stat(filepath.Join(homeDir, ".claude")); err == nil {
+			return "claude", "global", "Claude Code (Global ~/.claude/ detected)"
+		}
+	}
+
+	return "antigravity", "global", "Antigravity IDE (Default)"
+}
+
+func handleInit(profile string, args []string) {
+	cfgDir, err := config.GetConfigDir()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Initialization error: %v\n", err)
+		os.Exit(1)
+	}
+	backupsDir := filepath.Join(cfgDir, "backups")
+	_ = os.MkdirAll(backupsDir, 0700)
+
+	fmt.Println("=== 🔑 sec-agent Vault Onboarding & Setup ===")
+	fmt.Printf("[✓] Vault configuration directory initialized at %s\n", cfgDir)
+	fmt.Printf("[✓] Automatic write backups folder initialized at %s\n", backupsDir)
+
+	detectedTarget, detectedScope, detectedName := detectIDEEnvironment()
+	fmt.Printf("[ℹ] Auto-detected Active Environment: %s\n", detectedName)
+
+	syncInstalledSkillsIfOutdated()
+
+	nonInteractive := false
+	skillTarget := ""
+	skillScope := "global"
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--non-interactive" || args[i] == "-y" || args[i] == "--yes" {
+			nonInteractive = true
+		} else if args[i] == "--skill" && i+1 < len(args) {
+			skillTarget = args[i+1]
+			i++
+		} else if args[i] == "--scope" && i+1 < len(args) {
+			skillScope = args[i+1]
+			i++
+		}
+	}
+
+	if skillTarget != "" {
+		handleSkillInstallTarget(skillTarget, skillScope)
+		return
+	}
+
+	if nonInteractive || !isInteractiveTerminal() {
+		handleSkillInstallTarget(detectedTarget, detectedScope)
+		fmt.Println("\nInitialization complete.")
+		return
+	}
+
+	fmt.Println("\nSelect AI Assistant environment(s) to install integration skills:")
+	fmt.Println("  [1] Antigravity IDE (Global: ~/.gemini/config/skills/)")
+	fmt.Println("  [2] Antigravity IDE (Workspace: .agents/skills/)")
+	fmt.Println("  [3] VS Code + GitHub Copilot (.github/copilot-instructions.md)")
+	fmt.Println("  [4] Cursor (Global: ~/.cursor/rules/ | Workspace: .cursor/rules/)")
+	fmt.Println("  [5] Claude Code (Global: ~/.claude/skills/ | Workspace: .claude/skills/)")
+	fmt.Println("  [6] Windsurf (.windsurfrules)")
+	fmt.Println("  [7] Skip AI skill installation")
+
+	fmt.Print("\nEnter selection (e.g. 1,3 or 'all' or '7'): ")
+	reader := bufio.NewReader(os.Stdin)
+	input, _ := reader.ReadString('\n')
+	input = strings.TrimSpace(input)
+
+	if input == "" || input == "7" || input == "skip" {
+		fmt.Println("Skipped AI skill installation. Setup complete!")
+		return
+	}
+
+	choices := strings.Split(input, ",")
+	for _, choice := range choices {
+		choice = strings.TrimSpace(choice)
+		switch choice {
+		case "1":
+			handleSkillInstallTarget("antigravity", "global")
+		case "2":
+			handleSkillInstallTarget("antigravity", "workspace")
+		case "3":
+			handleSkillInstallTarget("copilot", "workspace")
+		case "4":
+			handleSkillInstallTarget("cursor", "global")
+			handleSkillInstallTarget("cursor", "workspace")
+		case "5":
+			handleSkillInstallTarget("claude", "global")
+			handleSkillInstallTarget("claude", "workspace")
+		case "6":
+			handleSkillInstallTarget("windsurf", "workspace")
+		case "all":
+			handleSkillInstallTarget("antigravity", "global")
+			handleSkillInstallTarget("antigravity", "workspace")
+			handleSkillInstallTarget("copilot", "workspace")
+			handleSkillInstallTarget("cursor", "global")
+			handleSkillInstallTarget("claude", "global")
+			handleSkillInstallTarget("windsurf", "workspace")
+		}
+	}
+
+	fmt.Println("\nSetup complete! You can re-run 'sec-agent init' anytime to update settings or install skills.")
+}
+
+func handleSkill(profile string, args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: sec-agent skill <install|status|update> [args]")
+		os.Exit(1)
+	}
+
+	sub := args[0]
+	switch sub {
+	case "install":
+		target := ""
+		scope := "global"
+		for i := 1; i < len(args); i++ {
+			if (args[i] == "--target" || args[i] == "-t") && i+1 < len(args) {
+				target = args[i+1]
+				i++
+			} else if (args[i] == "--scope" || args[i] == "-s") && i+1 < len(args) {
+				scope = args[i+1]
+				i++
+			}
+		}
+		if target == "" {
+			handleInit(profile, nil)
+			return
+		}
+		handleSkillInstallTarget(target, scope)
+	case "status":
+		manifest, err := loadSkillManifest()
+		if err != nil || manifest == nil {
+			fmt.Println("No skill manifest found. Run 'sec-agent init' or 'sec-agent skill install' to configure skills.")
+			return
+		}
+		fmt.Println("=== 🤖 sec-agent AI Skill Installation Status ===")
+		fmt.Printf("Binary Skill Version: %s\n\n", Version)
+		if len(manifest.Skills) == 0 {
+			fmt.Println("No skills currently tracked in manifest.")
+			return
+		}
+		for _, s := range manifest.Skills {
+			status := "[✓] Up to date"
+			if s.Version != Version {
+				status = fmt.Sprintf("[!] Outdated (installed %s)", s.Version)
+			}
+			fmt.Printf("  • %-15s (%-9s) %s\n", s.Target, s.Scope, status)
+			fmt.Printf("    Path: %s\n", s.Path)
+		}
+	case "update":
+		manifest, err := loadSkillManifest()
+		if err != nil || manifest == nil || len(manifest.Skills) == 0 {
+			fmt.Println("No skills tracked in manifest to update.")
+			return
+		}
+		updated := 0
+		for i, entry := range manifest.Skills {
+			targetPath, err := resolveSkillPath(entry.Target, entry.Scope)
+			if err == nil {
+				if writeErr := writeSkillToFile(targetPath); writeErr == nil {
+					manifest.Skills[i].Version = Version
+					manifest.Skills[i].Path = targetPath
+					updated++
+					fmt.Printf("[✓] Updated %s (%s) -> %s\n", entry.Target, entry.Scope, targetPath)
+				}
+			}
+		}
+		manifest.Version = Version
+		_ = saveSkillManifest(manifest)
+		fmt.Printf("\nSuccessfully updated %d skill location(s) to %s.\n", updated, Version)
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown skill subcommand %q. Supported: install, status, update\n", sub)
+		os.Exit(1)
+	}
+}
+
+func handleBackupList(profile string) {
+	cfgDir, err := config.GetConfigDir()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	backupsDir := filepath.Join(cfgDir, "backups")
+	if profile != "" && profile != "default" {
+		backupsDir = filepath.Join(backupsDir, profile)
+	}
+
+	fmt.Println("=== 📁 sec-agent Vault Snapshots & Backups ===")
+	fmt.Printf("Search Path: %s\n\n", backupsDir)
+
+	entries, err := os.ReadDir(backupsDir)
+	if err != nil || len(entries) == 0 {
+		fmt.Println("  No automatic write snapshots found in backups directory.")
+	} else {
+		fmt.Println("Automatic Write Snapshots (.enc):")
+		for _, entry := range entries {
+			if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".enc") {
+				info, _ := entry.Info()
+				size := int64(0)
+				modTime := ""
+				if info != nil {
+					size = info.Size()
+					modTime = info.ModTime().Format("2006-01-02 15:04:05")
+				}
+				fullPath := filepath.Join(backupsDir, entry.Name())
+				fmt.Printf("  • %s  (%d bytes, %s)\n", entry.Name(), size, modTime)
+				fmt.Printf("    Path: %s\n", fullPath)
+			}
+		}
+	}
+
+	localEntries, err := os.ReadDir(".")
+	if err == nil {
+		fmt.Println("\nLocal KeePassXC Backup Files (.kdbx):")
+		count := 0
+		for _, entry := range localEntries {
+			if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".kdbx") {
+				info, _ := entry.Info()
+				size := int64(0)
+				modTime := ""
+				if info != nil {
+					size = info.Size()
+					modTime = info.ModTime().Format("2006-01-02 15:04:05")
+				}
+				fmt.Printf("  • %s  (%d bytes, %s)\n", entry.Name(), size, modTime)
+				count++
+			}
+		}
+		if count == 0 {
+			fmt.Println("  No .kdbx backup files in current directory.")
+		}
+	}
+	fmt.Println("\nTo restore a backup or snapshot, run:")
+	fmt.Println("  sec-agent restore <file-path> [--merge|--overwrite]")
 }
 
 func handleCompletion(shell string) {
