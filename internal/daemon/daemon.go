@@ -36,8 +36,9 @@ type IPCRequest struct {
 	IsPrefix    bool                           `json:"is_prefix,omitempty"`
 	Limit       int                            `json:"limit,omitempty"`
 	Expires     string                         `json:"expires,omitempty"`      // RFC3339 formatted expiration time
-	ShowExpired bool                           `json:"show_expired,omitempty"` // Override to show expired secrets
-	Token       string                         `json:"token,omitempty"`        // Shell session token
+	ShowExpired    bool                           `json:"show_expired,omitempty"` // Override to show expired secrets
+	Token          string                         `json:"token,omitempty"`        // Shell session token
+	ExtendsProfile string                         `json:"extends_profile,omitempty"`
 }
 
 // AuditLogEntry represents a single audit event record.
@@ -367,7 +368,7 @@ func (d *Daemon) handleConnection(c net.Conn) {
 			d.sendError(c, "Session locked. Please unlock first.")
 			return
 		}
-		entry, exists := d.secretsStore.Secrets[req.Path]
+		entry, exists := d.resolveSecret(req.Path, req.ExtendsProfile)
 		if !exists {
 			d.sendError(c, fmt.Sprintf("secret %q not found", req.Path))
 			return
@@ -397,10 +398,13 @@ func (d *Daemon) handleConnection(c net.Conn) {
 			d.sendError(c, "Session locked. Please unlock first.")
 			return
 		}
-		group := d.secretsStore.GetGroup(req.Path)
+		allSecrets := d.resolveAllSecrets(req.ExtendsProfile)
 		filteredGroup := make(map[string]store.SecretEntry)
 		now := time.Now()
-		for k, entry := range group {
+		for k, entry := range allSecrets {
+			if req.Path != "" && !strings.HasPrefix(k, req.Path) {
+				continue
+			}
 			if !entry.Expires.IsZero() && now.After(entry.Expires) && !req.ShowExpired {
 				continue
 			}
@@ -558,7 +562,7 @@ func (d *Daemon) handleConnection(c net.Conn) {
 			return
 		}
 		// Return all secrets for the backup/export
-		d.sendResponse(c, IPCResponse{Success: true, Secrets: d.secretsStore.Secrets})
+		d.sendResponse(c, IPCResponse{Success: true, Secrets: d.resolveAllSecrets(req.ExtendsProfile)})
 
 	case "restore":
 		if d.masterKey == nil {
@@ -585,10 +589,14 @@ func (d *Daemon) handleConnection(c net.Conn) {
 			d.sendError(c, "Session locked. Please unlock first.")
 			return
 		}
-		group := d.secretsStore.GetGroup(req.Path)
+		allSecrets := d.resolveAllSecrets(req.ExtendsProfile)
 		var paths []string
-		for k := range group {
-			paths = append(paths, k)
+		group := make(map[string]store.SecretEntry)
+		for k, entry := range allSecrets {
+			if req.Path == "" || strings.HasPrefix(k, req.Path) {
+				paths = append(paths, k)
+				group[k] = entry
+			}
 		}
 		sort.Strings(paths)
 		d.lastUsed = time.Now()
@@ -740,5 +748,41 @@ func (d *Daemon) sendResponse(c net.Conn, resp IPCResponse) {
 }
 
 func (d *Daemon) sendError(c net.Conn, msg string) {
-	d.sendResponse(c, IPCResponse{Success: false, Error: msg})
+	_ = json.NewEncoder(c).Encode(IPCResponse{
+		Success: false,
+		Error:   msg,
+	})
+}
+
+func (d *Daemon) resolveSecret(path string, extendsProfile string) (store.SecretEntry, bool) {
+	entry, exists := d.secretsStore.Secrets[path]
+	if exists {
+		return entry, true
+	}
+	if extendsProfile != "" && extendsProfile != d.profile {
+		parentStore, err := store.LoadStore(extendsProfile, d.masterKey)
+		if err == nil && parentStore != nil {
+			entry, exists := parentStore.Secrets[path]
+			if exists {
+				return entry, true
+			}
+		}
+	}
+	return store.SecretEntry{}, false
+}
+
+func (d *Daemon) resolveAllSecrets(extendsProfile string) map[string]store.SecretEntry {
+	res := make(map[string]store.SecretEntry)
+	if extendsProfile != "" && extendsProfile != d.profile {
+		parentStore, err := store.LoadStore(extendsProfile, d.masterKey)
+		if err == nil && parentStore != nil {
+			for k, v := range parentStore.Secrets {
+				res[k] = v
+			}
+		}
+	}
+	for k, v := range d.secretsStore.Secrets {
+		res[k] = v
+	}
+	return res
 }

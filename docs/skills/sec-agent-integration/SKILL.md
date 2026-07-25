@@ -1,12 +1,12 @@
 ---
 name: sec-agent-integration
 description: Use the sec-agent CLI utility to start background daemons, store secrets, run applications in isolated environments, migrate dotenv files, install AI skills, inspect snapshots, and manage backups.
-version: v1.9.2
+version: v1.9.3
 ---
 
-# sec-agent Secrets Management Integration (v1.9.2)
+# sec-agent Secrets Management Integration (v1.9.3)
 
-This skill enables AI coding agents and autonomous assistants to use the `sec-agent` CLI tool (v1.9.2+) to securely retrieve credentials, run application build/test/terraform pipelines in isolated process environments, migrate dotenv configuration files, install integration skills across IDEs, inspect automatic snapshots, and manage KeePassXC `.kdbx` backups on macOS.
+This skill enables AI coding agents and autonomous assistants to use the `sec-agent` CLI tool (v1.9.3+) to securely retrieve credentials, run application build/test/terraform pipelines in isolated process environments, migrate dotenv configuration files, install integration skills across IDEs, inspect automatic snapshots, and manage KeePassXC `.kdbx` backups on macOS.
 
 ---
 
@@ -161,6 +161,46 @@ Delegate temporary credential access to subagents with **zero credential lingeri
 ```bash
 sec-agent run -- make testacc
 sec-agent run --allow-keys VCO_URL,VCO_TOKEN -- make test-unit
+```
+
+### 5.8. Ephemeral SSH Agent & Passphrase Injection (`sec-agent run --ssh-key`)
+```bash
+# Launch ephemeral in-memory SSH agent with vault passphrase for SSH/Rsync/Git automation
+sec-agent run --ssh-key ~/.ssh/id_ed25519_ax3600 \
+              --ssh-passphrase-key router-ax3600-prod/ssh/key_passphrase \
+              -- ssh root@192.168.31.1 "uci show"
+```
+
+### 5.9. Stdin Stream Injection & Redaction (`sec-agent stream`)
+```bash
+# Evaluate {{key_path}} placeholders in-memory without process table (ps aux) exposure
+sec-agent stream --template "uci set network.wg0.private_key='{{router-ax3600-prod/nordvpn/private_key}}'" \
+  | ssh root@192.168.31.1 "cat | sh"
+```
+
+### 5.10. Multi-Profile Inheritance (`extends` in `.secrc`)
+```json
+{
+  "profile": "router-ax3600-prod",
+  "extends": "global-shared"
+}
+```
+Child profiles recursively fallback to parent profile stores for missing keys.
+
+### 5.11. Dynamic Flag Aliases (`flag_aliases` in `.secrc`)
+```json
+{
+  "flag_aliases": {
+    "router-ax3600-prod/nordvpn/access_token": "-t"
+  }
+}
+```
+Automatically injects credentials as command-line flags into subprocess arguments.
+
+### 5.12. Network Host Reachability Guard (`sec-agent check --ping-host`)
+```bash
+# Pre-flight TCP connectivity verification (<50ms)
+sec-agent check --ping-host 192.168.31.1:22
 ```
 
 ---

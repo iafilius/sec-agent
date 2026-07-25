@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -756,5 +757,92 @@ func TestDaemonSessionHijackingSSHCheck(t *testing.T) {
 	safeOut, err := safeQueryCmd.CombinedOutput()
 	if err == nil {
 		t.Fatalf("expected safe query on hijacked-locked session to fail, but it succeeded: %s", string(safeOut))
+	}
+}
+
+func TestSSHAgentAndStreamInjection(t *testing.T) {
+	tmpDir := t.TempDir()
+	keyPath := filepath.Join(tmpDir, "id_ed25519")
+
+	keyData := []byte("-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\nQyNTUxOQAAACCSl8i3Y4Tj0N5t7V2b9x8yZ2M1P3Q0+g7d4z1a1w2x3QAAAIhA8k+dQPPP\nnQAAAAtzc2gtZWQyNTUxOQAAACCSl8i3Y4Tj0N5t7V2b9x8yZ2M1P3Q0+g7d4z1a1w2x\n3QAAAED3f5j1Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/\nPz8/Pz8/Pz8/\n-----END OPENSSH PRIVATE KEY-----\n")
+	_ = os.WriteFile(keyPath, keyData, 0600)
+
+	sockPath, cleanup, err := setupEphemeralSSHAgent("default", keyPath, "")
+	if err == nil {
+		if _, statErr := os.Stat(sockPath); os.IsNotExist(statErr) {
+			t.Errorf("expected SSH agent socket to exist at %s, but missing", sockPath)
+		}
+		cleanup()
+		if _, statErr := os.Stat(sockPath); !os.IsNotExist(statErr) {
+			t.Errorf("expected SSH agent socket %s to be unlinked after cleanup", sockPath)
+		}
+	}
+
+	profile := "stream-test-profile"
+	masterKey := []byte("01234567890123456789012345678903")
+	d, err := daemon.NewDaemon(profile, 30*time.Second, "v1.9.2")
+	if err != nil {
+		t.Fatalf("failed to create test daemon for stream: %v", err)
+	}
+	d.SetMasterKeyForTest(masterKey)
+	d.SetSecretsForTest(map[string]store.SecretEntry{
+		"router/nordvpn/private_key": {Value: "SECRET_WG_PRIVATE_KEY_123"},
+	})
+	token := "stream-token-456"
+	d.SetSessionTokenForTest(token)
+
+	go func() {
+		_ = d.Start()
+	}()
+	defer d.Stop()
+
+	sock, _ := config.GetSocketPath(profile)
+	for i := 0; i < 50; i++ {
+		if _, err := os.Stat(sock); err == nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	binPath := filepath.Join(tmpDir, "sec_stream_bin")
+	buildCmd := exec.Command("go", "build", "-o", binPath, "main.go")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build stream test binary: %v\nOutput: %s", err, out)
+	}
+
+	streamCmd := exec.Command(binPath, "stream", "--template", "uci set network.wg0.private_key='{{router/nordvpn/private_key}}'", "--profile", profile)
+	streamCmd.Env = append(os.Environ(), "SEC_SESSION_TOKEN="+token)
+	out, err := streamCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sec-agent stream failed: %v\nOutput: %s", err, out)
+	}
+	if !strings.Contains(string(out), "SECRET_WG_PRIVATE_KEY_123") {
+		t.Errorf("expected stream output to contain substituted secret, got: %s", string(out))
+	}
+}
+
+func TestProfileInheritanceAndReachabilityGuard(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to start local test listener: %v", err)
+	}
+	defer listener.Close()
+
+	addr := listener.Addr().String()
+
+	tmpDir := t.TempDir()
+	binPath := filepath.Join(tmpDir, "sec_ping_bin")
+	buildCmd := exec.Command("go", "build", "-o", binPath, "main.go")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build ping test binary: %v\nOutput: %s", err, out)
+	}
+
+	pingCmd := exec.Command(binPath, "check", "--ping-host", addr)
+	out, err := pingCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sec-agent check --ping-host failed: %v\nOutput: %s", err, out)
+	}
+	if !strings.Contains(string(out), "is reachable") {
+		t.Errorf("expected ping host success output, got: %s", string(out))
 	}
 }

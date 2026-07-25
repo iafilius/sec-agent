@@ -31,6 +31,8 @@ import (
 
 	_ "embed"
 
+	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
 	"golang.org/x/term"
 )
 
@@ -39,7 +41,7 @@ var embeddedSkillBytes []byte
 
 var jsonErrors bool
 var (
-	Version   = "v1.9.2"
+	Version   = "v1.9.3"
 	BuildDate = "unknown"
 )
 
@@ -221,9 +223,11 @@ func printUsageJSON() {
 }
 
 type WorkspaceConfig struct {
-	Profile  string `json:"profile,omitempty"`
-	Prefix   string `json:"prefix,omitempty"`
-	AutoOpen bool   `json:"auto_open,omitempty"`
+	Profile     string            `json:"profile,omitempty"`
+	Prefix      string            `json:"prefix,omitempty"`
+	AutoOpen    bool              `json:"auto_open,omitempty"`
+	Extends     string            `json:"extends,omitempty"`
+	FlagAliases map[string]string `json:"flag_aliases,omitempty"`
 }
 
 func loadWorkspaceConfig() *WorkspaceConfig {
@@ -395,6 +399,8 @@ func main() {
 			os.Exit(1)
 		}
 		handleRotate(profile, os.Args[2], os.Args[3:])
+	case "stream":
+		handleStream(profile, os.Args[2:])
 	case "doctor":
 		handleDoctor(profile)
 	case "gen", "generate":
@@ -522,7 +528,8 @@ func printUsage() {
 	fmt.Println("  check [--template <f>] [--scan-weak] [--leaks] Validate schema, audit entropy, or scan history for leaks")
 	fmt.Println("  sync export|import <file>       Export/import encrypted vault package for team distribution")
 	fmt.Println("  load [<prefix>] [--format env|json] Batch-load scoped group secrets for shell sourcing")
-	fmt.Println("  run [--group <p>] [--allow-keys k1,k2] [--dry-run] [--no-redact] -- <cmd> Execute process with secrets injected")
+	fmt.Println("  run [--group <p>] [--allow-keys k1,k2] [--ssh-key <path>] [--dry-run] [--no-redact] -- <cmd> Execute process with secrets injected")
+	fmt.Println("  stream [--template <t>]         Evaluate secret {{key_path}} placeholders in template strings or stdin streams")
 	fmt.Println("  status                          Display session health, profile, and diagnostic metrics")
 	fmt.Println("  audit [--limit <n>] [--json]    View recent daemon security audit logs (alias: log)")
 	fmt.Println("  env [<prefix>]                   Output shell exports for secrets under prefix")
@@ -552,6 +559,12 @@ func queryDaemonRaw(profile string, req daemon.IPCRequest) (*daemon.IPCResponse,
 	if req.Action != "open" && req.Action != "ping" {
 		if req.Token == "" {
 			req.Token = os.Getenv("SEC_SESSION_TOKEN")
+		}
+		if req.ExtendsProfile == "" {
+			wsCfg := loadWorkspaceConfig()
+			if wsCfg != nil && wsCfg.Extends != "" {
+				req.ExtendsProfile = wsCfg.Extends
+			}
 		}
 	}
 
@@ -2169,9 +2182,151 @@ func (w *redactWriter) Write(p []byte) (n int, err error) {
 	return len(p), err
 }
 
+func setupEphemeralSSHAgent(profile, keyPath, passphraseVaultKey string) (socketPath string, cleanup func(), err error) {
+	// #nosec G304 G703
+	keyBytes, err := os.ReadFile(keyPath)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to read SSH private key file %s: %w", keyPath, err)
+	}
+
+	passphrase := ""
+	if passphraseVaultKey != "" {
+		resp, err := queryDaemon(profile, daemon.IPCRequest{
+			Action: "get",
+			Path:   passphraseVaultKey,
+		})
+		if err != nil || !resp.Success {
+			return "", nil, fmt.Errorf("failed to retrieve SSH passphrase secret %q from vault: %v", passphraseVaultKey, err)
+		}
+		passphrase = resp.Value
+	}
+
+	var rawKey interface{}
+	if passphrase != "" {
+		rawKey, err = ssh.ParseRawPrivateKeyWithPassphrase(keyBytes, []byte(passphrase))
+	} else {
+		rawKey, err = ssh.ParseRawPrivateKey(keyBytes)
+	}
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to parse SSH private key: %w", err)
+	}
+
+	keyring := agent.NewKeyring()
+	if err := keyring.Add(agent.AddedKey{PrivateKey: rawKey}); err != nil {
+		return "", nil, fmt.Errorf("failed to add SSH key to ephemeral keyring: %w", err)
+	}
+
+	cfgDir, err := config.GetConfigDir()
+	if err != nil {
+		return "", nil, err
+	}
+
+	randBuf := make([]byte, 8)
+	_, _ = rand.Read(randBuf)
+	sockPath := filepath.Join(cfgDir, fmt.Sprintf("ssh_%x.sock", randBuf))
+	_ = os.Remove(sockPath)
+
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to start SSH agent unix listener at %s: %w", sockPath, err)
+	}
+	_ = os.Chmod(sockPath, 0600)
+
+	doneChan := make(chan struct{})
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				select {
+				case <-doneChan:
+					return
+				default:
+					return
+				}
+			}
+			go func(c net.Conn) {
+				_ = agent.ServeAgent(keyring, c)
+				_ = c.Close()
+			}(conn)
+		}
+	}()
+
+	cleanup = func() {
+		close(doneChan)
+		_ = listener.Close()
+		_ = os.Remove(sockPath)
+	}
+
+	return sockPath, cleanup, nil
+}
+
+func handleStream(profile string, args []string) {
+	templateStr := ""
+	for i := 0; i < len(args); i++ {
+		if (args[i] == "--template" || args[i] == "-t") && i+1 < len(args) {
+			templateStr = args[i+1]
+			i++
+		}
+	}
+
+	var inputData []byte
+	var err error
+	if templateStr != "" {
+		inputData = []byte(templateStr)
+	} else {
+		inputData, err = io.ReadAll(os.Stdin)
+		if err != nil {
+			fail("STREAM_READ_FAILED", err, "Check stdin input stream.")
+		}
+	}
+
+	re := regexp.MustCompile(`\{\{([a-zA-Z0-9_\-\.\/]+)\}\}`)
+	matches := re.FindAllSubmatch(inputData, -1)
+	if len(matches) == 0 {
+		if jsonErrors {
+			data, _ := json.Marshal(map[string]interface{}{
+				"success": true,
+				"stream":  string(inputData),
+			})
+			fmt.Println(string(data))
+		} else {
+			fmt.Print(string(inputData))
+		}
+		return
+	}
+
+	resp, err := queryDaemon(profile, daemon.IPCRequest{Action: "backup"})
+	if err != nil || !resp.Success {
+		fail("DAEMON_ERROR", fmt.Errorf("failed to fetch secrets from daemon: %v", err), "Run 'eval $(sec open)' to unlock.")
+	}
+
+	result := string(inputData)
+	for _, m := range matches {
+		placeholder := string(m[0])
+		keyPath := string(m[1])
+		entry, exists := resp.Secrets[keyPath]
+		if !exists {
+			fail("SECRET_NOT_FOUND", fmt.Errorf("secret %q referenced in stream placeholder not found", keyPath), "Verify key path.")
+		}
+		result = strings.ReplaceAll(result, placeholder, entry.Value)
+	}
+
+	if jsonErrors {
+		data, _ := json.Marshal(map[string]interface{}{
+			"success": true,
+			"stream":  result,
+		})
+		fmt.Println(string(data))
+	} else {
+		fmt.Print(result)
+	}
+}
+
 func handleRun(profile string, args []string) {
 	groupPrefix := ""
 	allowKeysStr := ""
+	sshKeyPath := ""
+	sshPassphraseKey := ""
 	dryRun := false
 	shouldRedact := true
 	var cmdArgs []string
@@ -2193,6 +2348,16 @@ func handleRun(profile string, args []string) {
 				allowKeysStr = args[i+1]
 				i++
 			}
+		} else if args[i] == "--ssh-key" {
+			if i+1 < len(args) {
+				sshKeyPath = args[i+1]
+				i++
+			}
+		} else if args[i] == "--ssh-passphrase-key" {
+			if i+1 < len(args) {
+				sshPassphraseKey = args[i+1]
+				i++
+			}
 		} else if args[i] == "--dry-run" {
 			dryRun = true
 		} else if args[i] == "--no-redact" {
@@ -2203,7 +2368,7 @@ func handleRun(profile string, args []string) {
 	}
 	if !foundSeparator {
 		for i := 0; i < len(args); i++ {
-			if args[i] == "--group" || args[i] == "-g" {
+			if args[i] == "--group" || args[i] == "-g" || args[i] == "--ssh-key" || args[i] == "--ssh-passphrase-key" {
 				i++
 				continue
 			}
@@ -2218,7 +2383,7 @@ func handleRun(profile string, args []string) {
 		}
 	}
 	if len(cmdArgs) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: sec run [--group <prefix>] [--profile <name>] [--allow-keys <keys>] [--dry-run] [--confirm-prod] [--no-redact] -- <command> [args...]")
+		fmt.Fprintln(os.Stderr, "Usage: sec run [--group <prefix>] [--profile <name>] [--allow-keys <keys>] [--ssh-key <path>] [--ssh-passphrase-key <vault-key>] [--dry-run] [--confirm-prod] [--no-redact] -- <command> [args...]")
 		os.Exit(1)
 	}
 
@@ -2309,6 +2474,39 @@ func handleRun(profile string, args []string) {
 		env = append(env, fmt.Sprintf("%s=%s", envKey, entry.Value))
 		if len(entry.Value) > 3 {
 			secretVals = append(secretVals, entry.Value)
+		}
+	}
+
+	if sshKeyPath != "" {
+		sockPath, sshCleanup, err := setupEphemeralSSHAgent(profile, sshKeyPath, sshPassphraseKey)
+		if err != nil {
+			fail("SSH_AGENT_FAILED", err, "Verify SSH key path and passphrase secret.")
+		}
+		defer sshCleanup()
+		env = append(env, "SSH_AUTH_SOCK="+sockPath)
+		fmt.Fprintf(os.Stderr, "[✓] Ephemeral SSH Agent launched (%s)\n", sockPath)
+	}
+
+	wsCfg := loadWorkspaceConfig()
+	if wsCfg != nil && len(wsCfg.FlagAliases) > 0 {
+		for keyPath, flag := range wsCfg.FlagAliases {
+			flagExists := false
+			for _, arg := range cmdArgs {
+				if arg == flag || strings.HasPrefix(arg, flag+"=") {
+					flagExists = true
+					break
+				}
+			}
+			if !flagExists {
+				secResp, sErr := queryDaemon(profile, daemon.IPCRequest{Action: "get", Path: keyPath})
+				if sErr == nil && secResp != nil && secResp.Success {
+					cmdArgs = append(cmdArgs, flag, secResp.Value)
+					if len(secResp.Value) > 3 {
+						secretVals = append(secretVals, secResp.Value)
+					}
+					fmt.Fprintf(os.Stderr, "[NOTICE] Dynamic flag alias injected: %s [REDACTED_BY_SEC]\n", flag)
+				}
+			}
 		}
 	}
 
@@ -2678,6 +2876,7 @@ func handleCheck(profile string, args []string) {
 	scanWeak := false
 	scanLeaks := false
 	templateFile := ""
+	pingHost := ""
 	var requiredKeys []string
 
 	for i := 0; i < len(args); i++ {
@@ -2700,6 +2899,11 @@ func handleCheck(profile string, args []string) {
 						requiredKeys = append(requiredKeys, k)
 					}
 				}
+			}
+		} else if args[i] == "--ping-host" {
+			if i+1 < len(args) {
+				pingHost = args[i+1]
+				i++
 			}
 		}
 	}
@@ -2793,8 +2997,36 @@ func handleCheck(profile string, args []string) {
 		}
 	}
 
+	if pingHost != "" {
+		targetAddr := pingHost
+		if !strings.Contains(targetAddr, ":") {
+			targetAddr = targetAddr + ":22"
+		}
+		// #nosec G102 G704
+		conn, err := net.DialTimeout("tcp", targetAddr, 100*time.Millisecond)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[⚠️] Network Reachability Guard: Target host %s is UNREACHABLE (%v)\n", targetAddr, err)
+			if jsonErrors {
+				data, _ := json.Marshal(map[string]interface{}{
+					"success": false,
+					"error": map[string]string{
+						"code":    "HOST_UNREACHABLE",
+						"message": fmt.Sprintf("Target host %s is unreachable: %v", targetAddr, err),
+					},
+				})
+				fmt.Println(string(data))
+			}
+			os.Exit(1)
+		}
+		_ = conn.Close()
+		fmt.Fprintf(os.Stderr, "[✓] Network Reachability Guard: Target host %s is reachable\n", targetAddr)
+		if len(requiredKeys) == 0 {
+			return
+		}
+	}
+
 	if len(requiredKeys) == 0 {
-		fail("INVALID_ARGUMENT", fmt.Errorf("no required keys specified"), "Pass --template <file> or --required KEY1,KEY2")
+		fail("INVALID_ARGUMENT", fmt.Errorf("no required keys specified"), "Pass --template <file>, --required KEY1,KEY2, or --ping-host <host:port>")
 	}
 
 	resp, err := queryDaemon(profile, daemon.IPCRequest{Action: "backup"})
@@ -3140,7 +3372,7 @@ func syncInstalledSkillsIfOutdated() {
 	if updatedCount > 0 {
 		manifest.Version = Version
 		_ = saveSkillManifest(manifest)
-		fmt.Printf("[sec-agent] Automatically upgraded AI agent skills (%s) across %d location(s).\n", Version, updatedCount)
+		fmt.Fprintf(os.Stderr, "[sec-agent] Automatically upgraded AI agent skills (%s) across %d location(s).\n", Version, updatedCount)
 	}
 }
 
