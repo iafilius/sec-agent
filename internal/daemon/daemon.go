@@ -10,6 +10,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -39,6 +41,9 @@ type IPCRequest struct {
 	ShowExpired    bool                           `json:"show_expired,omitempty"` // Override to show expired secrets
 	Token          string                         `json:"token,omitempty"`        // Shell session token
 	ExtendsProfile string                         `json:"extends_profile,omitempty"`
+	TargetVersion  int                            `json:"target_version,omitempty"`
+	ShowTrash      bool                           `json:"show_trash,omitempty"`
+	Permanent      bool                           `json:"permanent,omitempty"`
 }
 
 // AuditLogEntry represents a single audit event record.
@@ -65,6 +70,8 @@ type IPCResponse struct {
 	Token        string                       `json:"token,omitempty"` // Shell session token
 	Version      string                       `json:"version,omitempty"`
 	StatusInfo   map[string]interface{}       `json:"status_info,omitempty"`
+	History      []store.SecretVersion        `json:"history,omitempty"`
+	ItemVersion  int                          `json:"item_version,omitempty"`
 }
 
 // Daemon represents the background secrets agent.
@@ -85,6 +92,9 @@ type Daemon struct {
 
 // NewDaemon creates a new daemon instance.
 func NewDaemon(profile string, ttl time.Duration, version string) (*Daemon, error) {
+	// Set Go runtime soft memory limit to 256 MB to protect against OOM spikes
+	debug.SetMemoryLimit(256 * 1024 * 1024)
+
 	sock, err := config.GetSocketPath(profile)
 	if err != nil {
 		return nil, err
@@ -95,6 +105,19 @@ func NewDaemon(profile string, ttl time.Duration, version string) (*Daemon, erro
 		profile:    profile,
 		version:    version,
 	}, nil
+}
+
+func (d *Daemon) checkMemoryGuardrail() bool {
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	if ms.Alloc > 512*1024*1024 {
+		runtime.GC()
+		runtime.ReadMemStats(&ms)
+		if ms.Alloc > 512*1024*1024 {
+			return false
+		}
+	}
+	return true
 }
 
 // Start runs the IPC Unix socket server.
@@ -398,8 +421,12 @@ func (d *Daemon) handleConnection(c net.Conn) {
 			d.sendError(c, "Session locked. Please unlock first.")
 			return
 		}
+		if !d.checkMemoryGuardrail() {
+			d.sendError(c, "RESOURCE_EXHAUSTED: Memory saturation threshold exceeded. Please use scoped prefix filtering.")
+			return
+		}
 		allSecrets := d.resolveAllSecrets(req.ExtendsProfile)
-		filteredGroup := make(map[string]store.SecretEntry)
+		filteredGroup := make(map[string]store.SecretEntry, len(allSecrets))
 		now := time.Now()
 		for k, entry := range allSecrets {
 			if req.Path != "" && !strings.HasPrefix(k, req.Path) {
@@ -424,8 +451,34 @@ func (d *Daemon) handleConnection(c net.Conn) {
 			return
 		}
 
+		if d.secretsStore == nil {
+			d.secretsStore = &store.EncryptedStore{Secrets: make(map[string]store.SecretEntry)}
+		}
+		if d.secretsStore.Secrets == nil {
+			d.secretsStore.Secrets = make(map[string]store.SecretEntry)
+		}
+
 		entry, exists := d.secretsStore.Secrets[req.Path]
 		if exists {
+			// Push current active state to version history before mutating
+			oldVer := entry.Version
+			if oldVer <= 0 {
+				oldVer = 1
+			}
+			verSnapshot := store.SecretVersion{
+				Version:      oldVer,
+				Value:        entry.Value,
+				Comment:      entry.Comment,
+				Metadata:     entry.Metadata,
+				LastModified: entry.LastModified,
+			}
+			entry.History = append(entry.History, verSnapshot)
+			if len(entry.History) > 10 {
+				entry.History = entry.History[len(entry.History)-10:]
+			}
+			entry.Version = oldVer + 1
+			entry.DeletedAt = nil
+
 			// Update values selectively if this is a partial update
 			if req.Value != "" {
 				entry.Value = req.Value
@@ -449,6 +502,7 @@ func (d *Daemon) handleConnection(c net.Conn) {
 				Metadata:     req.Metadata,
 				Created:      time.Now(),
 				LastModified: time.Now(),
+				Version:      1,
 			}
 		}
 
@@ -561,6 +615,10 @@ func (d *Daemon) handleConnection(c net.Conn) {
 			d.sendError(c, "Session locked. Please unlock first.")
 			return
 		}
+		if !d.checkMemoryGuardrail() {
+			d.sendError(c, "RESOURCE_EXHAUSTED: Memory saturation threshold exceeded. Please use scoped prefix filtering.")
+			return
+		}
 		// Return all secrets for the backup/export
 		d.sendResponse(c, IPCResponse{Success: true, Secrets: d.resolveAllSecrets(req.ExtendsProfile)})
 
@@ -589,13 +647,29 @@ func (d *Daemon) handleConnection(c net.Conn) {
 			d.sendError(c, "Session locked. Please unlock first.")
 			return
 		}
-		allSecrets := d.resolveAllSecrets(req.ExtendsProfile)
 		var paths []string
-		group := make(map[string]store.SecretEntry)
-		for k, entry := range allSecrets {
-			if req.Path == "" || strings.HasPrefix(k, req.Path) {
-				paths = append(paths, k)
-				group[k] = entry
+		var group map[string]store.SecretEntry
+		if req.ShowTrash {
+			secCount := len(d.secretsStore.Secrets)
+			paths = make([]string, 0, secCount)
+			group = make(map[string]store.SecretEntry, secCount)
+			for k, entry := range d.secretsStore.Secrets {
+				if entry.DeletedAt != nil {
+					if req.Path == "" || strings.HasPrefix(k, req.Path) {
+						paths = append(paths, k)
+						group[k] = entry
+					}
+				}
+			}
+		} else {
+			allSecrets := d.resolveAllSecrets(req.ExtendsProfile)
+			paths = make([]string, 0, len(allSecrets))
+			group = make(map[string]store.SecretEntry, len(allSecrets))
+			for k, entry := range allSecrets {
+				if req.Path == "" || strings.HasPrefix(k, req.Path) {
+					paths = append(paths, k)
+					group[k] = entry
+				}
 			}
 		}
 		sort.Strings(paths)
@@ -612,7 +686,13 @@ func (d *Daemon) handleConnection(c net.Conn) {
 			return
 		}
 		if req.IsPrefix {
-			count, err := d.secretsStore.DeletePrefix(req.Path)
+			var count int
+			var err error
+			if req.Permanent {
+				count, err = d.secretsStore.HardDeletePrefix(req.Path)
+			} else {
+				count, err = d.secretsStore.SoftDeletePrefix(req.Path)
+			}
 			if err != nil {
 				d.sendError(c, fmt.Sprintf("failed to delete prefix: %v", err))
 				return
@@ -622,12 +702,21 @@ func (d *Daemon) handleConnection(c net.Conn) {
 				return
 			}
 			d.lastUsed = time.Now()
+			msg := fmt.Sprintf("Soft-deleted %d secrets under prefix %q (use 'sec ls --trash' to view)", count, req.Path)
+			if req.Permanent {
+				msg = fmt.Sprintf("Permanently deleted %d secrets under prefix %q", count, req.Path)
+			}
 			d.sendResponse(c, IPCResponse{
 				Success: true,
-				Value:   fmt.Sprintf("Deleted %d secrets under prefix %q", count, req.Path),
+				Value:   msg,
 			})
 		} else {
-			err := d.secretsStore.DeleteSecret(req.Path)
+			var err error
+			if req.Permanent {
+				err = d.secretsStore.HardDeleteSecret(req.Path)
+			} else {
+				err = d.secretsStore.SoftDeleteSecret(req.Path)
+			}
 			if err != nil {
 				d.sendError(c, fmt.Sprintf("failed to delete secret: %v", err))
 				return
@@ -637,11 +726,113 @@ func (d *Daemon) handleConnection(c net.Conn) {
 				return
 			}
 			d.lastUsed = time.Now()
+			msg := fmt.Sprintf("Soft-deleted secret %q (use 'sec restore-deleted %s' to undo)", req.Path, req.Path)
+			if req.Permanent {
+				msg = fmt.Sprintf("Permanently deleted secret %q", req.Path)
+			}
 			d.sendResponse(c, IPCResponse{
 				Success: true,
-				Value:   fmt.Sprintf("Deleted secret %q", req.Path),
+				Value:   msg,
 			})
 		}
+
+	case "restore_deleted":
+		if d.masterKey == nil {
+			d.sendError(c, "Session locked. Please unlock first.")
+			return
+		}
+		if err := d.secretsStore.RestoreDeletedSecret(req.Path); err != nil {
+			d.sendError(c, fmt.Sprintf("failed to restore deleted secret: %v", err))
+			return
+		}
+		if err := store.SaveStore(d.profile, d.secretsStore, d.masterKey); err != nil {
+			d.sendError(c, fmt.Sprintf("failed to persist store: %v", err))
+			return
+		}
+		d.lastUsed = time.Now()
+		d.sendResponse(c, IPCResponse{
+			Success: true,
+			Value:   fmt.Sprintf("Restored soft-deleted secret %q", req.Path),
+		})
+
+	case "history":
+		if d.masterKey == nil {
+			d.sendError(c, "Session locked. Please unlock first.")
+			return
+		}
+		entry, exists := d.secretsStore.Secrets[req.Path]
+		if !exists {
+			d.sendError(c, fmt.Sprintf("secret %q not found", req.Path))
+			return
+		}
+		currVer := entry.Version
+		if currVer <= 0 {
+			currVer = 1
+		}
+		d.lastUsed = time.Now()
+		d.sendResponse(c, IPCResponse{
+			Success:     true,
+			ItemVersion: currVer,
+			History:     entry.History,
+		})
+
+	case "rollback":
+		if d.masterKey == nil {
+			d.sendError(c, "Session locked. Please unlock first.")
+			return
+		}
+		entry, exists := d.secretsStore.Secrets[req.Path]
+		if !exists {
+			d.sendError(c, fmt.Sprintf("secret %q not found", req.Path))
+			return
+		}
+		targetVer := req.TargetVersion
+		var found *store.SecretVersion
+		for _, h := range entry.History {
+			if h.Version == targetVer {
+				found = &h
+				break
+			}
+		}
+		if found == nil {
+			d.sendError(c, fmt.Sprintf("version %d not found in history for secret %q", targetVer, req.Path))
+			return
+		}
+
+		// Push current state into history before rolling back
+		oldVer := entry.Version
+		if oldVer <= 0 {
+			oldVer = 1
+		}
+		verSnapshot := store.SecretVersion{
+			Version:      oldVer,
+			Value:        entry.Value,
+			Comment:      entry.Comment,
+			Metadata:     entry.Metadata,
+			LastModified: entry.LastModified,
+		}
+		entry.History = append(entry.History, verSnapshot)
+		if len(entry.History) > 10 {
+			entry.History = entry.History[len(entry.History)-10:]
+		}
+
+		entry.Version = oldVer + 1
+		entry.Value = found.Value
+		entry.Comment = found.Comment
+		entry.Metadata = found.Metadata
+		entry.LastModified = time.Now()
+		entry.DeletedAt = nil
+
+		d.secretsStore.Secrets[req.Path] = entry
+		if err := store.SaveStore(d.profile, d.secretsStore, d.masterKey); err != nil {
+			d.sendError(c, fmt.Sprintf("failed to persist store: %v", err))
+			return
+		}
+		d.lastUsed = time.Now()
+		d.sendResponse(c, IPCResponse{
+			Success: true,
+			Value:   fmt.Sprintf("Rolled back secret %q to version %d (new active version: v%d)", req.Path, targetVer, entry.Version),
+		})
 
 	case "status":
 		d.lastUsed = time.Now()
@@ -756,14 +947,14 @@ func (d *Daemon) sendError(c net.Conn, msg string) {
 
 func (d *Daemon) resolveSecret(path string, extendsProfile string) (store.SecretEntry, bool) {
 	entry, exists := d.secretsStore.Secrets[path]
-	if exists {
+	if exists && entry.DeletedAt == nil {
 		return entry, true
 	}
 	if extendsProfile != "" && extendsProfile != d.profile {
 		parentStore, err := store.LoadStore(extendsProfile, d.masterKey)
 		if err == nil && parentStore != nil {
 			entry, exists := parentStore.Secrets[path]
-			if exists {
+			if exists && entry.DeletedAt == nil {
 				return entry, true
 			}
 		}
@@ -772,17 +963,25 @@ func (d *Daemon) resolveSecret(path string, extendsProfile string) (store.Secret
 }
 
 func (d *Daemon) resolveAllSecrets(extendsProfile string) map[string]store.SecretEntry {
-	res := make(map[string]store.SecretEntry)
+	allocCap := 0
+	if d.secretsStore != nil && d.secretsStore.Secrets != nil {
+		allocCap += len(d.secretsStore.Secrets)
+	}
+	res := make(map[string]store.SecretEntry, allocCap)
 	if extendsProfile != "" && extendsProfile != d.profile {
 		parentStore, err := store.LoadStore(extendsProfile, d.masterKey)
 		if err == nil && parentStore != nil {
 			for k, v := range parentStore.Secrets {
-				res[k] = v
+				if v.DeletedAt == nil {
+					res[k] = v
+				}
 			}
 		}
 	}
 	for k, v := range d.secretsStore.Secrets {
-		res[k] = v
+		if v.DeletedAt == nil {
+			res[k] = v
+		}
 	}
 	return res
 }

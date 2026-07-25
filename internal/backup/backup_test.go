@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"secure_secrets/internal/store"
+	"strings"
 	"testing"
 	"time"
 )
@@ -107,3 +108,90 @@ func TestBackupRestoreRoundtrip(t *testing.T) {
 		}
 	}
 }
+
+func TestFullMetadataKdbxImport(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "sec-test-fullmeta-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	kdbxPath := filepath.Join(tempDir, "fullmeta_test.kdbx")
+	password := "fullmeta-pass"
+
+	originalSecrets := map[string]store.SecretEntry{
+		"Xiaomi AX3600 OpenWrt Root": {
+			Value:   "router-secret-pass-123",
+			Comment: "LuCI Web Admin HTTPS 443 | SSH Dropbear -o HostKeyAlgorithms=+ssh-rsa",
+			Metadata: map[string]string{
+				"UserName": "root",
+				"URL":      "https://192.168.31.1",
+				"totp":     "JBSWY3DPEHPK3PXP",
+			},
+		},
+	}
+
+	if err := ExportToKdbx(kdbxPath, password, originalSecrets); err != nil {
+		t.Fatalf("ExportToKdbx failed: %v", err)
+	}
+
+	fullSecrets, err := ImportFromKdbxFullMetadata(kdbxPath, password)
+	if err != nil {
+		t.Fatalf("ImportFromKdbxFullMetadata failed: %v", err)
+	}
+
+	slug := "xiaomi_ax3600_openwrt_root"
+	if passEntry, ok := fullSecrets[slug+"/password"]; !ok || passEntry.Value != "router-secret-pass-123" {
+		t.Errorf("expected password sub-key %s/password, got: %v", slug, passEntry)
+	}
+	if userEntry, ok := fullSecrets[slug+"/username"]; !ok || userEntry.Value != "root" {
+		t.Errorf("expected username sub-key %s/username, got: %v", slug, userEntry)
+	}
+	if urlEntry, ok := fullSecrets[slug+"/url"]; !ok || urlEntry.Value != "https://192.168.31.1" {
+		t.Errorf("expected url sub-key %s/url, got: %v", slug, urlEntry)
+	}
+	if notesEntry, ok := fullSecrets[slug+"/notes"]; !ok || !strings.Contains(notesEntry.Value, "LuCI") {
+		t.Errorf("expected notes sub-key %s/notes, got: %v", slug, notesEntry)
+	}
+	if totpEntry, ok := fullSecrets[slug+"/totp"]; !ok || totpEntry.Value != "JBSWY3DPEHPK3PXP" {
+		t.Errorf("expected totp sub-key %s/totp, got: %v", slug, totpEntry)
+	}
+}
+
+func TestFullMetadataKdbxReaderStream(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "sec-test-reader-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	kdbxPath := filepath.Join(tempDir, "stream.kdbx")
+	password := "stream-pass"
+
+	originalSecrets := map[string]store.SecretEntry{
+		"Stream Test": {
+			Value:   "stream-val-456",
+			Comment: "In-memory stream test notes",
+		},
+	}
+
+	if err := ExportToKdbx(kdbxPath, password, originalSecrets); err != nil {
+		t.Fatalf("ExportToKdbx failed: %v", err)
+	}
+
+	kdbxBytes, err := os.ReadFile(kdbxPath)
+	if err != nil {
+		t.Fatalf("failed to read kdbx bytes: %v", err)
+	}
+
+	// Import from in-memory bytes stream
+	readerSecrets, err := ImportFromKdbxFullMetadataReader(strings.NewReader(string(kdbxBytes)), password)
+	if err != nil {
+		t.Fatalf("ImportFromKdbxFullMetadataReader failed: %v", err)
+	}
+
+	if passEntry, ok := readerSecrets["stream_test/password"]; !ok || passEntry.Value != "stream-val-456" {
+		t.Errorf("expected stream_test/password = stream-val-456, got: %v", passEntry)
+	}
+}
+

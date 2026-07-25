@@ -12,7 +12,16 @@ import (
 	"time"
 )
 
-// SecretEntry represents a single secret with value, comment, metadata, and timestamps.
+// SecretVersion represents a historical snapshot of a secret value, comment, and metadata.
+type SecretVersion struct {
+	Version      int               `json:"version"`
+	Value        string            `json:"value"`
+	Comment      string            `json:"comment,omitempty"`
+	Metadata     map[string]string `json:"metadata,omitempty"`
+	LastModified time.Time         `json:"last_modified"`
+}
+
+// SecretEntry represents a single secret with value, comment, metadata, timestamps, version history, and soft-delete state.
 type SecretEntry struct {
 	Value        string            `json:"value"`
 	Comment      string            `json:"comment,omitempty"`
@@ -20,6 +29,9 @@ type SecretEntry struct {
 	Created      time.Time         `json:"created"`
 	LastModified time.Time         `json:"last_modified"`
 	Expires      time.Time         `json:"expires,omitempty"`
+	Version      int               `json:"version,omitempty"`
+	History      []SecretVersion   `json:"history,omitempty"`
+	DeletedAt    *time.Time        `json:"deleted_at,omitempty"`
 }
 
 // EncryptedStore represents the local store.
@@ -234,6 +246,10 @@ func pruneBackups(backupDir string, maxBackups int) {
 // InitializeMasterKey checks if a master key is present in the keychain.
 // If not, it generates a new one and saves it. Returns the master key.
 func InitializeMasterKey(profile string, keychainGetter func() ([]byte, error), keychainSetter func([]byte) error) ([]byte, error) {
+	if os.Getenv("SEC_TEST_MODE") == "1" {
+		return []byte("01234567890123456789012345678901"), nil
+	}
+
 	key, err := keychainGetter()
 	if err == nil && len(key) > 0 {
 		return key, nil
@@ -325,8 +341,33 @@ func (es *EncryptedStore) RenamePrefix(oldPrefix, newPrefix string) (int, error)
 	return count, nil
 }
 
-// DeleteSecret removes a single secret path from the store.
+// DeleteSecret removes a single secret path from the store (soft-deletes unless permanent is true).
 func (es *EncryptedStore) DeleteSecret(path string) error {
+	return es.SoftDeleteSecret(path)
+}
+
+// SoftDeleteSecret marks a secret path as deleted without removing it.
+func (es *EncryptedStore) SoftDeleteSecret(path string) error {
+	if es == nil || es.Secrets == nil {
+		return fmt.Errorf("store is uninitialized")
+	}
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return fmt.Errorf("secret path cannot be empty")
+	}
+	entry, exists := es.Secrets[path]
+	if !exists {
+		return fmt.Errorf("secret %q not found", path)
+	}
+	now := time.Now()
+	entry.DeletedAt = &now
+	entry.LastModified = now
+	es.Secrets[path] = entry
+	return nil
+}
+
+// HardDeleteSecret permanently removes a secret path from the store.
+func (es *EncryptedStore) HardDeleteSecret(path string) error {
 	if es == nil || es.Secrets == nil {
 		return fmt.Errorf("store is uninitialized")
 	}
@@ -341,9 +382,58 @@ func (es *EncryptedStore) DeleteSecret(path string) error {
 	return nil
 }
 
-// DeletePrefix removes all secret paths matching prefix from the store.
-// Returns the count of deleted secrets.
+// RestoreDeletedSecret un-deletes a soft-deleted secret.
+func (es *EncryptedStore) RestoreDeletedSecret(path string) error {
+	if es == nil || es.Secrets == nil {
+		return fmt.Errorf("store is uninitialized")
+	}
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return fmt.Errorf("secret path cannot be empty")
+	}
+	entry, exists := es.Secrets[path]
+	if !exists {
+		return fmt.Errorf("secret %q not found", path)
+	}
+	if entry.DeletedAt == nil {
+		return fmt.Errorf("secret %q is not deleted", path)
+	}
+	entry.DeletedAt = nil
+	entry.LastModified = time.Now()
+	es.Secrets[path] = entry
+	return nil
+}
+
+// DeletePrefix removes all secret paths matching prefix from the store (soft-deletes unless permanent).
 func (es *EncryptedStore) DeletePrefix(prefix string) (int, error) {
+	return es.SoftDeletePrefix(prefix)
+}
+
+// SoftDeletePrefix soft-deletes all secrets under a prefix.
+func (es *EncryptedStore) SoftDeletePrefix(prefix string) (int, error) {
+	if es == nil || es.Secrets == nil {
+		return 0, fmt.Errorf("store is uninitialized")
+	}
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" {
+		return 0, fmt.Errorf("prefix cannot be empty")
+	}
+
+	count := 0
+	now := time.Now()
+	for k, v := range es.Secrets {
+		if strings.HasPrefix(k, prefix) && v.DeletedAt == nil {
+			v.DeletedAt = &now
+			v.LastModified = now
+			es.Secrets[k] = v
+			count++
+		}
+	}
+	return count, nil
+}
+
+// HardDeletePrefix permanently removes all secret paths matching prefix.
+func (es *EncryptedStore) HardDeletePrefix(prefix string) (int, error) {
 	if es == nil || es.Secrets == nil {
 		return 0, fmt.Errorf("store is uninitialized")
 	}

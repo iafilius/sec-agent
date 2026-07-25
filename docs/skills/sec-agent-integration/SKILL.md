@@ -203,6 +203,30 @@ Automatically injects credentials as command-line flags into subprocess argument
 sec-agent check --ping-host 192.168.31.1:22
 ```
 
+### 5.13. Full Record Metadata Preservation Standard
+When migrating credentials from external vaults (KeePassXC, 1Password, Bitwarden) into `sec-agent`:
+1. **Never limit extraction to `username` and `password` alone.**
+2. **Preserve URLs and Notes:** Store `<profile>/<entry>/url` and `<profile>/<entry>/notes`.
+3. **Preserve Custom Attributes:** Store custom key-value pairs under `<profile>/<entry>/<attribute_name>` (e.g. `totp_secret`, `pin`, `recovery_code`).
+4. **Single-Record Query:** Use `sec-agent get <prefix> --record --json` to fetch complete record sub-namespaces as structured JSON objects in a single call.
+5. **Full KDBX Import:** Use `sec-agent restore <file.kdbx> --merge --full-metadata --profile <p>` to preserve all `URL`, `Notes`, and `StringData` attributes.
+6. **Zero-Disk Exposure Stdin Import:** Pass `-` as the file path (`cat vault.kdbx | sec-agent restore - --password <pass> --full-metadata --merge`) to stream and parse raw KeePassXC databases directly in memory without writing intermediate files to disk.
+
+### 5.14. AI & User Feedback Guidance Protocol (`sec-agent feedback`)
+When users request new features or report friction during tool usage:
+1. **Run `sec-agent feedback` / `sec-agent feedback --example`**: Fetch structured feedback guidelines and proposal motivation templates.
+2. **Always Document Operational Rationale:** Capture the exact problem statement, why the feature is needed now, real-world usecase examples (e.g. router HTTPS/SSH ports, custom attributes, Dropbear flags), and CLI workflow impact.
+3. **High Quality OpenSpec Proposals:** Create clear, well-motivated OpenSpec proposals (`proposal.md`, `design.md`, `specs/`, `tasks.md`) detailing the operational motivation before implementing.
+
+### 5.15. Secret Version History & Soft-Delete Recovery Protocol
+1. **View Secret History:** Use `sec-agent history <path>` to review past version snapshots, timestamps, and comments before updating or troubleshooting.
+2. **Non-Destructive Rollbacks:** Use `sec-agent rollback <path> --version N` to revert a secret key to a previous version snapshot without losing current data.
+3. **Soft-Delete Safety:** `sec-agent rm <path>` soft-deletes keys by default. List soft-deleted secrets using `sec-agent ls --trash` and un-delete keys using `sec-agent restore-deleted <path>`. Use `sec-agent rm <path> --permanent` only when hard erasure is explicitly requested.
+
+### 5.16. High-Volume Performance & Memory Guardrail Protocol
+1. **Scoped Prefix Queries:** For vaults containing over 10,000 secret keys, always pass `<prefix>` namespace arguments to `sec-agent ls <prefix>` or `sec-agent get <prefix> --record` to leverage pre-allocated capacity maps and reduce IPC buffer memory spikes.
+2. **RAM Guardrail Protection:** The background daemon operates under a 256 MB soft memory limit (`debug.SetMemoryLimit`). If a query triggers `RESOURCE_EXHAUSTED` error, break down bulk exports using scoped prefix filters (`sec-agent ls prod/services`).
+
 ---
 
 ## 6. Key Takeaways for AI Assistants

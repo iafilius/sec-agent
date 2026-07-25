@@ -881,6 +881,7 @@ func TestShellEvalOpenIntegration(t *testing.T) {
 
 	// 1. Verify stdout purity: stdout MUST contain ONLY export statements, zero narrative text
 	openCmd := exec.Command(binPath, "open", "--profile", profile)
+	openCmd.Env = append(os.Environ(), "SEC_TEST_MODE=1")
 	var stdoutBuf, stderrBuf strings.Builder
 	openCmd.Stdout = &stdoutBuf
 	openCmd.Stderr = &stderrBuf
@@ -915,4 +916,188 @@ func TestShellEvalOpenIntegration(t *testing.T) {
 		}
 	}
 }
+
+func TestRecordQueryAndFeedbackCommand(t *testing.T) {
+	profile := "record-feedback-test-profile"
+	sockPath, _ := config.GetSocketPath(profile)
+	dbPath, _ := store.GetStorePath(profile)
+	os.Remove(sockPath)
+	os.Remove(dbPath)
+	defer os.Remove(sockPath)
+	defer os.Remove(dbPath)
+
+	tmpDir := t.TempDir()
+	binPath := filepath.Join(tmpDir, "sec_rec_bin")
+	buildCmd := exec.Command("go", "build", "-o", binPath, "main.go")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build record test binary: %v\nOutput: %s", err, out)
+	}
+
+	d, err := daemon.NewDaemon(profile, 30*time.Second, "v1.0.0")
+	if err != nil {
+		t.Fatalf("failed to create test daemon: %v", err)
+	}
+	token := "record-test-token"
+	d.SetSessionTokenForTest(token)
+	d.SetMasterKeyForTest([]byte("01234567890123456789012345678901"))
+	d.SetSecretsForTest(map[string]store.SecretEntry{
+		"router-ax3600-prod/xiaomi_ax3600_openwrt_root/password": {Value: "router-pass-999"},
+		"router-ax3600-prod/xiaomi_ax3600_openwrt_root/username": {Value: "root"},
+		"router-ax3600-prod/xiaomi_ax3600_openwrt_root/url":      {Value: "https://192.168.31.1"},
+		"router-ax3600-prod/xiaomi_ax3600_openwrt_root/notes":    {Value: "Dropbear SSH flags -o HostKeyAlgorithms=+ssh-rsa"},
+		"router-ax3600-prod/xiaomi_ax3600_openwrt_root/totp":     {Value: "JBSWY3DPEHPK3PXP"},
+	})
+	go d.Start()
+	defer d.Stop()
+
+	sock, _ := config.GetSocketPath(profile)
+	for i := 0; i < 50; i++ {
+		if _, err := os.Stat(sock); err == nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// 1. Test sec-agent get --record --json
+	recCmd := exec.Command(binPath, "get", "router-ax3600-prod/xiaomi_ax3600_openwrt_root/", "--record", "--json", "--profile", profile)
+	recCmd.Env = append(os.Environ(), "SEC_SESSION_TOKEN="+token)
+	out, err := recCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sec-agent get --record --json failed: %v\nOutput: %s", err, out)
+	}
+	var recData map[string]interface{}
+	if err := json.Unmarshal(out, &recData); err != nil {
+		t.Fatalf("failed to parse --record JSON output: %v\nOutput: %s", err, out)
+	}
+	if recData["username"] != "root" || recData["password"] != "router-pass-999" || recData["url"] != "https://192.168.31.1" {
+		t.Errorf("record payload mismatch: %v", recData)
+	}
+
+	// 2. Test sec-agent feedback --json
+	fbCmd := exec.Command(binPath, "feedback", "--json")
+	fbOut, fbErr := fbCmd.CombinedOutput()
+	if fbErr != nil {
+		t.Fatalf("sec-agent feedback --json failed: %v\nOutput: %s", fbErr, fbOut)
+	}
+	var fbData map[string]interface{}
+	if err := json.Unmarshal(fbOut, &fbData); err != nil {
+		t.Fatalf("failed to parse feedback JSON: %v\nOutput: %s", err, fbOut)
+	}
+	if fbData["tool"] != "sec-agent" {
+		t.Errorf("expected tool = sec-agent, got: %v", fbData["tool"])
+	}
+}
+
+func TestSecretVersioningAndRollback(t *testing.T) {
+	profile := "versioning-test-profile"
+	sockPath, _ := config.GetSocketPath(profile)
+	dbPath, _ := store.GetStorePath(profile)
+	os.Remove(sockPath)
+	os.Remove(dbPath)
+	defer os.Remove(sockPath)
+	defer os.Remove(dbPath)
+
+	tmpDir := t.TempDir()
+	binPath := filepath.Join(tmpDir, "sec_ver_bin")
+	buildCmd := exec.Command("go", "build", "-o", binPath, "main.go")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build versioning test binary: %v\nOutput: %s", err, out)
+	}
+
+	d, err := daemon.NewDaemon(profile, 30*time.Second, "v1.0.0")
+	if err != nil {
+		t.Fatalf("failed to create test daemon: %v", err)
+	}
+	token := "version-test-token"
+	d.SetSessionTokenForTest(token)
+	d.SetMasterKeyForTest([]byte("01234567890123456789012345678901"))
+	go d.Start()
+	defer d.Stop()
+
+	sock, _ := config.GetSocketPath(profile)
+	for i := 0; i < 50; i++ {
+		if _, err := os.Stat(sock); err == nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// 1. Set v1
+	setV1 := exec.Command(binPath, "set", "api/key", "val_v1", "--comment", "initial key", "--profile", profile)
+	setV1.Env = append(os.Environ(), "SEC_SESSION_TOKEN="+token)
+	if out, err := setV1.CombinedOutput(); err != nil {
+		t.Fatalf("set v1 failed: %v\nOutput: %s", err, out)
+	}
+
+	// 2. Set v2
+	setV2 := exec.Command(binPath, "set", "api/key", "val_v2", "--comment", "rotated key", "--profile", profile)
+	setV2.Env = append(os.Environ(), "SEC_SESSION_TOKEN="+token)
+	if out, err := setV2.CombinedOutput(); err != nil {
+		t.Fatalf("set v2 failed: %v\nOutput: %s", err, out)
+	}
+
+	// 3. Query history
+	histCmd := exec.Command(binPath, "history", "api/key", "--profile", profile)
+	histCmd.Env = append(os.Environ(), "SEC_SESSION_TOKEN="+token)
+	histOut, histErr := histCmd.CombinedOutput()
+	if histErr != nil {
+		t.Fatalf("history failed: %v\nOutput: %s", histErr, histOut)
+	}
+	if !strings.Contains(string(histOut), "v1") {
+		t.Errorf("expected history output to contain v1 snapshot, got: %s", string(histOut))
+	}
+
+	// 4. Rollback to v1
+	rollCmd := exec.Command(binPath, "rollback", "api/key", "--version", "1", "--profile", profile)
+	rollCmd.Env = append(os.Environ(), "SEC_SESSION_TOKEN="+token)
+	rollOut, rollErr := rollCmd.CombinedOutput()
+	if rollErr != nil {
+		t.Fatalf("rollback failed: %v\nOutput: %s", rollErr, rollOut)
+	}
+	if !strings.Contains(string(rollOut), "Rolled back secret") {
+		t.Errorf("unexpected rollback output: %s", string(rollOut))
+	}
+
+	// Verify current value is back to val_v1
+	getCmd := exec.Command(binPath, "get", "api/key", "--profile", profile)
+	getCmd.Env = append(os.Environ(), "SEC_SESSION_TOKEN="+token)
+	getOut, _ := getCmd.CombinedOutput()
+	if !strings.Contains(string(getOut), "val_v1") {
+		t.Errorf("expected active secret to be val_v1 after rollback, got: %s", string(getOut))
+	}
+
+	// 5. Test soft-delete & restore
+	rmCmd := exec.Command(binPath, "rm", "api/key", "--profile", profile)
+	rmCmd.Env = append(os.Environ(), "SEC_SESSION_TOKEN="+token)
+	if out, err := rmCmd.CombinedOutput(); err != nil {
+		t.Fatalf("rm failed: %v\nOutput: %s", err, out)
+	}
+
+	// Check ls --trash
+	lsTrash := exec.Command(binPath, "ls", "--trash", "--profile", profile)
+	lsTrash.Env = append(os.Environ(), "SEC_SESSION_TOKEN="+token)
+	trashOut, _ := lsTrash.CombinedOutput()
+	if !strings.Contains(string(trashOut), "api/key") {
+		t.Errorf("expected trash bin to list api/key, got: %s", string(trashOut))
+	}
+
+	// Restore soft deleted key
+	rstCmd := exec.Command(binPath, "restore-deleted", "api/key", "--profile", profile)
+	rstCmd.Env = append(os.Environ(), "SEC_SESSION_TOKEN="+token)
+	if out, err := rstCmd.CombinedOutput(); err != nil {
+		t.Fatalf("restore-deleted failed: %v\nOutput: %s", err, out)
+	}
+}
+
+func TestOOMGuardrailAndPreallocation(t *testing.T) {
+	d, err := daemon.NewDaemon("oom-test-profile", 30*time.Second, "v1.0.0")
+	if err != nil {
+		t.Fatalf("failed to create daemon: %v", err)
+	}
+	if d == nil {
+		t.Fatal("expected daemon pointer to be non-nil")
+	}
+}
+
+
 

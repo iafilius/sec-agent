@@ -261,6 +261,15 @@ In real-world software engineering, **developer credential hygiene is notoriousl
 
 ---
 
+## 🔮 Future Roadmap Suggestions (Optional / Non-Binding)
+
+The following feature ideas have been recorded as optional future architectural suggestions (no active commitment or fixed release target):
+
+*   **Centralized Remote Vault Sync Adapter**: Optional background OIDC/SSO sync module to pull shared team credentials from corporate vaults (HashiCorp Vault, AWS Secrets Manager, GCP Secret Manager, Doppler) directly into the local Touch ID-sealed enclave while preserving 100% offline Touch ID security.
+*   **Cross-Profile Key Matrix Inspection**: UI/CLI tooling to audit key drift across staging and production profiles.
+
+---
+
 ## 📊 Comprehensive Solution Comparison Matrix
 
 | Feature | `sec-agent` | YubiKey / Hardware Keys (PKCS#11/PGP) | 1Password CLI / Bitwarden CLI | Delinea (Secret Server / DSV) | HashiCorp Vault | Doppler / Infisical | SOPS / Age (Mozilla) |

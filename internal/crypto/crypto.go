@@ -6,7 +6,15 @@ import (
 	"crypto/rand"
 	"fmt"
 	"io"
+	"sync"
 )
+
+var noncePool = sync.Pool{
+	New: func() interface{} {
+		b := make([]byte, 12)
+		return &b
+	},
+}
 
 // GenerateRandomKey generates a random 32-byte key.
 func GenerateRandomKey() ([]byte, error) {
@@ -29,12 +37,17 @@ func Encrypt(key, plaintext []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	nonce := make([]byte, gcm.NonceSize())
+	noncePtr := noncePool.Get().(*[]byte)
+	defer noncePool.Put(noncePtr)
+	nonce := *noncePtr
+
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return nil, err
 	}
 
-	ciphertext := gcm.Seal(nonce, nonce, plaintext, nil)
+	dst := make([]byte, 0, len(nonce)+len(plaintext)+gcm.Overhead())
+	dst = append(dst, nonce...)
+	ciphertext := gcm.Seal(dst, nonce, plaintext, nil)
 	return ciphertext, nil
 }
 
