@@ -846,3 +846,73 @@ func TestProfileInheritanceAndReachabilityGuard(t *testing.T) {
 		t.Errorf("expected ping host success output, got: %s", string(out))
 	}
 }
+
+func TestShellEvalOpenIntegration(t *testing.T) {
+	profile := "shell-eval-test-profile"
+	sockPath, _ := config.GetSocketPath(profile)
+	dbPath, _ := store.GetStorePath(profile)
+	os.Remove(sockPath)
+	os.Remove(dbPath)
+	defer os.Remove(sockPath)
+	defer os.Remove(dbPath)
+
+	tmpDir := t.TempDir()
+	binPath := filepath.Join(tmpDir, "sec_eval_bin")
+	buildCmd := exec.Command("go", "build", "-o", binPath, "main.go")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build eval test binary: %v\nOutput: %s", err, out)
+	}
+
+	d, err := daemon.NewDaemon(profile, 30*time.Second, "v1.0.0")
+	if err != nil {
+		t.Fatalf("failed to create test daemon: %v", err)
+	}
+	d.SetMasterKeyForTest([]byte("01234567890123456789012345678901"))
+	go d.Start()
+	defer d.Stop()
+
+	sock, _ := config.GetSocketPath(profile)
+	for i := 0; i < 50; i++ {
+		if _, err := os.Stat(sock); err == nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// 1. Verify stdout purity: stdout MUST contain ONLY export statements, zero narrative text
+	openCmd := exec.Command(binPath, "open", "--profile", profile)
+	var stdoutBuf, stderrBuf strings.Builder
+	openCmd.Stdout = &stdoutBuf
+	openCmd.Stderr = &stderrBuf
+
+	err = openCmd.Run()
+	stdoutStr := stdoutBuf.String()
+	stderrStr := stderrBuf.String()
+
+	if strings.Contains(stdoutStr, "Authorizing") {
+		t.Fatalf("BUG CONFIRMED: stdout contains narrative 'Authorizing' text which breaks shell eval!\nStdout: %q", stdoutStr)
+	}
+	if !strings.Contains(stderrStr, "Authorizing") {
+		t.Errorf("expected narrative 'Authorizing' text on stderr, got: %q", stderrStr)
+	}
+	if !strings.Contains(stdoutStr, "export SEC_SESSION_TOKEN=") {
+		t.Errorf("expected export SEC_SESSION_TOKEN= on stdout, got: %q", stdoutStr)
+	}
+
+	// 2. Execute under native Zsh subshell if zsh binary exists
+	if _, err := exec.LookPath("zsh"); err == nil {
+		zshScript := fmt.Sprintf(`eval "$(%s open --profile %s)" && echo "TOKEN_SET=$SEC_SESSION_TOKEN"`, binPath, profile)
+		zshCmd := exec.Command("zsh", "-c", zshScript)
+		zshOut, zshErr := zshCmd.CombinedOutput()
+		if zshErr != nil {
+			t.Fatalf("Zsh eval execution failed: %v\nOutput: %s", zshErr, zshOut)
+		}
+		if strings.Contains(string(zshOut), "command not found") {
+			t.Fatalf("Zsh threw command not found error: %s", string(zshOut))
+		}
+		if !strings.Contains(string(zshOut), "TOKEN_SET=") {
+			t.Errorf("expected TOKEN_SET in zsh eval output, got: %s", string(zshOut))
+		}
+	}
+}
+

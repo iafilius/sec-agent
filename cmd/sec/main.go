@@ -41,7 +41,7 @@ var embeddedSkillBytes []byte
 
 var jsonErrors bool
 var (
-	Version   = "v1.9.3"
+	Version   = "v1.9.4"
 	BuildDate = "unknown"
 )
 
@@ -672,7 +672,7 @@ func handleOpen(profile string, args []string) {
 		os.Exit(1)
 	}
 
-	fmt.Println("Authorizing session via Touch ID...")
+	fmt.Fprintln(os.Stderr, "Authorizing session via Touch ID...")
 
 	if !biometrics.Authenticate("Authorize sec session") {
 		fmt.Fprintln(os.Stderr, "Authentication failed: Biometric verification failed.")
