@@ -1,4 +1,4 @@
-VERSION := v2.1.2
+VERSION := v2.1.3
 BUILD_DATE := $(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
 LDFLAGS := -ldflags "-X main.Version=$(VERSION) -X main.BuildDate=$(BUILD_DATE)"
 
@@ -52,6 +52,7 @@ install-app: gui-app
 	@echo "=== Installing SecAgent.app to /Applications/ ==="
 	rm -rf "/Applications/SecAgent.app" "/Applications/Secure Secrets.app" "/Applications/sec-agent.app" "/Applications/sec-agent" "/Applications/sec-agent-gui"
 	cp -R "SecAgent.app" "/Applications/"
+	rm -rf "SecAgent.app" "Secure Secrets.app" sec-agent.app sec-agent-gui.app
 	@echo "=== SecAgent.app installed into /Applications! ==="
 
 package:

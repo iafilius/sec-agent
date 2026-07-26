@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -12,8 +11,10 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"secure_secrets/internal/biometrics"
 	"secure_secrets/internal/config"
 	"secure_secrets/internal/daemon"
+	"secure_secrets/internal/keychain"
 	"secure_secrets/internal/store"
 	"sort"
 	"strings"
@@ -120,43 +121,53 @@ func ensureUnlocked(profile string) (*daemon.IPCResponse, error) {
 		return resp, nil
 	}
 
-	secBin := "sec-agent"
-	if p, err := exec.LookPath("sec-agent"); err == nil {
-		secBin = p
-	} else if _, err := os.Stat("./sec-agent"); err == nil {
-		secBin = "./sec-agent"
+	if err := ensureDaemonRunning(profile); err != nil {
+		return nil, fmt.Errorf("daemon is not running: %w", err)
 	}
 
-	var outBuf bytes.Buffer
-	// #nosec G204 G702
-	cmd := exec.Command(secBin, "open", "--profile", profile)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = &outBuf
-	cmd.Stderr = nil
-
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("failed to unlock session: %w", err)
-	}
-
-	for _, line := range strings.Split(outBuf.String(), "\n") {
-		if strings.Contains(line, "SEC_SESSION_TOKEN=") {
-			parts := strings.Split(line, "SEC_SESSION_TOKEN=")
-			if len(parts) == 2 {
-				tokenVal := strings.Trim(parts[1], "\"' \r\n")
-				if tokenVal != "" {
-					tok = tokenVal
-					_ = config.SaveSessionToken(profile, tokenVal)
-					_ = os.Setenv("SEC_SESSION_TOKEN", tokenVal)
-				}
-			}
+	if os.Getenv("SEC_TEST_MODE") != "1" {
+		if !biometrics.Authenticate("Unlock sec-agent vault session") {
+			return nil, fmt.Errorf("Biometric authentication failed or cancelled")
 		}
 	}
 
-	if tok == "" {
-		tok = config.LoadSessionToken(profile)
+	getter := func() ([]byte, error) {
+		if profile == "" || profile == "default" {
+			return keychain.Get("sec-session", "master")
+		}
+		return keychain.Get("sec-session:profile_"+profile, "master")
+	}
+	setter := func(k []byte) error {
+		if profile == "" || profile == "default" {
+			return keychain.Set("sec-session", "master", k)
+		}
+		return keychain.Set("sec-session:profile_"+profile, "master", k)
 	}
 
-	return queryDaemon(profile, daemon.IPCRequest{Action: "ping", Token: tok})
+	masterKey, err := store.InitializeMasterKey(profile, getter, setter)
+	if err != nil {
+		return nil, fmt.Errorf("master key initialization failed: %w", err)
+	}
+
+	resp, err = queryDaemon(profile, daemon.IPCRequest{
+		Action: "open",
+		Key:    masterKey,
+		TTL:    "8h",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("daemon IPC error: %w", err)
+	}
+
+	if !resp.Success {
+		return nil, fmt.Errorf("unlock failed: %s", resp.Error)
+	}
+
+	if resp.Token != "" {
+		_ = config.SaveSessionToken(profile, resp.Token)
+		_ = os.Setenv("SEC_SESSION_TOKEN", resp.Token)
+	}
+
+	return resp, nil
 }
 
 func openBrowser(url string) {
@@ -319,11 +330,17 @@ func runGUIServer(activeProfile string, port int) {
 		}
 		resp, err := ensureUnlocked(p)
 		unlocked := (err == nil && resp != nil && resp.Success)
+		errMsg := ""
+		if err != nil {
+			errMsg = err.Error()
+		} else if resp != nil && !resp.Success {
+			errMsg = resp.Error
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"profile":  p,
 			"unlocked": unlocked,
-			"error":    fmt.Sprintf("%v", err),
+			"error":    errMsg,
 		})
 	})
 
@@ -949,7 +966,7 @@ const guiHTMLContent = `<!DOCTYPE html>
         if (data.unlocked) {
           loadStatus();
         } else {
-          alert('Unlock failed or cancelled');
+          alert('Unlock failed: ' + (data.error || 'Biometric authentication cancelled'));
           loadStatus();
         }
       } catch (err) {
