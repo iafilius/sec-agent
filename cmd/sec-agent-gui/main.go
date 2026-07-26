@@ -19,12 +19,15 @@ import (
 	"secure_secrets/internal/store"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
 
 var version = "v2.0.0-gui"
 var activeGUIToken string
+var guiTokenConsumed bool
+var tokenMutex sync.Mutex
 
 type DatabaseInfo struct {
 	Profile  string `json:"profile"`
@@ -224,9 +227,18 @@ func securityMiddleware(next http.Handler) http.Handler {
 			}
 		}
 
-		if r.URL.Path == "/" && r.URL.Query().Get("gui_token") != "" {
+		if r.URL.Path == "/" {
 			qToken := r.URL.Query().Get("gui_token")
-			if qToken == activeGUIToken {
+			if qToken != "" {
+				tokenMutex.Lock()
+				if guiTokenConsumed || qToken != activeGUIToken {
+					tokenMutex.Unlock()
+					http.Error(w, "403 Forbidden: Single-use GUI launch token has already been consumed or is invalid. Launch sec-agent-gui again to open a new session.", http.StatusForbidden)
+					return
+				}
+				guiTokenConsumed = true
+				tokenMutex.Unlock()
+
 				// #nosec G124
 				http.SetCookie(w, &http.Cookie{
 					Name:     "sec_gui_auth",
@@ -235,6 +247,12 @@ func securityMiddleware(next http.Handler) http.Handler {
 					HttpOnly: true,
 					SameSite: http.SameSiteStrictMode,
 				})
+			} else {
+				cookie, err := r.Cookie("sec_gui_auth")
+				if err != nil || cookie.Value != activeGUIToken {
+					http.Error(w, "403 Forbidden: Access denied. Please launch sec-agent-gui to open an authenticated session.", http.StatusForbidden)
+					return
+				}
 			}
 		}
 
