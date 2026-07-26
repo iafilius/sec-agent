@@ -29,6 +29,10 @@ var activeGUIToken string
 var guiTokenConsumed bool
 var tokenMutex sync.Mutex
 
+var activeTabID string
+var lastTabHeartbeat time.Time
+var tabMutex sync.Mutex
+
 type DatabaseInfo struct {
 	Profile  string `json:"profile"`
 	Filename string `json:"filename"`
@@ -225,6 +229,26 @@ func securityMiddleware(next http.Handler) http.Handler {
 				http.Error(w, "403 Forbidden: Invalid or missing GUI launch token", http.StatusForbidden)
 				return
 			}
+
+			clientTabID := r.Header.Get("X-Tab-ID")
+			if clientTabID != "" {
+				tabMutex.Lock()
+				now := time.Now()
+				if activeTabID != "" && now.Sub(lastTabHeartbeat) > 6*time.Second {
+					activeTabID = ""
+				}
+				if activeTabID == "" {
+					activeTabID = clientTabID
+					lastTabHeartbeat = now
+				} else if activeTabID != clientTabID {
+					tabMutex.Unlock()
+					http.Error(w, "403 Forbidden: Multi-tab access blocked. Vault Inspector is active in another browser tab.", http.StatusForbidden)
+					return
+				} else {
+					lastTabHeartbeat = now
+				}
+				tabMutex.Unlock()
+			}
 		}
 
 		if r.URL.Path == "/" {
@@ -269,6 +293,11 @@ func main() {
 	activeGUIToken = generateGUIToken()
 
 	mux := http.NewServeMux()
+
+	mux.HandleFunc("/api/heartbeat", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	})
 
 	mux.HandleFunc("/api/databases", func(w http.ResponseWriter, r *http.Request) {
 		dbs, err := discoverDatabases()
@@ -845,6 +874,12 @@ const guiHTMLContent = `<!DOCTYPE html>
       window.history.replaceState({}, document.title, window.location.pathname);
     }
 
+    let tabID = sessionStorage.getItem('sec_tab_id');
+    if (!tabID) {
+      tabID = 'tab_' + Math.random().toString(36).substring(2, 15) + '_' + Date.now();
+      sessionStorage.setItem('sec_tab_id', tabID);
+    }
+
     let currentProfile = 'default';
     let secretsData = [];
     let activeSecret = null;
@@ -862,9 +897,36 @@ const guiHTMLContent = `<!DOCTYPE html>
     document.onmousemove = resetIdleTimer;
     document.onkeypress = resetIdleTimer;
 
+    async function apiFetch(url, opts = {}) {
+      opts.headers = opts.headers || {};
+      opts.headers['X-Tab-ID'] = tabID;
+      const res = await fetch(url, opts);
+      if (res.status === 403) {
+        const text = await res.text();
+        if (text.includes('Multi-tab access blocked')) {
+          renderTabLockedState();
+        }
+      }
+      return res;
+    }
+
+    function renderTabLockedState() {
+      document.body.innerHTML = '<div style="display:flex; flex-direction:column; justify-content:center; align-items:center; height:100vh; background:#090d16; color:#fb7185; font-family:sans-serif; text-align:center; padding:24px;">' +
+        '<h1 style="font-size:2rem; margin-bottom:16px;">🔴 Multi-Tab Access Blocked</h1>' +
+        '<p style="color:#94a3b8; max-width:520px; line-height:1.6; font-size:1.05rem;">sec-agent-gui is strictly locked to your primary active browser tab for security.<br><br>Opening or pasting this URL into a second tab is disabled. Please switch back to your original active tab.</p>' +
+        '</div>';
+    }
+
+    setInterval(async () => {
+      try {
+        await apiFetch('/api/heartbeat');
+      } catch (e) {}
+    }, 2000);
+
     async function loadStatus() {
       try {
-        const res = await fetch('/api/status?profile=' + currentProfile);
+        const res = await apiFetch('/api/status?profile=' + currentProfile);
+        if (res.status === 403) return;
         const data = await res.json();
         const pill = document.getElementById('statusPill');
         const unlockBtn = document.getElementById('unlockBtn');
@@ -909,7 +971,8 @@ const guiHTMLContent = `<!DOCTYPE html>
       const pill = document.getElementById('statusPill');
       pill.innerHTML = '<span>⏳ Requesting Touch ID...</span>';
       try {
-        const res = await fetch('/api/unlock?profile=' + currentProfile);
+        const res = await apiFetch('/api/unlock?profile=' + currentProfile);
+        if (res.status === 403) return;
         const data = await res.json();
         if (data.unlocked) {
           loadStatus();
@@ -924,9 +987,9 @@ const guiHTMLContent = `<!DOCTYPE html>
 
     async function loadSecrets() {
       try {
-        const res = await fetch('/api/secrets?profile=' + currentProfile);
+        const res = await apiFetch('/api/secrets?profile=' + currentProfile);
         if (res.status === 401 || res.status === 403) {
-          renderLockedState();
+          if (res.status === 401) renderLockedState();
           return;
         }
         const data = await res.json();
@@ -1013,7 +1076,7 @@ const guiHTMLContent = `<!DOCTYPE html>
     async function stopServer() {
       if (confirm('Are you sure you want to stop the sec-agent-gui server?')) {
         try {
-          await fetch('/api/shutdown', { method: 'POST' });
+          await apiFetch('/api/shutdown', { method: 'POST' });
         } catch (e) {}
         document.body.innerHTML = '<div style="display:flex; justify-content:center; align-items:center; height:100vh; font-family:sans-serif; color:#94a3b8;"><h2>🛑 sec-agent-gui Server Stopped. You may close this tab.</h2></div>';
       }
