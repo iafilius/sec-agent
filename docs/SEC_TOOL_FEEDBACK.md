@@ -40,6 +40,10 @@ This document records feature evaluation decisions, architecture triages, and ro
 * **Status**: ACCEPTED & IMPLEMENTED
 * **Description**: Fully purged plaintext session token files (`session_*.token`) from disk (0 bytes on disk). Updated daemon socket verification to authorize subshell requests (`req.Token == ""`) via kernel peer credentials (`LOCAL_PEERCRED` UID == owner) and BSD process tree checks when daemon RAM is in `UNLOCKED` state. Ensures seamless subshell/tool execution without disk token files.
 
+### 7. In-Memory Daemon Hot-Reload & Seamless Binary Upgrade (`sec-daemon-hot-reload`)
+* **Status**: ACCEPTED (PROPOSAL CREATED)
+* **Description**: Proposed zero-disk, zero-Touch-ID hot-reload mechanism using OS kernel pipe buffer inheritance (`unix.Pipe()`). When `sec-agent` is upgraded via Homebrew, the daemon re-executes the new binary via `syscall.Exec(newBinaryPath)` with state passed through pipe FD 3 (`SEC_REEXEC_FD`), restoring in-memory key state without requiring manual `sec lock && eval $(sec open)` or Touch ID re-authentication.
+
 ---
 
 ## ⏸️ Deferred / Rejected Roadmap Ideas

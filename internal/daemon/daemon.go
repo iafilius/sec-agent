@@ -46,6 +46,18 @@ type IPCRequest struct {
 	Permanent      bool                           `json:"permanent,omitempty"`
 }
 
+// DaemonStatePayload defines the in-memory payload transferred across kernel pipe during hot-reload.
+type DaemonStatePayload struct {
+	MasterKey    []byte                       `json:"master_key"`
+	Profile      string                       `json:"profile"`
+	SessionStart time.Time                    `json:"session_start"`
+	SessionTTL   time.Duration                `json:"session_ttl"`
+	GraceTTL     time.Duration                `json:"grace_ttl"`
+	LastUsed     time.Time                    `json:"last_used"`
+	SessionToken string                       `json:"session_token"`
+	Secrets      map[string]store.SecretEntry `json:"secrets,omitempty"`
+}
+
 // AuditLogEntry represents a single audit event record.
 type AuditLogEntry struct {
 	Timestamp string `json:"timestamp"`
@@ -90,6 +102,7 @@ type Daemon struct {
 	profile      string
 	sessionToken string
 	version      string
+	IsTestInstance bool
 }
 
 // NewDaemon creates a new daemon instance.
@@ -122,8 +135,61 @@ func (d *Daemon) checkMemoryGuardrail() bool {
 	return true
 }
 
+func (d *Daemon) checkAndRestoreReexecState() error {
+	fdStr := os.Getenv("SEC_REEXEC_FD")
+	if fdStr == "" {
+		return nil
+	}
+	fd, err := strconv.Atoi(fdStr)
+	if err != nil {
+		return nil
+	}
+	_ = os.Unsetenv("SEC_REEXEC_FD")
+
+	// #nosec G115
+	file := os.NewFile(uintptr(fd), "reexec_pipe")
+	if file == nil {
+		return fmt.Errorf("invalid reexec pipe file descriptor")
+	}
+	defer file.Close()
+
+	var payload DaemonStatePayload
+	if err := json.NewDecoder(file).Decode(&payload); err != nil {
+		return fmt.Errorf("failed to decode reexec payload: %w", err)
+	}
+
+	if len(payload.MasterKey) > 0 {
+		storeInstance, err := store.LoadStore(d.profile, payload.MasterKey)
+		if err != nil || storeInstance == nil {
+			storeInstance = &store.EncryptedStore{Secrets: make(map[string]store.SecretEntry)}
+		}
+		if len(payload.Secrets) > 0 {
+			if storeInstance.Secrets == nil {
+				storeInstance.Secrets = make(map[string]store.SecretEntry)
+			}
+			for k, v := range payload.Secrets {
+				storeInstance.Secrets[k] = v
+			}
+		}
+		d.mu.Lock()
+		d.masterKey = payload.MasterKey
+		d.secretsStore = storeInstance
+		d.sessionStart = payload.SessionStart
+		d.sessionTTL = payload.SessionTTL
+		d.graceTTL = payload.GraceTTL
+		d.lastUsed = payload.LastUsed
+		d.sessionToken = payload.SessionToken
+		d.mu.Unlock()
+		d.logAudit("reexec", d.profile, 0, true, "")
+	}
+	return nil
+}
+
 // Start runs the IPC Unix socket server.
 func (d *Daemon) Start() error {
+	// Restore state if spawned from in-memory hot-reload pipe
+	_ = d.checkAndRestoreReexecState()
+
 	// Clean up existing socket file if it exists
 	if err := os.Remove(d.socketPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to remove old socket: %w", err)
@@ -344,6 +410,88 @@ func (d *Daemon) handleConnection(c net.Conn) {
 		} else {
 			d.sendResponse(c, IPCResponse{Success: true, Value: "Active", Version: d.version})
 		}
+
+	case "reexec":
+		if d.masterKey == nil {
+			d.sendResponse(c, IPCResponse{Success: false, Error: "Session locked. Cannot hot-reload a locked daemon.", Version: d.version})
+			return
+		}
+
+		r, w, err := os.Pipe()
+		if err != nil {
+			d.sendError(c, fmt.Sprintf("failed to create hot-reload state pipe: %v", err))
+			return
+		}
+
+		var activeSecrets map[string]store.SecretEntry
+		if d.secretsStore != nil && d.secretsStore.Secrets != nil {
+			activeSecrets = d.secretsStore.Secrets
+		}
+
+		if d.sessionToken == "" {
+			d.sessionToken = "reexec-active-token"
+		}
+
+		payload := DaemonStatePayload{
+			MasterKey:    d.masterKey,
+			Profile:      d.profile,
+			SessionStart: d.sessionStart,
+			SessionTTL:   d.sessionTTL,
+			GraceTTL:     d.graceTTL,
+			LastUsed:     d.lastUsed,
+			SessionToken: d.sessionToken,
+			Secrets:      activeSecrets,
+		}
+
+		// #nosec G117
+		if err := json.NewEncoder(w).Encode(payload); err != nil {
+			_ = r.Close()
+			_ = w.Close()
+			d.sendError(c, fmt.Sprintf("failed to encode hot-reload payload: %v", err))
+			return
+		}
+		_ = w.Close()
+
+		execPath, err := os.Executable()
+		if err != nil {
+			_ = r.Close()
+			d.sendError(c, fmt.Sprintf("failed to resolve executable path: %v", err))
+			return
+		}
+
+		// Acknowledge reexec to client before spawning new process
+		d.sendResponse(c, IPCResponse{
+			Success: true,
+			Value:   "Daemon hot-reloading in memory via pipe handoff...",
+			Version: d.version,
+		})
+
+		// Unbind listener so child process can bind unix socket immediately
+		if d.listener != nil {
+			_ = d.listener.Close()
+		}
+
+		// #nosec G204
+		cmd := exec.Command(execPath, "--profile", d.profile, "daemon")
+		cmd.Env = append(os.Environ(), "SEC_REEXEC_FD=3", fmt.Sprintf("SEC_PROFILE=%s", d.profile))
+		cmd.ExtraFiles = []*os.File{r}
+		cmd.Stdout = nil
+		cmd.Stderr = nil
+
+		if err := cmd.Start(); err != nil {
+			_ = r.Close()
+			d.logAudit("reexec", d.profile, peerPID, false, err.Error())
+			return
+		}
+		_ = r.Close()
+		d.logAudit("reexec", d.profile, peerPID, true, "")
+		go func() {
+			time.Sleep(50 * time.Millisecond)
+			if !d.IsTestInstance && os.Getenv("SEC_TEST_MODE") != "1" {
+				os.Exit(0)
+			}
+		}()
+		return
 
 	case "open":
 		if len(req.Key) != 32 {

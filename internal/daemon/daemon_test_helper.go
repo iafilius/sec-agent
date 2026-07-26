@@ -7,6 +7,7 @@ func (d *Daemon) SetMasterKeyForTest(key []byte) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.masterKey = key
+	d.IsTestInstance = true
 }
 
 // SetSecretsForTest is a test helper to inject test secrets programmatically.

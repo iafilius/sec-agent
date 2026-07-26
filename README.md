@@ -299,6 +299,7 @@ Hardware security keys (such as YubiKeys using PGP or PKCS#11 modules) are often
    * **YubiKey High-Friction Workflow**: YubiKeys cannot natively inject environment variables into child process trees. To pass secrets into local build scripts, `.env` loaders, or Infrastructure-as-Code tools (e.g., Terraform `TF_VAR_db_password`, AWS credentials, Docker Compose), developers are forced to write custom wrapper scripts around `gpg --decrypt` or `pkcs11-tool`. Every execution forces constant physical button taps or PIN prompts. If a developer enables PIN/touch caching to avoid tap fatigue, it opens a severe vulnerability where background scripts or remote SSH shells can steal credentials from the cached YubiKey session.
    * **`sec-agent` Frictionless Experience**:
      * **Single Session Authorization**: Unlock your session once (`eval $(sec-agent open)`) backed by a single Touch ID hardware check.
+     * **In-Memory Hot-Reload (`sec restart --hot-reload`)**: Upgrade binary images in memory via kernel pipe state handoffs (`unix.Pipe()`) during CLI updates without clearing active session state or requiring Touch ID re-authentication.
      * **Transparent Process Wrapper**: Execute any local pipeline, shell script, or Terraform command directly without modifying scripts or codebase files:
        ```bash
        sec-agent run -- terraform plan

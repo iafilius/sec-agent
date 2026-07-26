@@ -41,7 +41,7 @@ var embeddedSkillBytes []byte
 
 var jsonErrors bool
 var (
-	Version   = "v2.0.0"
+	Version   = "v2.1.0"
 	BuildDate = "unknown"
 )
 
@@ -500,7 +500,7 @@ func main() {
 	case "check":
 		handleCheck(profile, os.Args[2:])
 	case "restart":
-		handleRestart(profile)
+		handleRestart(profile, os.Args[2:])
 	case "completion":
 		shell := "zsh"
 		if len(os.Args) >= 3 {
@@ -3696,7 +3696,29 @@ func handleCheckLeaks(profile string) {
 	fmt.Println("  history -r")
 }
 
-func handleRestart(profile string) {
+func handleRestart(profile string, args []string) {
+	hotReload := false
+	for _, arg := range args {
+		if arg == "--hot-reload" || arg == "-H" || arg == "--force" {
+			hotReload = true
+		}
+	}
+
+	if hotReload {
+		resp, err := queryDaemon(profile, daemon.IPCRequest{Action: "reexec"})
+		if err == nil && resp != nil && resp.Success {
+			fmt.Printf("[✓] sec-agent daemon (%s) hot-reloaded in memory via kernel pipe handoff (Zero Touch ID required).\n", profile)
+			return
+		}
+		errMsg := "Daemon not running or locked"
+		if resp != nil && resp.Error != "" {
+			errMsg = resp.Error
+		} else if err != nil {
+			errMsg = err.Error()
+		}
+		fmt.Fprintf(os.Stderr, "[NOTICE] In-memory hot-reload unavailable (%s). Performing standard Touch ID restart...\n", errMsg)
+	}
+
 	_, _ = queryDaemon(profile, daemon.IPCRequest{Action: "clear"})
 	socketPath, err := config.GetSocketPath(profile)
 	if err == nil {
@@ -4505,8 +4527,9 @@ func handleVersion(profile string) {
 	// Mismatch check
 	if err == nil && resp.Version != "" && resp.Version != Version {
 		fmt.Printf("\n⚠️  WARNING: CLI version (%s) does not match running daemon version (%s).\n", Version, resp.Version)
-		fmt.Println("To upgrade the daemon, close the active session and re-open it:")
-		fmt.Println("  sec lock")
-		fmt.Println("  eval $(sec open)")
+		fmt.Println("To hot-reload the daemon in memory (Zero Touch ID required), run:")
+		fmt.Println("  sec restart --hot-reload")
+		fmt.Println("Or perform a full re-authentication restart:")
+		fmt.Println("  sec restart")
 	}
 }

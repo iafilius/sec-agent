@@ -17,6 +17,16 @@ import (
 	"secure_secrets/internal/store"
 )
 
+func TestMain(m *testing.M) {
+	for _, arg := range os.Args {
+		if arg == "daemon" {
+			main()
+			return
+		}
+	}
+	os.Exit(m.Run())
+}
+
 func TestMainIntegration(t *testing.T) {
 	profile := "main-integration-test"
 
@@ -43,6 +53,7 @@ func TestMainIntegration(t *testing.T) {
 
 	// Preset the masterKey and dummy secrets to unlock it programmatically
 	d.SetMasterKeyForTest([]byte("01234567890123456789012345678901")) // 32-byte key
+	d.SetSessionTokenForTest("mock-test-session-token-123")
 	d.SetSecretsForTest(map[string]store.SecretEntry{
 		"velocloud-provider/vco-url": {
 			Value:   "https://vco.example.com",
@@ -262,6 +273,23 @@ func TestMainIntegration(t *testing.T) {
 	subshellOut, err := subshellGetCmd.Output()
 	if err != nil || strings.TrimSpace(string(subshellOut)) != strings.TrimSpace(string(genOut)) {
 		t.Fatalf("sec get in subshell without SEC_SESSION_TOKEN failed: %v, got %q", err, string(subshellOut))
+	}
+
+	// Test in-memory daemon hot-reload via kernel pipe state handoff ('sec restart --hot-reload')
+	hotReloadCmd := exec.Command("./sec_test_bin", "restart", "--hot-reload", "--profile", profile)
+	hotReloadCmd.Env = testEnv
+	hotOut, err := hotReloadCmd.Output()
+	if err != nil || !strings.Contains(string(hotOut), "hot-reloaded in memory") {
+		t.Fatalf("sec restart --hot-reload failed: %v, output: %q", err, string(hotOut))
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	// Verify secret retrieval after hot-reload without Touch ID prompt
+	postReloadGetCmd := exec.Command("./sec_test_bin", "get", "copied/password", "--profile", profile)
+	postReloadGetCmd.Env = subshellEnv
+	postOut, err := postReloadGetCmd.CombinedOutput()
+	if err != nil || strings.TrimSpace(string(postOut)) != strings.TrimSpace(string(genOut)) {
+		t.Fatalf("sec get after hot-reload failed: %v, output: %q", err, string(postOut))
 	}
 
 	// 6l. Test 'sec doctor' diagnostics
