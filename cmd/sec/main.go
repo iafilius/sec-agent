@@ -230,13 +230,35 @@ type WorkspaceConfig struct {
 	FlagAliases map[string]string `json:"flag_aliases,omitempty"`
 }
 
+func findWorkspaceConfigFile() string {
+	dir, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	for {
+		for _, name := range []string{".secenv", ".secrc", ".sec.json"} {
+			path := filepath.Join(dir, name)
+			// #nosec G304 G703
+			if _, err := os.Stat(path); err == nil {
+				return path
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return ""
+}
+
 func loadWorkspaceConfig() *WorkspaceConfig {
 	dir, err := os.Getwd()
 	if err != nil {
 		return nil
 	}
 	for {
-		for _, name := range []string{".secrc", ".sec.json"} {
+		for _, name := range []string{".secenv", ".secrc", ".sec.json"} {
 			path := filepath.Join(dir, name)
 			// #nosec G304 G703
 			data, err := os.ReadFile(path)
@@ -1773,12 +1795,26 @@ func handleList(profile string, prefix string, args []string) {
 	checkExpiring := false
 	showJSON := false
 	showTrash := false
+	showLong := false
+	staleDays := 0
+	checkStale := false
 
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--json" {
 			showJSON = true
 		} else if args[i] == "--trash" {
 			showTrash = true
+		} else if args[i] == "-l" || args[i] == "--long" {
+			showLong = true
+		} else if args[i] == "--stale" {
+			checkStale = true
+			staleDays = 30
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				if d, err := strconv.Atoi(args[i+1]); err == nil && d > 0 {
+					staleDays = d
+					i++
+				}
+			}
 		} else if args[i] == "--expiring" {
 			checkExpiring = true
 			expiringDays = 7
@@ -1846,6 +1882,96 @@ func handleList(profile string, prefix string, args []string) {
 		fmt.Println(strings.Repeat("-", 75))
 		for _, item := range list {
 			fmt.Printf("%-35s %-25s %d day(s)\n", item.Path, item.Expires.Format(time.RFC3339), item.RemainingDays)
+		}
+		return
+	}
+
+	if showLong || checkStale {
+		bkResp, err := queryDaemon(profile, daemon.IPCRequest{Action: "backup"})
+		if err != nil || !bkResp.Success {
+			fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running. Please run 'sec open' to unlock session."), "Run 'eval $(sec open)' to unlock.")
+		}
+		now := time.Now()
+		limit := time.Duration(staleDays*24) * time.Hour
+
+		type DetailedEntry struct {
+			Path         string    `json:"path"`
+			Version      int       `json:"version"`
+			Created      time.Time `json:"created"`
+			LastModified time.Time `json:"last_modified"`
+			LastAccessed time.Time `json:"last_accessed,omitempty"`
+			AccessCount  uint64    `json:"access_count"`
+		}
+		var list []DetailedEntry
+
+		var sortedKeys []string
+		for k := range bkResp.Secrets {
+			if prefix != "" && !strings.HasPrefix(k, prefix) {
+				continue
+			}
+			sortedKeys = append(sortedKeys, k)
+		}
+		sort.Strings(sortedKeys)
+
+		for _, k := range sortedKeys {
+			entry := bkResp.Secrets[k]
+			if checkStale {
+				if !entry.LastAccessed.IsZero() && now.Sub(entry.LastAccessed) <= limit {
+					continue
+				}
+			}
+			list = append(list, DetailedEntry{
+				Path:         k,
+				Version:      entry.Version,
+				Created:      entry.Created,
+				LastModified: entry.LastModified,
+				LastAccessed: entry.LastAccessed,
+				AccessCount:  entry.AccessCount,
+			})
+		}
+
+		if showJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(list)
+			return
+		}
+
+		if len(list) == 0 {
+			if checkStale {
+				fmt.Printf("No stale secret keys found unaccessed for > %d day(s).\n", staleDays)
+			} else {
+				fmt.Println("No matching secret paths found.")
+			}
+			return
+		}
+
+		if checkStale {
+			fmt.Printf("=== ⏳ Stale Credentials (Unaccessed > %d day(s)) ===\n\n", staleDays)
+		} else {
+			fmt.Println("=== 📊 Detailed Secret Audit Dump ===")
+		}
+
+		fmt.Printf("%-35s %-5s %-16s %-16s %-16s %s\n", "KEY PATH", "VER", "CREATED", "MODIFIED", "ACCESSED", "READS")
+		fmt.Println(strings.Repeat("-", 100))
+		for _, item := range list {
+			accStr := "Never"
+			if !item.LastAccessed.IsZero() {
+				accStr = item.LastAccessed.Format("2006-01-02 15:04")
+			}
+			createdStr := item.Created.Format("2006-01-02 15:04")
+			if item.Created.IsZero() {
+				createdStr = "-"
+			}
+			modStr := item.LastModified.Format("2006-01-02 15:04")
+			if item.LastModified.IsZero() {
+				modStr = "-"
+			}
+			verStr := fmt.Sprintf("v%d", item.Version)
+			if item.Version == 0 {
+				verStr = "v1"
+			}
+			fmt.Printf("%-35s %-5s %-16s %-16s %-16s %d\n", item.Path, verStr, createdStr, modStr, accStr, item.AccessCount)
 		}
 		return
 	}
@@ -2859,6 +2985,8 @@ func handleEnv(profile string, args []string) {
 
 func handleExport(profile string, args []string) {
 	format := "json"
+	allProfiles := false
+	envelope := true
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--format" || args[i] == "-f" {
 			if i+1 < len(args) {
@@ -2867,6 +2995,12 @@ func handleExport(profile string, args []string) {
 			} else {
 				fail("INVALID_ARGUMENT", fmt.Errorf("flag --format requires a value"), "Supported formats: json, env, aws, doppler, template")
 			}
+		} else if args[i] == "--all-profiles" {
+			allProfiles = true
+		} else if args[i] == "--no-envelope" {
+			envelope = false
+		} else if args[i] == "--envelope" {
+			envelope = true
 		}
 	}
 	if format != "env" && format != "json" && format != "aws" && format != "doppler" && format != "template" {
@@ -2922,10 +3056,63 @@ func handleExport(profile string, args []string) {
 			fail("SERIALIZATION_FAILED", err, "")
 		}
 	default: // json
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(resp.Secrets); err != nil {
-			fail("SERIALIZATION_FAILED", err, "")
+		storePath, _ := store.GetStorePath(profile)
+		dbFile := filepath.Base(storePath)
+		secenvFile := findWorkspaceConfigFile()
+		if profile == "" {
+			profile = "default"
+		}
+
+		if allProfiles {
+			type ProfilePayload struct {
+				DatabaseFile string                       `json:"database_file"`
+				Secrets      map[string]store.SecretEntry `json:"secrets"`
+			}
+			exportAll := struct {
+				Version    string                    `json:"version"`
+				SecenvFile string                    `json:"secenv_file,omitempty"`
+				ExportedAt time.Time                 `json:"exported_at"`
+				Profiles   map[string]ProfilePayload `json:"profiles"`
+			}{
+				Version:    "1.0",
+				SecenvFile: secenvFile,
+				ExportedAt: time.Now(),
+				Profiles:   make(map[string]ProfilePayload),
+			}
+			exportAll.Profiles[profile] = ProfilePayload{
+				DatabaseFile: dbFile,
+				Secrets:      resp.Secrets,
+			}
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			if err := enc.Encode(exportAll); err != nil {
+				fail("SERIALIZATION_FAILED", err, "")
+			}
+		} else if envelope {
+			exportPackage := struct {
+				Profile      string                       `json:"profile"`
+				DatabaseFile string                       `json:"database_file"`
+				SecenvFile   string                       `json:"secenv_file,omitempty"`
+				ExportedAt   time.Time                    `json:"exported_at"`
+				Secrets      map[string]store.SecretEntry `json:"secrets"`
+			}{
+				Profile:      profile,
+				DatabaseFile: dbFile,
+				SecenvFile:   secenvFile,
+				ExportedAt:   time.Now(),
+				Secrets:      resp.Secrets,
+			}
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			if err := enc.Encode(exportPackage); err != nil {
+				fail("SERIALIZATION_FAILED", err, "")
+			}
+		} else {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			if err := enc.Encode(resp.Secrets); err != nil {
+				fail("SERIALIZATION_FAILED", err, "")
+			}
 		}
 	}
 }

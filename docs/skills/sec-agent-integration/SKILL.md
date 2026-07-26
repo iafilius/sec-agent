@@ -227,6 +227,12 @@ When users request new features or report friction during tool usage:
 1. **Scoped Prefix Queries:** For vaults containing over 10,000 secret keys, always pass `<prefix>` namespace arguments to `sec-agent ls <prefix>` or `sec-agent get <prefix> --record` to leverage pre-allocated capacity maps and reduce IPC buffer memory spikes.
 2. **RAM Guardrail Protection:** The background daemon operates under a 256 MB soft memory limit (`debug.SetMemoryLimit`). If a query triggers `RESOURCE_EXHAUSTED` error, break down bulk exports using scoped prefix filters (`sec-agent ls prod/services`).
 
+### 5.17. macOS MenuBar GUI Utility & Access Hygiene Protocol
+1. **Menu Bar GUI (`sec-agent-gui`)**: Launch `sec-agent-gui` for visual secret hierarchy inspection, real-time TTL countdown timer, active profile selector dropdown (`default`, `dev`, `staging`, `prod`), and single-click copy actions with 15s clipboard auto-wipe.
+2. **Detailed Audit Dump (`sec-agent ls -l`)**: Execute `sec-agent ls -l` to display creation, modification, and last access timestamps (`LastAccessed`), version numbers, and read counts in a clean terminal table.
+3. **Stale Credential Audit (`sec-agent ls --stale <days>`)**: Run `sec-agent ls --stale 30` to identify credentials unread for >30 days for routine vault hygiene and soft-delete cleanup.
+4. **Profile-Aware Export (`sec-agent export --all-profiles --format json`)**: Use `--all-profiles` or `--envelope` to include top-level envelope metadata (`profile`, `database_file`, `exported_at`) so exported backups preserve database origin when imported into different environments.
+
 ---
 
 ## 6. Key Takeaways for AI Assistants

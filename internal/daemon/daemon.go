@@ -66,6 +66,8 @@ type IPCResponse struct {
 	Secrets      map[string]store.SecretEntry `json:"secrets,omitempty"`
 	Created      time.Time                    `json:"created,omitempty"`
 	LastModified time.Time                    `json:"last_modified,omitempty"`
+	LastAccessed time.Time                    `json:"last_accessed,omitempty"`
+	AccessCount  uint64                       `json:"access_count,omitempty"`
 	Expires      time.Time                    `json:"expires,omitempty"`
 	Token        string                       `json:"token,omitempty"` // Shell session token
 	Version      string                       `json:"version,omitempty"`
@@ -405,7 +407,21 @@ func (d *Daemon) handleConnection(c net.Conn) {
 			}
 		}
 
-		d.lastUsed = time.Now()
+		now := time.Now()
+		entry.LastAccessed = now
+		entry.AccessCount++
+
+		// Update access metrics in active local store if entry belongs to local store
+		if d.secretsStore != nil && d.secretsStore.Secrets != nil {
+			if localEntry, ok := d.secretsStore.Secrets[req.Path]; ok {
+				localEntry.LastAccessed = now
+				localEntry.AccessCount++
+				d.secretsStore.Secrets[req.Path] = localEntry
+				_ = store.SaveStore(d.profile, d.secretsStore, d.masterKey)
+			}
+		}
+
+		d.lastUsed = now
 		d.sendResponse(c, IPCResponse{
 			Success:      true,
 			Value:        entry.Value,
@@ -413,6 +429,8 @@ func (d *Daemon) handleConnection(c net.Conn) {
 			Metadata:     entry.Metadata,
 			Created:      entry.Created,
 			LastModified: entry.LastModified,
+			LastAccessed: entry.LastAccessed,
+			AccessCount:  entry.AccessCount,
 			Expires:      entry.Expires,
 		})
 
@@ -428,6 +446,7 @@ func (d *Daemon) handleConnection(c net.Conn) {
 		allSecrets := d.resolveAllSecrets(req.ExtendsProfile)
 		filteredGroup := make(map[string]store.SecretEntry, len(allSecrets))
 		now := time.Now()
+		storeUpdated := false
 		for k, entry := range allSecrets {
 			if req.Path != "" && !strings.HasPrefix(k, req.Path) {
 				continue
@@ -435,10 +454,25 @@ func (d *Daemon) handleConnection(c net.Conn) {
 			if !entry.Expires.IsZero() && now.After(entry.Expires) && !req.ShowExpired {
 				continue
 			}
+			entry.LastAccessed = now
+			entry.AccessCount++
 			filteredGroup[k] = entry
+
+			if d.secretsStore != nil && d.secretsStore.Secrets != nil {
+				if localEntry, ok := d.secretsStore.Secrets[k]; ok {
+					localEntry.LastAccessed = now
+					localEntry.AccessCount++
+					d.secretsStore.Secrets[k] = localEntry
+					storeUpdated = true
+				}
+			}
 		}
 
-		d.lastUsed = time.Now()
+		if storeUpdated {
+			_ = store.SaveStore(d.profile, d.secretsStore, d.masterKey)
+		}
+
+		d.lastUsed = now
 		d.sendResponse(c, IPCResponse{
 			Success: true,
 			Secrets: filteredGroup,

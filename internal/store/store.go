@@ -28,6 +28,8 @@ type SecretEntry struct {
 	Metadata     map[string]string `json:"metadata,omitempty"`
 	Created      time.Time         `json:"created"`
 	LastModified time.Time         `json:"last_modified"`
+	LastAccessed time.Time         `json:"last_accessed,omitempty"`
+	AccessCount  uint64            `json:"access_count,omitempty"`
 	Expires      time.Time         `json:"expires,omitempty"`
 	Version      int               `json:"version,omitempty"`
 	History      []SecretVersion   `json:"history,omitempty"`

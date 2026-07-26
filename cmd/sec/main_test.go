@@ -101,8 +101,8 @@ func TestMainIntegration(t *testing.T) {
 		t.Errorf("missing expected environment exports in env output: %s", string(envOut))
 	}
 
-	// 5. Test 2: Verify 'sec export --format json' output
-	expCmd := exec.Command("./sec_test_bin", "export", "--format", "json", "--profile", profile)
+	// 5. Test 2: Verify 'sec export --format json --no-envelope' output
+	expCmd := exec.Command("./sec_test_bin", "export", "--format", "json", "--no-envelope", "--profile", profile)
 	expCmd.Env = testEnv
 	expOut, err := expCmd.Output()
 	if err != nil {

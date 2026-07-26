@@ -3,6 +3,7 @@ package store
 import (
 	"encoding/json"
 	"testing"
+	"time"
 )
 
 func TestStoreMigration(t *testing.T) {
@@ -71,5 +72,37 @@ func BenchmarkStorePreallocation(b *testing.B) {
 		for j := 0; j < 10000; j++ {
 			es.Secrets["key/path/"+string(rune(j))] = SecretEntry{Value: "secret_value"}
 		}
+	}
+}
+
+func TestAccessTrackingAndProfileExport(t *testing.T) {
+	es := &EncryptedStore{
+		Secrets: make(map[string]SecretEntry),
+	}
+	now := time.Now()
+	es.Secrets["prod/api/key"] = SecretEntry{
+		Value:        "sk_live_12345",
+		Created:      now,
+		LastModified: now,
+		LastAccessed: now,
+		AccessCount:  5,
+	}
+
+	data, err := json.Marshal(es)
+	if err != nil {
+		t.Fatalf("failed to marshal store: %v", err)
+	}
+
+	var restored EncryptedStore
+	if err := json.Unmarshal(data, &restored); err != nil {
+		t.Fatalf("failed to unmarshal store: %v", err)
+	}
+
+	entry := restored.Secrets["prod/api/key"]
+	if entry.AccessCount != 5 {
+		t.Errorf("expected AccessCount 5, got %d", entry.AccessCount)
+	}
+	if entry.LastAccessed.IsZero() {
+		t.Error("expected LastAccessed to be set")
 	}
 }
