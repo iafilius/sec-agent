@@ -41,7 +41,7 @@ var embeddedSkillBytes []byte
 
 var jsonErrors bool
 var (
-	Version   = "v1.9.4"
+	Version   = "v2.0.0"
 	BuildDate = "unknown"
 )
 
@@ -57,7 +57,7 @@ type JSONError struct {
 }
 
 func mapDaemonError(errStr string) (code string, remediation string) {
-	if strings.Contains(errStr, "Invalid or missing session token") || strings.Contains(errStr, "invalid or missing session token") {
+	if strings.Contains(errStr, "Invalid session token") || strings.Contains(errStr, "invalid session token") || strings.Contains(errStr, "Invalid or missing session token") {
 		return "INVALID_TOKEN", "Run 'eval $(sec-agent open)' to authorize your shell session."
 	}
 	if strings.Contains(errStr, "locked or expired") || strings.Contains(errStr, "locked") {
@@ -702,9 +702,6 @@ func queryDaemonRaw(profile string, req daemon.IPCRequest) (*daemon.IPCResponse,
 		if req.Token == "" {
 			req.Token = os.Getenv("SEC_SESSION_TOKEN")
 		}
-		if req.Token == "" {
-			req.Token = config.LoadSessionToken(profile)
-		}
 		if req.ExtendsProfile == "" {
 			wsCfg := loadWorkspaceConfig()
 			if wsCfg != nil && wsCfg.Extends != "" {
@@ -872,7 +869,6 @@ func handleOpen(profile string, args []string) {
 	} else {
 		msg += " Inactivity Grace: 30m."
 	}
-	_ = config.SaveSessionToken(profile, resp.Token)
 	fmt.Fprintln(os.Stderr, msg)
 	fmt.Fprintf(os.Stdout, "export SEC_SESSION_TOKEN=%q\n", resp.Token)
 	fmt.Fprintln(os.Stderr, "Tip: Run 'eval $(sec open)' to automatically authorize this shell session.")

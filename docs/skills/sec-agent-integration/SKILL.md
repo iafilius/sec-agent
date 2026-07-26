@@ -1,10 +1,10 @@
 ---
 name: sec-agent-integration
 description: Use the sec-agent CLI utility to start background daemons, store secrets, run applications in isolated environments, migrate dotenv files, install AI skills, inspect snapshots, and manage backups.
-version: v1.9.4
+version: v2.0.0
 ---
 
-# sec-agent Secrets Management Integration (v1.9.4)
+# sec-agent Secrets Management Integration (v2.0.0)
 
 This skill enables AI coding agents and autonomous assistants to use the `sec-agent` CLI tool (v1.9.4+) to securely retrieve credentials, run application build/test/terraform pipelines in isolated process environments, migrate dotenv configuration files, install integration skills across IDEs, inspect automatic snapshots, and manage KeePassXC `.kdbx` backups on macOS.
 
@@ -233,6 +233,13 @@ When users request new features or report friction during tool usage:
 3. **Stale Credential Audit (`sec-agent ls --stale <days>`)**: Run `sec-agent ls --stale 30` to identify credentials unread for >30 days for routine vault hygiene and soft-delete cleanup.
 4. **Profile-Aware Export (`sec-agent export --all-profiles --format json`)**: Use `--all-profiles` or `--envelope` to include top-level envelope metadata (`profile`, `database_file`, `exported_at`) so exported backups preserve database origin when imported into different environments.
 
+### 5.18. Workspace Vault Isolation & High-Level Schema Design Protocol
+When initializing secret management for a new workspace or migrating an existing project:
+1. **Design High-Level Schema First**: Establish a domain taxonomy (`<domain>/<entity>/<attribute>`, e.g., `orchestrator/vco_url`, `bgp/inbound_password`) before populating secrets.
+2. **Dedicated Workspace Profile**: Always create a `.secrc` file in the project root targeting a dedicated profile (`"profile": "<project>-dev"`).
+3. **Use Relative Keys (`"prefix": ""`)**: Set `"prefix": ""` in `.secrc` so keys resolve to clean relative paths inside dedicated stores (`secrets_<profile>.enc`) without double-scoping.
+4. **Hygienic Migration Protocol**: Follow `docs/VAULT_DESIGN_AND_PROJECT_MIGRATION_GUIDE.md` to purge legacy keys from `secrets.enc` (default profile) and remove old socket files.
+
 ---
 
 ## 6. Key Takeaways for AI Assistants
@@ -244,3 +251,4 @@ When users request new features or report friction during tool usage:
    * Reuses the single Touch ID authorization for all subsequent subagent tool calls.
 3. **Use Scoped Profiles**: Always pass `--profile` or check `.secrc`.
 4. **Use Interactive Prompts or Stdin for `sec-agent set`**: Avoid outputting raw secret strings in command arguments.
+5. **Zero Disk Tokens & Automatic Subshell Resolution**: Zero token files are written to disk. The daemon automatically authorizes subshell executions via socket peer credentials (`LOCAL_PEERCRED`) and unlocked RAM state. Never attempt to read `session_*.token` files from disk.

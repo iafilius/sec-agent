@@ -98,47 +98,41 @@ func GetSocketPath(profile string) (string, error) {
 	return filepath.Join(dir, fmt.Sprintf("sec-agent_%s.sock", profile)), nil
 }
 
-// GetSessionTokenPath returns the file path for storing the active session token.
-func GetSessionTokenPath(profile string) (string, error) {
+// PurgeAllSessionTokenFiles removes any legacy or active session.token or session_*.token files from ~/.config/sec-agent/
+func PurgeAllSessionTokenFiles() {
 	dir, err := GetConfigDir()
 	if err != nil {
-		return "", err
+		return
 	}
-	if profile == "" || profile == "default" {
-		return filepath.Join(dir, "session.token"), nil
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		return
 	}
-	return filepath.Join(dir, fmt.Sprintf("session_%s.token", profile)), nil
+	for _, f := range files {
+		if !f.IsDir() && (f.Name() == "session.token" || (strings.HasPrefix(f.Name(), "session_") && strings.HasSuffix(f.Name(), ".token"))) {
+			_ = os.Remove(filepath.Join(dir, f.Name()))
+		}
+	}
 }
 
-// SaveSessionToken persists the active session token for the profile.
+// GetSessionTokenPath is deprecated and returns empty string. Zero token files are written to disk.
+func GetSessionTokenPath(profile string) (string, error) {
+	return "", nil
+}
+
+// SaveSessionToken is a no-op that purges lingering disk tokens and returns nil.
 func SaveSessionToken(profile string, token string) error {
-	path, err := GetSessionTokenPath(profile)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, []byte(token), 0600)
+	PurgeAllSessionTokenFiles()
+	return nil
 }
 
-// LoadSessionToken loads the active session token for the profile.
+// LoadSessionToken returns empty string (zero disk token loading).
 func LoadSessionToken(profile string) string {
-	path, err := GetSessionTokenPath(profile)
-	if err != nil {
-		return ""
-	}
-	// #nosec G304
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(data))
+	return ""
 }
 
-// ClearSessionToken removes the session token file when session is cleared or locked.
+// ClearSessionToken purges any lingering token files from disk.
 func ClearSessionToken(profile string) error {
-	path, err := GetSessionTokenPath(profile)
-	if err != nil {
-		return nil
-	}
-	_ = os.Remove(path)
+	PurgeAllSessionTokenFiles()
 	return nil
 }

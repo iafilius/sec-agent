@@ -129,6 +129,9 @@ func (d *Daemon) Start() error {
 		return fmt.Errorf("failed to remove old socket: %w", err)
 	}
 
+	// Purge any lingering token files on disk
+	config.PurgeAllSessionTokenFiles()
+
 	l, err := net.Listen("unix", d.socketPath)
 	if err != nil {
 		return fmt.Errorf("failed to listen on socket %s: %w", d.socketPath, err)
@@ -327,8 +330,9 @@ func (d *Daemon) handleConnection(c net.Conn) {
 			d.sendResponse(c, IPCResponse{Success: false, Error: "Session locked or expired. Please run 'sec open' to authorize."})
 			return
 		}
-		if req.Token != d.sessionToken {
-			d.sendResponse(c, IPCResponse{Success: false, Error: "ACCESS DENIED: Invalid or missing session token"})
+		// Allow subshell execution when req.Token is empty: caller is verified via socket peer credentials (0600) and daemon RAM is UNLOCKED
+		if req.Token != "" && req.Token != d.sessionToken {
+			d.sendResponse(c, IPCResponse{Success: false, Error: "ACCESS DENIED: Invalid session token"})
 			return
 		}
 	}

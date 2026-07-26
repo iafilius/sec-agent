@@ -250,6 +250,20 @@ func TestMainIntegration(t *testing.T) {
 		t.Fatalf("sec get copied password failed: %v, got %q", err, string(cpOut))
 	}
 
+	// Test subshell peer authorization without SEC_SESSION_TOKEN environment variable
+	var subshellEnv []string
+	for _, envVar := range testEnv {
+		if !strings.HasPrefix(envVar, "SEC_SESSION_TOKEN=") {
+			subshellEnv = append(subshellEnv, envVar)
+		}
+	}
+	subshellGetCmd := exec.Command("./sec_test_bin", "get", "copied/password", "--profile", profile)
+	subshellGetCmd.Env = subshellEnv
+	subshellOut, err := subshellGetCmd.Output()
+	if err != nil || strings.TrimSpace(string(subshellOut)) != strings.TrimSpace(string(genOut)) {
+		t.Fatalf("sec get in subshell without SEC_SESSION_TOKEN failed: %v, got %q", err, string(subshellOut))
+	}
+
 	// 6l. Test 'sec doctor' diagnostics
 	docCmd := exec.Command("./sec_test_bin", "doctor", "--profile", profile)
 	docCmd.Env = testEnv

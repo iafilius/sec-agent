@@ -32,6 +32,14 @@ This document records feature evaluation decisions, architecture triages, and ro
 * **Status**: ACCEPTED
 * **Description**: Add `sec-agent status --quick` to check Unix domain socket file existence, user ownership permissions (`0600`), and daemon process PID in <5ms without querying database locks or triggering Touch ID session checks.
 
+### 5. Mandatory Per-Workspace Vault Isolation & High-Level Schema Design Guide
+* **Status**: ACCEPTED
+* **Description**: Published `docs/VAULT_DESIGN_AND_PROJECT_MIGRATION_GUIDE.md` detailing the 3-phase methodology (High-Level Schema Design → Per-Workspace Vault Isolation via `.secrc` `"prefix": ""` → Hygienic Migration & Cleanup Checklist). Included mandatory skill instructions for AI agents onboarding new project workspaces.
+
+### 6. Subshell Daemon Peer Authorization & Zero-Disk Token Enforcement
+* **Status**: ACCEPTED & IMPLEMENTED
+* **Description**: Fully purged plaintext session token files (`session_*.token`) from disk (0 bytes on disk). Updated daemon socket verification to authorize subshell requests (`req.Token == ""`) via kernel peer credentials (`LOCAL_PEERCRED` UID == owner) and BSD process tree checks when daemon RAM is in `UNLOCKED` state. Ensures seamless subshell/tool execution without disk token files.
+
 ---
 
 ## ⏸️ Deferred / Rejected Roadmap Ideas

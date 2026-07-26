@@ -326,6 +326,7 @@ cp docs/skills/sec-agent-integration/SKILL.md ~/.gemini/config/skills/sec-agent-
 
 Once installed, your AI assistant will automatically:
 * Check daemon lock status (`sec-agent version`) and prompt for `eval $(sec-agent open)` when needed.
+* Follow the [Vault Taxonomy Design & Workspace Migration Guide](docs/VAULT_DESIGN_AND_PROJECT_MIGRATION_GUIDE.md) to enforce per-workspace profile isolation (`.secrc`) and high-level secret schema design.
 * Wrap local test/build/deploy commands with `sec-agent run -- <cmd>` to inject credentials in memory without creating plaintext `.env` files.
 * Help migrate legacy `.env` files using `sec-agent migrate-local`.
 
