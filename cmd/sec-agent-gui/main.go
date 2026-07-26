@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -38,8 +40,10 @@ func queryDaemon(profile string, req daemon.IPCRequest) (*daemon.IPCResponse, er
 	return &resp, nil
 }
 
+var currentSessionToken string
+
 func ensureUnlocked(profile string) (*daemon.IPCResponse, error) {
-	resp, err := queryDaemon(profile, daemon.IPCRequest{Action: "ping"})
+	resp, err := queryDaemon(profile, daemon.IPCRequest{Action: "ping", Token: currentSessionToken})
 	if err == nil && resp != nil && resp.Success {
 		return resp, nil
 	}
@@ -54,17 +58,28 @@ func ensureUnlocked(profile string) (*daemon.IPCResponse, error) {
 		}
 	}
 
+	var outBuf bytes.Buffer
 	// #nosec G204
 	cmd := exec.Command(secBin, "open", "--profile", profile)
 	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
+	cmd.Stdout = io.MultiWriter(os.Stdout, &outBuf)
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("failed to unlock session: %w", err)
 	}
 
-	return queryDaemon(profile, daemon.IPCRequest{Action: "ping"})
+	for _, line := range strings.Split(outBuf.String(), "\n") {
+		if strings.Contains(line, "SEC_SESSION_TOKEN=") {
+			parts := strings.Split(line, "SEC_SESSION_TOKEN=")
+			if len(parts) == 2 {
+				tok := strings.Trim(parts[1], "\"' \r\n")
+				currentSessionToken = tok
+			}
+		}
+	}
+
+	return queryDaemon(profile, daemon.IPCRequest{Action: "ping", Token: currentSessionToken})
 }
 
 func main() {
@@ -84,9 +99,13 @@ func main() {
 	}
 	fmt.Printf("Status: 🟢 Active Session (Daemon v%s)\n\n", resp.Version)
 
-	bkResp, err := queryDaemon(*profile, daemon.IPCRequest{Action: "backup"})
-	if err != nil || !bkResp.Success {
+	bkResp, err := queryDaemon(*profile, daemon.IPCRequest{Action: "backup", Token: currentSessionToken})
+	if err != nil {
 		fmt.Printf("Error querying vault: %v\n", err)
+		os.Exit(1)
+	}
+	if bkResp != nil && !bkResp.Success {
+		fmt.Printf("Error querying vault: %s\n", bkResp.Error)
 		os.Exit(1)
 	}
 
