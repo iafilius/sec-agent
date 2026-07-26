@@ -13,6 +13,18 @@ codesign: build
 	@echo "Signing binary with macOS Hardened Runtime..."
 	codesign --force --options runtime --sign - sec
 
+gui-app: build
+	@echo "=== Packaging sec-agent-gui.app macOS Application Bundle ==="
+	go build $(LDFLAGS) -o sec-agent-gui cmd/sec-agent-gui/main.go
+	codesign --force --options runtime --sign - sec-agent-gui
+	rm -rf sec-agent-gui.app
+	mkdir -p sec-agent-gui.app/Contents/MacOS
+	mkdir -p sec-agent-gui.app/Contents/Resources
+	cp sec-agent-gui sec-agent-gui.app/Contents/MacOS/sec-agent-gui
+	printf '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0">\n<dict>\n    <key>CFBundleExecutable</key>\n    <string>sec-agent-gui</string>\n    <key>CFBundleIdentifier</key>\n    <string>io.iafilius.sec-agent-gui</string>\n    <key>CFBundleName</key>\n    <string>sec-agent-gui</string>\n    <key>CFBundlePackageType</key>\n    <string>APPL</string>\n    <key>CFBundleShortVersionString</key>\n    <string>2.0.0</string>\n    <key>LSUIElement</key>\n    <true/>\n</dict>\n</plist>\n' > sec-agent-gui.app/Contents/Info.plist
+	codesign --force --deep --options runtime --sign - sec-agent-gui.app
+	@echo "=== sec-agent-gui.app created! Double-click it in Finder or move to /Applications ==="
+
 package:
 	@echo "=== Building Release Binaries & Tarballs for $(VERSION) ==="
 	rm -rf dist && mkdir -p dist

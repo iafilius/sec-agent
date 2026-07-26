@@ -2,10 +2,11 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"os"
@@ -23,6 +24,7 @@ import (
 )
 
 var version = "v2.0.0-gui"
+var activeGUIToken string
 
 type DatabaseInfo struct {
 	Profile  string `json:"profile"`
@@ -30,6 +32,14 @@ type DatabaseInfo struct {
 	Path     string `json:"path"`
 	Size     string `json:"size"`
 	Modified string `json:"modified"`
+}
+
+func generateGUIToken() string {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("fallback_%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b)
 }
 
 func discoverDatabases() ([]DatabaseInfo, error) {
@@ -141,8 +151,8 @@ func ensureUnlocked(profile string) (*daemon.IPCResponse, error) {
 	// #nosec G204 G702
 	cmd := exec.Command(secBin, "open", "--profile", profile)
 	cmd.Stdin = os.Stdin
-	cmd.Stdout = io.MultiWriter(os.Stdout, &outBuf)
-	cmd.Stderr = os.Stderr
+	cmd.Stdout = &outBuf
+	cmd.Stderr = nil
 
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("failed to unlock session: %w", err)
@@ -182,14 +192,67 @@ func openBrowser(url string) {
 	_ = cmd.Start()
 }
 
+func securityMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host := r.Host
+		if host != "127.0.0.1:9876" && host != "localhost:9876" && !strings.HasPrefix(host, "127.0.0.1:") && !strings.HasPrefix(host, "localhost:") {
+			http.Error(w, "403 Forbidden: Invalid Host Header", http.StatusForbidden)
+			return
+		}
+
+		origin := r.Header.Get("Origin")
+		if origin != "" && !strings.HasPrefix(origin, "http://127.0.0.1:") && !strings.HasPrefix(origin, "http://localhost:") {
+			http.Error(w, "403 Forbidden: Cross-Origin Requests Blocked", http.StatusForbidden)
+			return
+		}
+		secFetchSite := r.Header.Get("Sec-Fetch-Site")
+		if secFetchSite != "" && secFetchSite != "same-origin" && secFetchSite != "none" {
+			http.Error(w, "403 Forbidden: Cross-Site Request Blocked", http.StatusForbidden)
+			return
+		}
+
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			clientToken := r.Header.Get("X-GUI-Token")
+			if clientToken == "" {
+				if cookie, err := r.Cookie("sec_gui_auth"); err == nil {
+					clientToken = cookie.Value
+				}
+			}
+			if clientToken == "" || clientToken != activeGUIToken {
+				http.Error(w, "403 Forbidden: Invalid or missing GUI launch token", http.StatusForbidden)
+				return
+			}
+		}
+
+		if r.URL.Path == "/" && r.URL.Query().Get("gui_token") != "" {
+			qToken := r.URL.Query().Get("gui_token")
+			if qToken == activeGUIToken {
+				// #nosec G124
+				http.SetCookie(w, &http.Cookie{
+					Name:     "sec_gui_auth",
+					Value:    activeGUIToken,
+					Path:     "/",
+					HttpOnly: true,
+					SameSite: http.SameSiteStrictMode,
+				})
+			}
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
 func main() {
 	profileFlag := flag.String("profile", "default", "Vault profile to inspect")
 	portFlag := flag.Int("port", 9876, "Port to serve GUI interface")
 	flag.Parse()
 
 	activeProfile := *profileFlag
+	activeGUIToken = generateGUIToken()
 
-	http.HandleFunc("/api/databases", func(w http.ResponseWriter, r *http.Request) {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/api/databases", func(w http.ResponseWriter, r *http.Request) {
 		dbs, err := discoverDatabases()
 		if err != nil {
 			http.Error(w, err.Error(), 500)
@@ -199,7 +262,7 @@ func main() {
 		_ = json.NewEncoder(w).Encode(dbs)
 	})
 
-	http.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Query().Get("profile")
 		if p == "" {
 			p = activeProfile
@@ -234,7 +297,7 @@ func main() {
 		})
 	})
 
-	http.HandleFunc("/api/unlock", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/unlock", func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Query().Get("profile")
 		if p == "" {
 			p = activeProfile
@@ -249,7 +312,7 @@ func main() {
 		})
 	})
 
-	http.HandleFunc("/api/shutdown", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/shutdown", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "server shutting down"})
 		go func() {
@@ -258,7 +321,7 @@ func main() {
 		}()
 	})
 
-	http.HandleFunc("/api/secrets", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/secrets", func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Query().Get("profile")
 		if p == "" {
 			p = activeProfile
@@ -323,19 +386,21 @@ func main() {
 		})
 	})
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write([]byte(guiHTMLContent))
 	})
 
 	addr := fmt.Sprintf("127.0.0.1:%d", *portFlag)
-	fmt.Printf("🔒 sec-agent-gui %s (Native Visual Inspector)\n", version)
+	fmt.Printf("🔒 sec-agent-gui %s (Hardened Visual Inspector)\n", version)
 	fmt.Printf("Serving GUI interface at: http://%s\n", addr)
-	fmt.Println("Press Ctrl+C in terminal to stop GUI server.")
+	fmt.Println("Status: 🛡️ Authenticated GUI Session Active (Token-Protected)")
+	fmt.Println("Press \"🛑 Stop GUI\" in browser header to shut down.")
 
+	launchURL := fmt.Sprintf("http://%s/?gui_token=%s", addr, activeGUIToken)
 	go func() {
 		time.Sleep(500 * time.Millisecond)
-		openBrowser(fmt.Sprintf("http://%s", addr))
+		openBrowser(launchURL)
 	}()
 
 	sigChan := make(chan os.Signal, 1)
@@ -348,6 +413,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:              addr,
+		Handler:           securityMiddleware(mux),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -757,10 +823,26 @@ const guiHTMLContent = `<!DOCTYPE html>
   </div>
 
   <script>
+    if (window.location.search.includes('gui_token=')) {
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
+
     let currentProfile = 'default';
     let secretsData = [];
     let activeSecret = null;
     let revealed = false;
+    let idleTimer = null;
+
+    function resetIdleTimer() {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        renderLockedState();
+      }, 5 * 60 * 1000);
+    }
+
+    window.onload = resetIdleTimer;
+    document.onmousemove = resetIdleTimer;
+    document.onkeypress = resetIdleTimer;
 
     async function loadStatus() {
       try {
@@ -825,7 +907,7 @@ const guiHTMLContent = `<!DOCTYPE html>
     async function loadSecrets() {
       try {
         const res = await fetch('/api/secrets?profile=' + currentProfile);
-        if (res.status === 401) {
+        if (res.status === 401 || res.status === 403) {
           renderLockedState();
           return;
         }
