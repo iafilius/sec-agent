@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // IsConfigDirInitialized returns true if ~/.config/sec-agent/ or legacy ~/.config/sec/ exists.
@@ -95,4 +96,49 @@ func GetSocketPath(profile string) (string, error) {
 		return filepath.Join(dir, "sec-agent.sock"), nil
 	}
 	return filepath.Join(dir, fmt.Sprintf("sec-agent_%s.sock", profile)), nil
+}
+
+// GetSessionTokenPath returns the file path for storing the active session token.
+func GetSessionTokenPath(profile string) (string, error) {
+	dir, err := GetConfigDir()
+	if err != nil {
+		return "", err
+	}
+	if profile == "" || profile == "default" {
+		return filepath.Join(dir, "session.token"), nil
+	}
+	return filepath.Join(dir, fmt.Sprintf("session_%s.token", profile)), nil
+}
+
+// SaveSessionToken persists the active session token for the profile.
+func SaveSessionToken(profile string, token string) error {
+	path, err := GetSessionTokenPath(profile)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(token), 0600)
+}
+
+// LoadSessionToken loads the active session token for the profile.
+func LoadSessionToken(profile string) string {
+	path, err := GetSessionTokenPath(profile)
+	if err != nil {
+		return ""
+	}
+	// #nosec G304
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+// ClearSessionToken removes the session token file when session is cleared or locked.
+func ClearSessionToken(profile string) error {
+	path, err := GetSessionTokenPath(profile)
+	if err != nil {
+		return nil
+	}
+	_ = os.Remove(path)
+	return nil
 }

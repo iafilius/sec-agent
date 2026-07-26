@@ -692,6 +692,9 @@ func queryDaemonRaw(profile string, req daemon.IPCRequest) (*daemon.IPCResponse,
 		if req.Token == "" {
 			req.Token = os.Getenv("SEC_SESSION_TOKEN")
 		}
+		if req.Token == "" {
+			req.Token = config.LoadSessionToken(profile)
+		}
 		if req.ExtendsProfile == "" {
 			wsCfg := loadWorkspaceConfig()
 			if wsCfg != nil && wsCfg.Extends != "" {
@@ -859,6 +862,7 @@ func handleOpen(profile string, args []string) {
 	} else {
 		msg += " Inactivity Grace: 30m."
 	}
+	_ = config.SaveSessionToken(profile, resp.Token)
 	fmt.Fprintln(os.Stderr, msg)
 	fmt.Fprintf(os.Stdout, "export SEC_SESSION_TOKEN=%q\n", resp.Token)
 	fmt.Fprintln(os.Stderr, "Tip: Run 'eval $(sec open)' to automatically authorize this shell session.")
@@ -3151,6 +3155,7 @@ func handleClear(profile string) {
 		os.Exit(1)
 	}
 
+	_ = config.ClearSessionToken(profile)
 	fmt.Println("Session locked. Memory cache cleared.")
 }
 

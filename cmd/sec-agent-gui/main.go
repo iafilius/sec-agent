@@ -40,21 +40,24 @@ func queryDaemon(profile string, req daemon.IPCRequest) (*daemon.IPCResponse, er
 	return &resp, nil
 }
 
-var currentSessionToken string
-
 func ensureUnlocked(profile string) (*daemon.IPCResponse, error) {
-	resp, err := queryDaemon(profile, daemon.IPCRequest{Action: "ping", Token: currentSessionToken})
+	tok := config.LoadSessionToken(profile)
+	if tok == "" {
+		tok = os.Getenv("SEC_SESSION_TOKEN")
+	}
+	resp, err := queryDaemon(profile, daemon.IPCRequest{Action: "backup", Token: tok})
 	if err == nil && resp != nil && resp.Success {
 		return resp, nil
 	}
 
 	fmt.Println("Session is locked/offline. Triggering Touch ID unlock...")
 
-	secBin, err := exec.LookPath("sec-agent")
-	if err != nil {
-		secBin, err = exec.LookPath("sec")
-		if err != nil {
-			secBin = "./sec"
+	secBin := "./sec"
+	if _, err := os.Stat(secBin); os.IsNotExist(err) {
+		if p, err := exec.LookPath("sec-agent"); err == nil {
+			secBin = p
+		} else if p, err := exec.LookPath("sec"); err == nil {
+			secBin = p
 		}
 	}
 
@@ -73,13 +76,21 @@ func ensureUnlocked(profile string) (*daemon.IPCResponse, error) {
 		if strings.Contains(line, "SEC_SESSION_TOKEN=") {
 			parts := strings.Split(line, "SEC_SESSION_TOKEN=")
 			if len(parts) == 2 {
-				tok := strings.Trim(parts[1], "\"' \r\n")
-				currentSessionToken = tok
+				tokenVal := strings.Trim(parts[1], "\"' \r\n")
+				if tokenVal != "" {
+					tok = tokenVal
+					_ = config.SaveSessionToken(profile, tokenVal)
+					_ = os.Setenv("SEC_SESSION_TOKEN", tokenVal)
+				}
 			}
 		}
 	}
 
-	return queryDaemon(profile, daemon.IPCRequest{Action: "ping", Token: currentSessionToken})
+	if tok == "" {
+		tok = config.LoadSessionToken(profile)
+	}
+
+	return queryDaemon(profile, daemon.IPCRequest{Action: "ping", Token: tok})
 }
 
 func main() {
@@ -99,7 +110,8 @@ func main() {
 	}
 	fmt.Printf("Status: 🟢 Active Session (Daemon v%s)\n\n", resp.Version)
 
-	bkResp, err := queryDaemon(*profile, daemon.IPCRequest{Action: "backup", Token: currentSessionToken})
+	tok := config.LoadSessionToken(*profile)
+	bkResp, err := queryDaemon(*profile, daemon.IPCRequest{Action: "backup", Token: tok})
 	if err != nil {
 		fmt.Printf("Error querying vault: %v\n", err)
 		os.Exit(1)
