@@ -294,7 +294,7 @@ func runGUIServer(activeProfile string, port int) {
 			p = activeProfile
 		}
 		tok := config.LoadSessionToken(p)
-		resp, err := queryDaemon(p, daemon.IPCRequest{Action: "ping", Token: tok})
+		resp, err := queryDaemon(p, daemon.IPCRequest{Action: "backup", Token: tok})
 		unlocked := (err == nil && resp != nil && resp.Success)
 
 		storePath, _ := store.GetStorePath(p)
@@ -992,8 +992,20 @@ const guiHTMLContent = `<!DOCTYPE html>
     }
 
     function renderLockedState() {
+      const pill = document.getElementById('statusPill');
+      const unlockBtn = document.getElementById('unlockBtn');
+      if (pill) {
+        pill.className = 'status-pill locked';
+        pill.innerHTML = '<span>🔴 Vault Locked</span>';
+      }
+      if (unlockBtn) {
+        unlockBtn.style.display = 'inline-block';
+      }
+
       const tbody = document.getElementById('secretsTableBody');
-      tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--rose); padding: 32px;">Vault Session Locked. Click <b>"🔓 Touch ID Unlock"</b> to inspect credentials.</td></tr>';
+      if (tbody) {
+        tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--rose); padding: 32px;">Vault Session Locked. Click <b>"🔓 Touch ID Unlock"</b> to inspect credentials.</td></tr>';
+      }
     }
 
     function filterSecrets() {

@@ -41,7 +41,7 @@ var embeddedSkillBytes []byte
 
 var jsonErrors bool
 var (
-	Version   = "v2.1.3"
+	Version   = "v2.1.4"
 	BuildDate = "unknown"
 )
 

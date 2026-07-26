@@ -1,4 +1,4 @@
-VERSION := v2.1.3
+VERSION := v2.1.4
 BUILD_DATE := $(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
 LDFLAGS := -ldflags "-X main.Version=$(VERSION) -X main.BuildDate=$(BUILD_DATE)"
 
