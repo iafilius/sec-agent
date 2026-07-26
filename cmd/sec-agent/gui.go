@@ -22,7 +22,7 @@ import (
 	"time"
 )
 
-var guiVersion = "v2.0.0-gui"
+var guiVersion = Version
 var activeGUIToken string
 var guiTokenConsumed bool
 var tokenMutex sync.Mutex
@@ -744,6 +744,7 @@ const guiHTMLContent = `<!DOCTYPE html>
   <header>
     <div class="logo">
       <span>🔒 sec-agent</span>
+      <span class="badge badge-ver" id="guiVersionBadge">v2.1.1</span>
       <span style="color: var(--text-muted); font-size: 0.9rem; font-weight: 400;">Vault Inspector</span>
     </div>
 
@@ -903,6 +904,9 @@ const guiHTMLContent = `<!DOCTYPE html>
         document.getElementById('bannerDbPath').innerText = data.database_path || '';
         document.getElementById('bannerDbSize').innerText = data.database_size || '0 B';
         document.getElementById('bannerDbModified').innerText = data.database_modified || '';
+        if (data.version) {
+          document.getElementById('guiVersionBadge').innerText = data.version;
+        }
 
         populateDbSelect(data.available_databases || []);
 

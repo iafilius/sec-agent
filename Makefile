@@ -1,4 +1,4 @@
-VERSION := v2.1.1
+VERSION := v2.1.2
 BUILD_DATE := $(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
 LDFLAGS := -ldflags "-X main.Version=$(VERSION) -X main.BuildDate=$(BUILD_DATE)"
 
@@ -67,7 +67,7 @@ package:
 
 clean:
 	rm -rf bin sec sec-agent sec-agent-gui
-	rm -rf sec-agent.app sec-agent-gui.app
+	rm -rf sec-agent.app sec-agent-gui.app "Secure Secrets.app" "SecAgent.app"
 	rm -rf ~/.config/sec/sec.sock ~/.config/sec-agent/sec-agent.sock
 
 test:
