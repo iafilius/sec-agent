@@ -181,7 +181,6 @@ func ensureUnlocked(profile string) (*daemon.IPCResponse, error) {
 
 	if resp.Token != "" {
 		setGUIToken(profile, resp.Token)
-		_ = os.Setenv("SEC_SESSION_TOKEN", resp.Token)
 	}
 
 	return resp, nil
@@ -945,18 +944,20 @@ const guiHTMLContent = `<!DOCTYPE html>
         populateDbSelect(data.available_databases || []);
 
         if (data.unlocked) {
-          pill.className = 'status-pill';
-          pill.innerHTML = '<span>🟢 Active Session</span>';
-          unlockBtn.style.display = 'none';
-          loadSecrets();
+          const loaded = await loadSecrets();
+          if (loaded) {
+            pill.className = 'status-pill';
+            pill.innerHTML = '<span>🟢 Active Session</span>';
+            unlockBtn.style.display = 'none';
+          } else {
+            renderLockedState();
+          }
         } else {
-          pill.className = 'status-pill locked';
-          pill.innerHTML = '<span>🔴 Vault Locked</span>';
-          unlockBtn.style.display = 'inline-block';
           renderLockedState();
         }
       } catch (err) {
         console.error(err);
+        renderLockedState();
       }
     }
 
@@ -996,15 +997,18 @@ const guiHTMLContent = `<!DOCTYPE html>
         const res = await apiFetch('/api/secrets?profile=' + currentProfile);
         if (res.status === 401 || res.status === 403) {
           if (res.status === 401) renderLockedState();
-          return;
+          return false;
         }
         const data = await res.json();
         secretsData = data.secrets || [];
         document.getElementById('totalSecretsCount').innerText = secretsData.length;
         document.getElementById('staleSecretsCount').innerText = secretsData.filter(s => s.is_stale).length;
         filterSecrets();
+        return true;
       } catch (err) {
         console.error(err);
+        renderLockedState();
+        return false;
       }
     }
 
@@ -1088,6 +1092,10 @@ const guiHTMLContent = `<!DOCTYPE html>
 
     function changeProfile(p) {
       currentProfile = p;
+      const tbody = document.getElementById('secretsTableBody');
+      if (tbody) {
+        tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--text-muted); padding: 32px;">⏳ Loading vault profile...</td></tr>';
+      }
       loadStatus();
     }
 
