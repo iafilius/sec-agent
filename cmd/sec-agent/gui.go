@@ -284,7 +284,23 @@ func securityMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+func killExistingGUIServer(port int) {
+	url := fmt.Sprintf("http://127.0.0.1:%d/api/shutdown", port)
+	// #nosec G704 G107
+	req, err := http.NewRequest("POST", url, nil)
+	if err == nil {
+		client := &http.Client{Timeout: 500 * time.Millisecond}
+		// #nosec G704 G107
+		resp, err := client.Do(req)
+		if err == nil && resp != nil {
+			_ = resp.Body.Close()
+		}
+	}
+	time.Sleep(200 * time.Millisecond)
+}
+
 func runGUIServer(activeProfile string, port int) {
+	killExistingGUIServer(port)
 	activeGUIToken = generateGUIToken()
 
 	mux := http.NewServeMux()
