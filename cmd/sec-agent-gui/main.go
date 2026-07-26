@@ -10,15 +10,88 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"secure_secrets/internal/config"
 	"secure_secrets/internal/daemon"
+	"secure_secrets/internal/store"
 	"sort"
 	"strings"
 	"time"
 )
 
 var version = "v2.0.0-gui"
+
+type DatabaseInfo struct {
+	Profile  string `json:"profile"`
+	Filename string `json:"filename"`
+	Path     string `json:"path"`
+	Size     string `json:"size"`
+	Modified string `json:"modified"`
+}
+
+func discoverDatabases() ([]DatabaseInfo, error) {
+	dir, err := config.GetConfigDir()
+	if err != nil {
+		return nil, err
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	var list []DatabaseInfo
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if strings.HasPrefix(name, "secrets") && strings.HasSuffix(name, ".enc") {
+			profile := "default"
+			if name != "secrets.enc" {
+				profile = strings.TrimPrefix(name, "secrets_")
+				profile = strings.TrimSuffix(profile, ".enc")
+			}
+
+			fullPath := filepath.Join(dir, name)
+			info, err := entry.Info()
+			sizeStr := "0 B"
+			modStr := ""
+			if err == nil {
+				sizeStr = formatBytes(info.Size())
+				modStr = info.ModTime().Format("2006-01-02 15:04:05")
+			}
+
+			list = append(list, DatabaseInfo{
+				Profile:  profile,
+				Filename: name,
+				Path:     fullPath,
+				Size:     sizeStr,
+				Modified: modStr,
+			})
+		}
+	}
+
+	sort.Slice(list, func(i, j int) bool {
+		return list[i].Profile < list[j].Profile
+	})
+
+	return list, nil
+}
+
+func formatBytes(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
+}
 
 func queryDaemon(profile string, req daemon.IPCRequest) (*daemon.IPCResponse, error) {
 	sockPath, err := config.GetSocketPath(profile)
@@ -114,6 +187,16 @@ func main() {
 
 	activeProfile := *profileFlag
 
+	http.HandleFunc("/api/databases", func(w http.ResponseWriter, r *http.Request) {
+		dbs, err := discoverDatabases()
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(dbs)
+	})
+
 	http.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Query().Get("profile")
 		if p == "" {
@@ -123,12 +206,29 @@ func main() {
 		resp, err := queryDaemon(p, daemon.IPCRequest{Action: "ping", Token: tok})
 		unlocked := (err == nil && resp != nil && resp.Success)
 
+		storePath, _ := store.GetStorePath(p)
+		dbFile := filepath.Base(storePath)
+		sizeStr := "Unknown"
+		modStr := "Unknown"
+		// #nosec G703
+		if fi, err := os.Stat(storePath); err == nil {
+			sizeStr = formatBytes(fi.Size())
+			modStr = fi.ModTime().Format("2006-01-02 15:04:05")
+		}
+
+		dbs, _ := discoverDatabases()
+
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"profile":  p,
-			"unlocked": unlocked,
-			"version":  version,
-			"error":    fmt.Sprintf("%v", err),
+			"profile":             p,
+			"unlocked":            unlocked,
+			"version":             version,
+			"database_file":       dbFile,
+			"database_path":       storePath,
+			"database_size":       sizeStr,
+			"database_modified":   modStr,
+			"available_databases": dbs,
+			"error":               fmt.Sprintf("%v", err),
 		})
 	})
 
@@ -307,13 +407,14 @@ const guiHTMLContent = `<!DOCTYPE html>
       gap: 16px;
     }
 
-    .profile-select {
+    .db-select {
       background: rgba(255, 255, 255, 0.05);
       border: 1px solid var(--panel-border);
       color: var(--text);
       padding: 8px 16px;
       border-radius: 8px;
       font-size: 0.9rem;
+      font-family: var(--font-mono);
       outline: none;
       cursor: pointer;
     }
@@ -359,6 +460,26 @@ const guiHTMLContent = `<!DOCTYPE html>
       max-width: 1400px;
       margin: 0 auto;
       width: 100%;
+    }
+
+    .db-banner {
+      background: var(--panel);
+      backdrop-filter: blur(12px);
+      border: 1px solid var(--panel-border);
+      border-radius: 12px;
+      padding: 16px 24px;
+      margin-bottom: 24px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 0.9rem;
+    }
+    .db-path {
+      font-family: var(--font-mono);
+      color: var(--accent);
+      font-size: 0.85rem;
+      margin-top: 4px;
+      word-break: break-all;
     }
 
     .metrics-grid {
@@ -527,11 +648,8 @@ const guiHTMLContent = `<!DOCTYPE html>
     </div>
 
     <div class="header-controls">
-      <select id="profileSelect" class="profile-select" onchange="changeProfile(this.value)">
-        <option value="default">Profile: default</option>
-        <option value="dev">Profile: dev</option>
-        <option value="staging">Profile: staging</option>
-        <option value="prod">Profile: prod</option>
+      <select id="dbSelect" class="db-select" onchange="changeProfile(this.value)">
+        <option value="default">💾 secrets.enc (default)</option>
       </select>
 
       <div id="statusPill" class="status-pill">
@@ -545,6 +663,17 @@ const guiHTMLContent = `<!DOCTYPE html>
   </header>
 
   <main>
+    <div class="db-banner">
+      <div>
+        <div><b>Active Vault Database File:</b> <span id="bannerDbFile" style="font-family: var(--font-mono); color: var(--emerald);">secrets.enc</span></div>
+        <div id="bannerDbPath" class="db-path">/Users/arjan/.config/sec-agent/secrets.enc</div>
+      </div>
+      <div style="text-align: right; color: var(--text-muted); font-size: 0.85rem;">
+        <div>Size: <span id="bannerDbSize">0 B</span></div>
+        <div>Modified: <span id="bannerDbModified">Never</span></div>
+      </div>
+    </div>
+
     <div class="metrics-grid">
       <div class="metric-card">
         <div class="metric-title">Total Secrets</div>
@@ -617,6 +746,12 @@ const guiHTMLContent = `<!DOCTYPE html>
         const pill = document.getElementById('statusPill');
         const unlockBtn = document.getElementById('unlockBtn');
         document.getElementById('activeProfileName').innerText = currentProfile;
+        document.getElementById('bannerDbFile').innerText = data.database_file || 'secrets.enc';
+        document.getElementById('bannerDbPath').innerText = data.database_path || '';
+        document.getElementById('bannerDbSize').innerText = data.database_size || '0 B';
+        document.getElementById('bannerDbModified').innerText = data.database_modified || '';
+
+        populateDbSelect(data.available_databases || []);
 
         if (data.unlocked) {
           pill.className = 'status-pill';
@@ -632,6 +767,19 @@ const guiHTMLContent = `<!DOCTYPE html>
       } catch (err) {
         console.error(err);
       }
+    }
+
+    function populateDbSelect(databases) {
+      const dbSelect = document.getElementById('dbSelect');
+      if (!databases || databases.length === 0) return;
+
+      let html = '';
+      for (let i = 0; i < databases.length; i++) {
+        let db = databases[i];
+        let selected = db.profile === currentProfile ? 'selected' : '';
+        html += '<option value="' + db.profile + '" ' + selected + '>💾 ' + db.filename + ' (' + db.profile + ')</option>';
+      }
+      dbSelect.innerHTML = html;
     }
 
     async function triggerUnlock() {
