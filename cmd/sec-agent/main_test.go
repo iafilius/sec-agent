@@ -73,7 +73,13 @@ func TestMainIntegration(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	testEnv := append(os.Environ(), "SEC_SESSION_TOKEN=integration-token-123")
+	var testEnv []string
+	for _, env := range os.Environ() {
+		if !strings.HasPrefix(env, "SEC_SESSION_TOKEN=") && !strings.HasPrefix(env, "SEC_PROFILE=") && !strings.HasPrefix(env, "VELOCLOUD_") && !strings.HasPrefix(env, "PROVIDER_") {
+			testEnv = append(testEnv, env)
+		}
+	}
+	testEnv = append(testEnv, "SEC_SESSION_TOKEN=integration-token-123", "SEC_PROFILE="+profile)
 
 	// 4. Test 1: Verify 'sec env' output and prefix filtering
 	envCmd := exec.Command("./sec_test_bin", "env", "velocloud-provider", "--profile", profile)
@@ -811,7 +817,14 @@ func TestSSHAgentAndStreamInjection(t *testing.T) {
 	}
 
 	streamCmd := exec.Command(binPath, "stream", "--template", "uci set network.wg0.private_key='{{router/nordvpn/private_key}}'", "--profile", profile)
-	streamCmd.Env = append(os.Environ(), "SEC_SESSION_TOKEN="+token)
+	var testEnv []string
+	for _, env := range os.Environ() {
+		if !strings.HasPrefix(env, "SEC_SESSION_TOKEN=") && !strings.HasPrefix(env, "SEC_PROFILE=") {
+			testEnv = append(testEnv, env)
+		}
+	}
+	testEnv = append(testEnv, "SEC_SESSION_TOKEN="+token, "SEC_PROFILE="+profile)
+	streamCmd.Env = testEnv
 	out, err := streamCmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("sec-agent stream failed: %v\nOutput: %s", err, out)
