@@ -1,8 +1,8 @@
-VERSION := v2.1.0
+VERSION := v2.1.1
 BUILD_DATE := $(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
 LDFLAGS := -ldflags "-X main.Version=$(VERSION) -X main.BuildDate=$(BUILD_DATE)"
 
-.PHONY: all build clean test codesign verify-sip sec-check sync package gui-app app
+.PHONY: all build clean test codesign verify-sip sec-check sync package gui-app app install-app icon
 
 all: build codesign app
 
@@ -16,17 +16,43 @@ codesign: build
 
 app: gui-app
 
-gui-app: build
-	@echo "=== Packaging sec-agent.app macOS Application Bundle ==="
-	rm -rf sec-agent.app
-	mkdir -p sec-agent.app/Contents/MacOS
-	mkdir -p sec-agent.app/Contents/Resources
-	cp sec-agent sec-agent.app/Contents/MacOS/sec-agent
-	printf '#!/bin/sh\nDIR="$$(cd "$$(dirname "$$0")" && pwd)"\nexec "$$DIR/sec-agent" gui\n' > sec-agent.app/Contents/MacOS/SecAgentLauncher
-	chmod +x sec-agent.app/Contents/MacOS/SecAgentLauncher
-	printf '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0">\n<dict>\n    <key>CFBundleExecutable</key>\n    <string>SecAgentLauncher</string>\n    <key>CFBundleIdentifier</key>\n    <string>io.iafilius.sec-agent</string>\n    <key>CFBundleName</key>\n    <string>sec-agent</string>\n    <key>CFBundlePackageType</key>\n    <string>APPL</string>\n    <key>CFBundleShortVersionString</key>\n    <string>2.0.0</string>\n    <key>LSUIElement</key>\n    <true/>\n</dict>\n</plist>\n' > sec-agent.app/Contents/Info.plist
-	codesign --force --deep --options runtime --sign - sec-agent.app
-	@echo "=== sec-agent.app created! Double-click it in Finder or move to /Applications ==="
+icon:
+	@if [ -f assets/AppIcon.png ]; then \
+		echo "=== Compiling AppIcon.icns from assets/AppIcon.png ==="; \
+		rm -rf assets/AppIcon.iconset; \
+		mkdir -p assets/AppIcon.iconset; \
+		sips -s format png -z 16 16 assets/AppIcon.png --out assets/AppIcon.iconset/icon_16x16.png >/dev/null; \
+		sips -s format png -z 32 32 assets/AppIcon.png --out assets/AppIcon.iconset/icon_16x16@2x.png >/dev/null; \
+		sips -s format png -z 32 32 assets/AppIcon.png --out assets/AppIcon.iconset/icon_32x32.png >/dev/null; \
+		sips -s format png -z 64 64 assets/AppIcon.png --out assets/AppIcon.iconset/icon_32x32@2x.png >/dev/null; \
+		sips -s format png -z 128 128 assets/AppIcon.png --out assets/AppIcon.iconset/icon_128x128.png >/dev/null; \
+		sips -s format png -z 256 256 assets/AppIcon.png --out assets/AppIcon.iconset/icon_128x128@2x.png >/dev/null; \
+		sips -s format png -z 256 256 assets/AppIcon.png --out assets/AppIcon.iconset/icon_256x256.png >/dev/null; \
+		sips -s format png -z 512 512 assets/AppIcon.png --out assets/AppIcon.iconset/icon_256x256@2x.png >/dev/null; \
+		sips -s format png -z 512 512 assets/AppIcon.png --out assets/AppIcon.iconset/icon_512x512.png >/dev/null; \
+		sips -s format png -z 1024 1024 assets/AppIcon.png --out assets/AppIcon.iconset/icon_512x512@2x.png >/dev/null; \
+		iconutil -c icns assets/AppIcon.iconset -o assets/AppIcon.icns; \
+		rm -rf assets/AppIcon.iconset; \
+	fi
+
+gui-app: build icon
+	@echo "=== Packaging SecAgent.app macOS Application Bundle ==="
+	rm -rf "SecAgent.app" "Secure Secrets.app" sec-agent.app
+	mkdir -p "SecAgent.app/Contents/MacOS"
+	mkdir -p "SecAgent.app/Contents/Resources"
+	cp sec-agent "SecAgent.app/Contents/MacOS/sec-agent"
+	if [ -f assets/AppIcon.icns ]; then cp assets/AppIcon.icns "SecAgent.app/Contents/Resources/AppIcon.icns"; fi
+	printf '#!/bin/sh\nDIR="$$(cd "$$(dirname "$$0")" && pwd)"\nexec "$$DIR/sec-agent" gui\n' > "SecAgent.app/Contents/MacOS/SecAgentLauncher"
+	chmod +x "SecAgent.app/Contents/MacOS/SecAgentLauncher"
+	printf '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.plist">\n<plist version="1.0">\n<dict>\n    <key>CFBundleExecutable</key>\n    <string>SecAgentLauncher</string>\n    <key>CFBundleIdentifier</key>\n    <string>io.iafilius.sec-agent-gui</string>\n    <key>CFBundleName</key>\n    <string>SecAgent</string>\n    <key>CFBundleDisplayName</key>\n    <string>SecAgent</string>\n    <key>CFBundlePackageType</key>\n    <string>APPL</string>\n    <key>CFBundleShortVersionString</key>\n    <string>$(VERSION)</string>\n    <key>CFBundleVersion</key>\n    <string>$(VERSION)</string>\n    <key>CFBundleIconFile</key>\n    <string>AppIcon</string>\n    <key>LSUIElement</key>\n    <true/>\n</dict>\n</plist>\n' > "SecAgent.app/Contents/Info.plist"
+	codesign --force --deep --options runtime --sign - "SecAgent.app"
+	@echo "=== SecAgent.app created! Double-click in Finder or run 'make install-app' ==="
+
+install-app: gui-app
+	@echo "=== Installing SecAgent.app to /Applications/ ==="
+	rm -rf "/Applications/SecAgent.app" "/Applications/Secure Secrets.app" "/Applications/sec-agent.app" "/Applications/sec-agent" "/Applications/sec-agent-gui"
+	cp -R "SecAgent.app" "/Applications/"
+	@echo "=== SecAgent.app installed into /Applications! ==="
 
 package:
 	@echo "=== Building Release Binaries & Tarballs for $(VERSION) ==="
