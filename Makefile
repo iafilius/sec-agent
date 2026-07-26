@@ -2,33 +2,37 @@ VERSION := v1.9.5
 BUILD_DATE := $(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
 LDFLAGS := -ldflags "-X main.Version=$(VERSION) -X main.BuildDate=$(BUILD_DATE)"
 
-.PHONY: all build clean test codesign verify-sip sec-check sync package
+.PHONY: all build clean test codesign verify-sip sec-check sync package gui-app app
 
-all: build codesign
+all: build codesign app
 
 build:
-	go build $(LDFLAGS) -o sec cmd/sec/main.go
+	mkdir -p bin
+	go build $(LDFLAGS) -o bin/sec-agent cmd/sec-agent/*.go
+	ln -sf bin/sec-agent sec
 
 codesign: build
-	@echo "Signing binary with macOS Hardened Runtime..."
-	codesign --force --options runtime --sign - sec
+	@echo "Signing sec-agent binary with macOS Hardened Runtime..."
+	codesign --force --options runtime --sign - bin/sec-agent
+
+app: gui-app
 
 gui-app: build
-	@echo "=== Packaging sec-agent-gui.app macOS Application Bundle ==="
-	go build $(LDFLAGS) -o sec-agent-gui cmd/sec-agent-gui/main.go
-	codesign --force --options runtime --sign - sec-agent-gui
-	rm -rf sec-agent-gui.app
-	mkdir -p sec-agent-gui.app/Contents/MacOS
-	mkdir -p sec-agent-gui.app/Contents/Resources
-	cp sec-agent-gui sec-agent-gui.app/Contents/MacOS/sec-agent-gui
-	printf '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0">\n<dict>\n    <key>CFBundleExecutable</key>\n    <string>sec-agent-gui</string>\n    <key>CFBundleIdentifier</key>\n    <string>io.iafilius.sec-agent-gui</string>\n    <key>CFBundleName</key>\n    <string>sec-agent-gui</string>\n    <key>CFBundlePackageType</key>\n    <string>APPL</string>\n    <key>CFBundleShortVersionString</key>\n    <string>2.0.0</string>\n    <key>LSUIElement</key>\n    <true/>\n</dict>\n</plist>\n' > sec-agent-gui.app/Contents/Info.plist
-	codesign --force --deep --options runtime --sign - sec-agent-gui.app
-	@echo "=== sec-agent-gui.app created! Double-click it in Finder or move to /Applications ==="
+	@echo "=== Packaging sec-agent.app macOS Application Bundle ==="
+	rm -rf sec-agent.app
+	mkdir -p sec-agent.app/Contents/MacOS
+	mkdir -p sec-agent.app/Contents/Resources
+	cp bin/sec-agent sec-agent.app/Contents/MacOS/sec-agent
+	printf '#!/bin/sh\nDIR="$$(cd "$$(dirname "$$0")" && pwd)"\nexec "$$DIR/sec-agent" gui\n' > sec-agent.app/Contents/MacOS/SecAgentLauncher
+	chmod +x sec-agent.app/Contents/MacOS/SecAgentLauncher
+	printf '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0">\n<dict>\n    <key>CFBundleExecutable</key>\n    <string>SecAgentLauncher</string>\n    <key>CFBundleIdentifier</key>\n    <string>io.iafilius.sec-agent</string>\n    <key>CFBundleName</key>\n    <string>sec-agent</string>\n    <key>CFBundlePackageType</key>\n    <string>APPL</string>\n    <key>CFBundleShortVersionString</key>\n    <string>2.0.0</string>\n    <key>LSUIElement</key>\n    <true/>\n</dict>\n</plist>\n' > sec-agent.app/Contents/Info.plist
+	codesign --force --deep --options runtime --sign - sec-agent.app
+	@echo "=== sec-agent.app created! Double-click it in Finder or move to /Applications ==="
 
 package:
 	@echo "=== Building Release Binaries & Tarballs for $(VERSION) ==="
 	rm -rf dist && mkdir -p dist
-	go build $(LDFLAGS) -o dist/sec-agent cmd/sec/main.go
+	go build $(LDFLAGS) -o dist/sec-agent cmd/sec-agent/*.go
 	codesign --force --options runtime --sign - dist/sec-agent
 	cp README.md dist/README.md
 	tar -czf dist/sec-agent_$(VERSION)_darwin_arm64.tar.gz -C dist sec-agent README.md
@@ -37,7 +41,8 @@ package:
 	@echo "=== Release packages generated in dist/ ==="
 
 clean:
-	rm -f sec sec-agent
+	rm -rf bin sec sec-agent-gui
+	rm -rf sec-agent.app sec-agent-gui.app
 	rm -rf ~/.config/sec/sec.sock ~/.config/sec-agent/sec-agent.sock
 
 test:
@@ -45,9 +50,9 @@ test:
 
 verify-sip: build codesign
 	@echo "Verifying codesign entitlements and flags..."
-	codesign -d --verbose sec-agent
+	codesign -d --verbose bin/sec-agent
 	@echo "Attempting to inspect with lldb (expected to fail if SIP is enabled and Hardened Runtime is active)..."
-	@echo "Run: lldb -batch -o 'process launch' ./sec-agent"
+	@echo "Run: lldb -batch -o 'process launch' ./bin/sec-agent"
 
 sec-check:
 	@echo "=== Running Go Vet ==="
