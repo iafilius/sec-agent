@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"secure_secrets/internal/config"
@@ -17,6 +18,7 @@ import (
 	"secure_secrets/internal/store"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -334,6 +336,14 @@ func main() {
 	go func() {
 		time.Sleep(500 * time.Millisecond)
 		openBrowser(fmt.Sprintf("http://%s", addr))
+	}()
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		<-sigChan
+		fmt.Println("\n🛑 sec-agent-gui server stopped gracefully.")
+		os.Exit(0)
 	}()
 
 	server := &http.Server{
