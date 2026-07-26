@@ -247,6 +247,15 @@ func main() {
 		})
 	})
 
+	http.HandleFunc("/api/shutdown", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "server shutting down"})
+		go func() {
+			time.Sleep(200 * time.Millisecond)
+			os.Exit(0)
+		}()
+	})
+
 	http.HandleFunc("/api/secrets", func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Query().Get("profile")
 		if p == "" {
@@ -659,6 +668,10 @@ const guiHTMLContent = `<!DOCTYPE html>
       <button id="unlockBtn" class="btn-unlock" onclick="triggerUnlock()" style="display: none;">
         🔓 Touch ID Unlock
       </button>
+
+      <button class="btn-action" onclick="stopServer()" title="Shutdown GUI server">
+        🛑 Stop GUI
+      </button>
     </div>
   </header>
 
@@ -885,6 +898,15 @@ const guiHTMLContent = `<!DOCTYPE html>
     function changeProfile(p) {
       currentProfile = p;
       loadStatus();
+    }
+
+    async function stopServer() {
+      if (confirm('Are you sure you want to stop the sec-agent-gui server?')) {
+        try {
+          await fetch('/api/shutdown', { method: 'POST' });
+        } catch (e) {}
+        document.body.innerHTML = '<div style="display:flex; justify-content:center; align-items:center; height:100vh; font-family:sans-serif; color:#94a3b8;"><h2>🛑 sec-agent-gui Server Stopped. You may close this tab.</h2></div>';
+      }
     }
 
     loadStatus();
