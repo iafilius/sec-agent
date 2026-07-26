@@ -32,6 +32,23 @@ var activeTabID string
 var lastTabHeartbeat time.Time
 var tabMutex sync.Mutex
 
+var (
+	guiTokens      = make(map[string]string)
+	guiTokensMutex sync.Mutex
+)
+
+func getGUIToken(profile string) string {
+	guiTokensMutex.Lock()
+	defer guiTokensMutex.Unlock()
+	return guiTokens[profile]
+}
+
+func setGUIToken(profile, token string) {
+	guiTokensMutex.Lock()
+	defer guiTokensMutex.Unlock()
+	guiTokens[profile] = token
+}
+
 type DatabaseInfo struct {
 	Profile  string `json:"profile"`
 	Filename string `json:"filename"`
@@ -112,7 +129,7 @@ func formatBytes(b int64) string {
 }
 
 func ensureUnlocked(profile string) (*daemon.IPCResponse, error) {
-	tok := config.LoadSessionToken(profile)
+	tok := getGUIToken(profile)
 	if tok == "" {
 		tok = os.Getenv("SEC_SESSION_TOKEN")
 	}
@@ -163,7 +180,7 @@ func ensureUnlocked(profile string) (*daemon.IPCResponse, error) {
 	}
 
 	if resp.Token != "" {
-		_ = config.SaveSessionToken(profile, resp.Token)
+		setGUIToken(profile, resp.Token)
 		_ = os.Setenv("SEC_SESSION_TOKEN", resp.Token)
 	}
 
@@ -293,7 +310,7 @@ func runGUIServer(activeProfile string, port int) {
 		if p == "" {
 			p = activeProfile
 		}
-		tok := config.LoadSessionToken(p)
+		tok := getGUIToken(p)
 		resp, err := queryDaemon(p, daemon.IPCRequest{Action: "backup", Token: tok})
 		unlocked := (err == nil && resp != nil && resp.Success)
 
@@ -358,7 +375,7 @@ func runGUIServer(activeProfile string, port int) {
 		if p == "" {
 			p = activeProfile
 		}
-		tok := config.LoadSessionToken(p)
+		tok := getGUIToken(p)
 		resp, err := queryDaemon(p, daemon.IPCRequest{Action: "backup", Token: tok})
 		if err != nil || resp == nil || !resp.Success {
 			w.Header().Set("Content-Type", "application/json")
