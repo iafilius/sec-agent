@@ -676,6 +676,106 @@ const guiHTMLContent = `<!DOCTYPE html>
       border-color: var(--accent);
     }
 
+    .view-mode-toggle {
+      display: flex;
+      background: var(--panel);
+      border: 1px solid var(--panel-border);
+      border-radius: 10px;
+      padding: 3px;
+    }
+    .btn-toggle {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      padding: 8px 14px;
+      border-radius: 8px;
+      font-size: 0.85rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+    .btn-toggle.active {
+      background: var(--surface-hover);
+      color: var(--accent);
+      box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+    }
+
+    .records-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+      gap: 16px;
+    }
+    .record-card {
+      background: var(--panel);
+      backdrop-filter: blur(16px);
+      border: 1px solid var(--panel-border);
+      border-radius: 14px;
+      overflow: hidden;
+      transition: transform 0.2s ease, border-color 0.2s ease;
+    }
+    .record-card:hover {
+      border-color: rgba(56, 189, 248, 0.4);
+      transform: translateY(-2px);
+    }
+    .record-card-header {
+      background: rgba(255, 255, 255, 0.03);
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--panel-border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .record-card-title {
+      font-family: var(--font-mono);
+      font-weight: 600;
+      font-size: 0.9rem;
+      color: var(--accent);
+      word-break: break-all;
+    }
+    .record-card-body {
+      padding: 16px 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .field-row {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      font-size: 0.85rem;
+    }
+    .field-label {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+      font-weight: 600;
+    }
+    .field-value-box {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: rgba(0, 0, 0, 0.25);
+      border: 1px solid var(--panel-border);
+      border-radius: 8px;
+      padding: 8px 12px;
+      font-family: var(--font-mono);
+      word-break: break-all;
+    }
+    .btn-copy-sm {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 0.8rem;
+    }
+    .btn-copy-sm:hover {
+      color: var(--accent);
+      background: rgba(255, 255, 255, 0.05);
+    }
+
     .table-container {
       background: var(--panel);
       backdrop-filter: blur(16px);
@@ -844,10 +944,16 @@ const guiHTMLContent = `<!DOCTYPE html>
     </div>
 
     <div class="search-bar-container">
-      <input type="text" id="searchInput" class="search-input" placeholder="🔍 Search secret keys or namespaces..." oninput="filterSecrets()">
+      <input type="text" id="searchInput" class="search-input" placeholder="🔍 Search secret keys, domain records, or attributes..." oninput="filterSecrets()">
+      <div class="view-mode-toggle">
+        <button id="viewGroupedBtn" class="btn-toggle active" onclick="setViewMode('grouped')">📦 Grouped Records</button>
+        <button id="viewFlatBtn" class="btn-toggle" onclick="setViewMode('flat')">📄 Flat List</button>
+      </div>
     </div>
 
-    <div class="table-container">
+    <div id="groupedRecordsContainer" class="records-grid" style="display: grid;"></div>
+
+    <div id="flatTableContainer" class="table-container" style="display: none;">
       <table>
         <thead>
           <tr>
@@ -1045,11 +1151,30 @@ const guiHTMLContent = `<!DOCTYPE html>
       }
     }
 
+    let viewMode = 'grouped';
+
+    function setViewMode(mode) {
+      viewMode = mode;
+      document.getElementById('viewGroupedBtn').className = mode === 'grouped' ? 'btn-toggle active' : 'btn-toggle';
+      document.getElementById('viewFlatBtn').className = mode === 'flat' ? 'btn-toggle active' : 'btn-toggle';
+      document.getElementById('groupedRecordsContainer').style.display = mode === 'grouped' ? 'grid' : 'none';
+      document.getElementById('flatTableContainer').style.display = mode === 'flat' ? 'block' : 'none';
+      filterSecrets();
+    }
+
     function filterSecrets() {
       const q = document.getElementById('searchInput').value.toLowerCase();
-      const filtered = secretsData.filter(s => s.key.toLowerCase().includes(q));
-      const tbody = document.getElementById('secretsTableBody');
+      const filtered = secretsData.filter(s => s.key.toLowerCase().includes(q) || (s.value && s.value.toLowerCase().includes(q)));
 
+      if (viewMode === 'flat') {
+        renderFlatTable(filtered);
+      } else {
+        renderGroupedCards(filtered);
+      }
+    }
+
+    function renderFlatTable(filtered) {
+      const tbody = document.getElementById('secretsTableBody');
       if (filtered.length === 0) {
         tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--text-muted); padding: 32px;">No matching secrets found.</td></tr>';
         return;
@@ -1070,6 +1195,92 @@ const guiHTMLContent = `<!DOCTYPE html>
         html += '</tr>';
       }
       tbody.innerHTML = html;
+    }
+
+    function groupSecretsList(secrets) {
+      const groups = {};
+      for (let i = 0; i < secrets.length; i++) {
+        let s = secrets[i];
+        let parts = s.key.split('/');
+        if (parts.length > 1) {
+          let parent = parts.slice(0, parts.length - 1).join('/');
+          let attr = parts[parts.length - 1];
+          if (!groups[parent]) {
+            groups[parent] = { parent: parent, fields: [] };
+          }
+          groups[parent].fields.push({ attr: attr, secret: s });
+        } else {
+          if (!groups[s.key]) {
+            groups[s.key] = { parent: s.key, fields: [] };
+          }
+          groups[s.key].fields.push({ attr: 'value', secret: s });
+        }
+      }
+      return Object.values(groups);
+    }
+
+    function renderGroupedCards(filtered) {
+      const container = document.getElementById('groupedRecordsContainer');
+      if (filtered.length === 0) {
+        container.innerHTML = '<div style="grid-column: 1/-1; text-align: center; color: var(--text-muted); padding: 48px; background: var(--panel); border-radius: 12px; border: 1px solid var(--panel-border);">No matching record entries found.</div>';
+        return;
+      }
+
+      const groups = groupSecretsList(filtered);
+      let html = '';
+
+      for (let i = 0; i < groups.length; i++) {
+        let g = groups[i];
+        html += '<div class="record-card">';
+        html += '<div class="record-card-header">';
+        html += '<div class="record-card-title">🔐 ' + g.parent + '</div>';
+        html += '<span class="badge badge-ver">' + g.fields.length + ' item' + (g.fields.length > 1 ? 's' : '') + '</span>';
+        html += '</div>';
+        html += '<div class="record-card-body">';
+
+        for (let j = 0; j < g.fields.length; j++) {
+          let f = g.fields[j];
+          let s = f.secret;
+          let attrLower = f.attr.toLowerCase();
+          let val = s.value || '••••••••';
+
+          html += '<div class="field-row">';
+          html += '<div class="field-label">' + f.attr + '</div>';
+
+          if (attrLower === 'url' || attrLower === 'uri' || attrLower === 'link' || (val.startsWith && (val.startsWith('http://') || val.startsWith('https://')))) {
+            html += '<div class="field-value-box">';
+            html += '<a href="' + val + '" target="_blank" style="color: var(--accent); text-decoration: none; word-break: break-all;">' + val + ' ↗</a>';
+            html += '<button class="btn-copy-sm" onclick="copyTextToClipboard(\'' + escapeJS(val) + '\')">📋</button>';
+            html += '</div>';
+          } else if (attrLower === 'notes' || attrLower === 'comment') {
+            html += '<div class="field-value-box" style="background: rgba(255,255,255,0.02); color: var(--text-muted); font-size: 0.85rem; font-family: var(--font-sans); white-space: pre-wrap;">' + val + '</div>';
+          } else {
+            html += '<div class="field-value-box" onclick="openModal(\'' + s.key + '\')" style="cursor: pointer;">';
+            html += '<span style="color: ' + (attrLower.includes('pass') || attrLower.includes('secret') || attrLower.includes('key') ? 'var(--amber)' : 'var(--text)') + ';">' + (attrLower.includes('pass') || attrLower.includes('secret') || attrLower.includes('key') ? '••••••••' : val) + '</span>';
+            html += '<button class="btn-copy-sm" onclick="event.stopPropagation(); openModal(\'' + s.key + '\')">👁️ Inspect</button>';
+            html += '</div>';
+          }
+
+          html += '</div>';
+        }
+
+        html += '</div>';
+        html += '</div>';
+      }
+
+      container.innerHTML = html;
+    }
+
+    function escapeJS(str) {
+      return (str || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '\\"');
+    }
+
+    function copyTextToClipboard(text) {
+      navigator.clipboard.writeText(text).then(() => {
+        alert('Copied to clipboard!');
+      }).catch(err => {
+        console.error('Copy failed:', err);
+      });
     }
 
     function openModal(key) {

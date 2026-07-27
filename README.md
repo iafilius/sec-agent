@@ -2,7 +2,7 @@
 
 [![Platform: macOS Only](https://img.shields.io/badge/Platform-macOS%20Only-blue.svg?style=flat-square&logo=apple)](https://www.apple.com/macos/)
 [![Security: Hardware Enclave](https://img.shields.io/badge/Security-Secure%20Enclave-red.svg?style=flat-square)](https://developer.apple.com/documentation/security)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg?style=flat-square)](LICENSE)
+[![License: GPLv3](https://img.shields.io/badge/License-GPLv3-blue.svg?style=flat-square)](LICENSE)
 
 `sec-agent` is a fully local, offline-first credentials manager designed to protect local developer secrets (such as API keys, database credentials, and cloud tokens) from session takeover vectors (e.g. hijacked terminal sessions, remote SSH shell attackers, or administrative screen monitoring).
 
@@ -103,6 +103,62 @@ make test
 
 > [!NOTE]
 > **Zero Name Collision**: The CLI binary executable is named **`sec-agent`** to avoid conflicts with Homebrew's existing Perl `sec` (Simple Event Correlator) package. If you do not have the Perl `sec` tool installed and prefer 3-letter typing, you can optionally add `alias sec=sec-agent` in your `~/.zshrc`.
+
+---
+
+## 🖥️ Hardened Web UI & Desktop Application (`SecAgent.app`)
+
+`sec-agent` features a local, zero-friction **Hardened Web UI** served directly from the local loopback (`http://127.0.0.1:9876`). It can be launched via the CLI (`sec-agent gui`) or directly from macOS Finder as a standalone native application bundle (**`/Applications/SecAgent.app`**).
+
+```
+┌───────────────────────────────────────────────────────────────────────────────┐
+│                     HARDENED WEB BROWSER GUI ARCHITECTURE                     │
+├───────────────────────────────────────────────────────────────────────────────┤
+│                                                                               │
+│   ┌────────────────────────────┐         ┌────────────────────────────────┐   │
+│   │ Primary Browser Tab        │         │ Secondary / External Tab       │   │
+│   │ (Active Session Heartbeat) │         │ (Hijack or Pasted URL)         │   │
+│   └──────────────┬─────────────┘         └───────────────┬────────────────┘   │
+│                  │                                       │                    │
+│           Authenticated                               403 Block               │
+│                  │                                       │                    │
+│                  ▼                                       ▼                    │
+│   ┌───────────────────────────────────────────────────────────────────────┐   │
+│   │ `sec-agent gui` HTTP Server (127.0.0.1:9876)                          │   │
+│   │  - Single-Tab Binding via BroadcastChannel & Heartbeat                │   │
+│   │  - Ephemeral RAM-Only Session Tokens (Zero Disk Storage)              │   │
+│   │  - Direct In-Process Touch ID Biometric Unlock                        │   │
+│   │  - Pre-Launch Listener Auto-Cleanup (Zero Stale Port Conflicts)       │   │
+│   └──────────────────────────────────┬────────────────────────────────────┘   │
+│                                      │                                        │
+│                                      ▼                                        │
+│                    ┌───────────────────────────────────┐                      │
+│                    │ macOS Secure Enclave + Keychain   │                      │
+│                    └───────────────────────────────────┘                      │
+└───────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 🛡️ Web UI Security Architecture
+
+1. **Single-Tab Session Binding (`BroadcastChannel` & Heartbeat)**:
+   The Web UI uses real-time browser `BroadcastChannel` signaling and active heartbeat monitoring. The server locks itself strictly to your primary active browser tab. Opening or pasting the Web UI URL into a secondary tab or external browser immediately returns **`403 Forbidden: Tab Lock Active`**, preventing cross-window token hijacking.
+2. **In-Browser Biometric Touch ID Unlock**:
+   Clicking **`🔓 Touch ID Unlock`** in the Web UI triggers macOS `LocalAuthentication` hardware prompts directly inside the browser session via `ensureUnlocked()`—eliminating the need to drop back to terminal CLI commands to authorize database access.
+3. **Zero Plaintext Tokens on Disk**:
+   Session tokens are stored exclusively in an in-memory map in RAM (`guiTokens[profile]`). No tokens, session cookies, or authorization credentials sit on your filesystem.
+4. **Logical Record Cards View vs. Flat List Switcher**:
+   Sub-attributes (such as `username`, `password`, `url`, `notes`) belonging to a shared path namespace (e.g. `router-ax3600-prod/xiamo_ax3600_darkstat/`) are automatically grouped into a single **Logical Record Card**. Users can toggle seamlessly between **📦 Grouped Records** mode (default) and **📄 Flat List** mode using the Web UI view mode switcher.
+5. **Pre-Launch Stale Process Termination**:
+   Launching `sec-agent gui` automatically sends a graceful pre-launch HTTP `/api/shutdown` call to clear any legacy background processes on port 9876, guaranteeing that you are always interacting with the latest compiled binary.
+
+### Launching the Web UI:
+```bash
+# Option 1: Launch via CLI (Opens browser automatically)
+sec-agent gui
+
+# Option 2: Open native macOS App Bundle
+open /Applications/SecAgent.app
+```
 
 ---
 
@@ -346,6 +402,6 @@ In enterprise environments, developer laptops are often enrolled in Mobile Devic
 
 ## 📄 License
 
-This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the **GNU General Public License v3.0 (GPLv3)** - see the [LICENSE](LICENSE) file for details.  
 Copyright (c) 2026 Arjan Filius.
 
