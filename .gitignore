@@ -16,5 +16,6 @@ sec_migration_test_bin2
 .DS_Store
 
 # Private corporate pitch / internal notes
+docs/internal/
 docs/corporate_pitch_communications.md
 *.private.md
