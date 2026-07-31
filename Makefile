@@ -93,8 +93,8 @@ sync:
 	rm -rf publish/cmd publish/docs publish/internal publish/backup publish/biometrics publish/config publish/crypto publish/daemon publish/keychain publish/store publish/main.go publish/main_test.go publish/migration_test.go publish/bin
 	@echo "=== Syncing core codebase and packages to publish/ ==="
 	cp -r cmd docs internal publish/
-	rm -f publish/docs/corporate_pitch_communications.md
-	cp go.mod go.sum Makefile LICENSE README.md publish/
+	rm -rf publish/docs/internal
+	cp -r Formula .github go.mod go.sum Makefile LICENSE README.md publish/
 	@echo "=== Running sanity build & tests inside publish/ ==="
 	cd publish && make build codesign && make sec-check && go test -v ./...
 

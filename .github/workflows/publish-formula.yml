@@ -1,0 +1,57 @@
+name: Update Homebrew Formula
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  update-formula:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Calculate SHA-256 and update central tap
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.event.release.tag_name }}
+        run: |
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "TAP_GITHUB_TOKEN secret not configured, skipping central tap sync."
+            exit 0
+          fi
+
+          VERSION="${TAG_NAME#v}"
+          URL="https://github.com/iafilius/sec-agent/releases/download/${TAG_NAME}/sec-agent_${TAG_NAME}_darwin_arm64.tar.gz"
+          SHA256=$(curl -sL "$URL" | sha256sum | awk '{print $1}')
+
+          git clone https://x-access-token:${TAP_TOKEN}@github.com/iafilius/homebrew-tap.git central-tap
+          
+          cat <<EOF > central-tap/Formula/sec-agent.rb
+          class SecAgent < Formula
+            desc "macOS Enclave-Bound Session Agent for Encrypted Secrets"
+            homepage "https://github.com/iafilius/sec-agent"
+            url "$URL"
+            version "$VERSION"
+            sha256 "$SHA256"
+            license "GPL-3.0-or-later"
+
+            depends_on :macos
+
+            def install
+              bin.install "sec-agent"
+              bin.install_symlink bin/"sec-agent" => "sec"
+            end
+
+            test do
+              assert_match "$VERSION", shell_output("#{bin}/sec-agent version")
+            end
+          end
+          EOF
+
+          cd central-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/sec-agent.rb
+          git commit -m "Update sec-agent formula to ${TAG_NAME}" || exit 0
+          git push origin main || git push origin master

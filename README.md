@@ -78,7 +78,8 @@ SEC-AGENT (Secure Enclave Model)
 ### Option 1: Install via Homebrew (RECOMMENDED for macOS)
 ```bash
 # Add Homebrew tap and install sec-agent
-brew install iafilius/tap/sec-agent
+brew tap iafilius/tap
+brew install sec-agent
 ```
 
 ### Option 2: Pre-built Signed Binary Release
