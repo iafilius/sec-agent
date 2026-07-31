@@ -341,6 +341,11 @@ func runGUIServer(activeProfile string, port int) {
 
 		dbs, _ := discoverDatabases()
 
+		tierStr := getProfileEnvTier(p)
+		if tierStr == "" {
+			tierStr = "dev"
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"profile":             p,
@@ -350,6 +355,7 @@ func runGUIServer(activeProfile string, port int) {
 			"database_path":       storePath,
 			"database_size":       sizeStr,
 			"database_modified":   modStr,
+			"profile_tier":        strings.ToUpper(tierStr),
 			"available_databases": dbs,
 			"error":               fmt.Sprintf("%v", err),
 		})
@@ -414,6 +420,9 @@ func runGUIServer(activeProfile string, port int) {
 		now := time.Now()
 		var list []SecretItem
 		for k, v := range resp.Secrets {
+			if strings.HasPrefix(k, "__") {
+				continue
+			}
 			lastAcc := "Never"
 			stale := false
 			if !v.LastAccessed.IsZero() {
@@ -775,6 +784,21 @@ const guiHTMLContent = `<!DOCTYPE html>
       color: var(--accent);
       background: rgba(255, 255, 255, 0.05);
     }
+    .btn-card-toggle {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--panel-border);
+      color: var(--text-muted);
+      cursor: pointer;
+      padding: 3px 8px;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      transition: all 0.2s ease;
+    }
+    .btn-card-toggle:hover {
+      color: var(--accent);
+      border-color: var(--accent);
+      background: rgba(56, 189, 248, 0.1);
+    }
 
     .table-container {
       background: var(--panel);
@@ -919,7 +943,7 @@ const guiHTMLContent = `<!DOCTYPE html>
   <main>
     <div class="db-banner">
       <div>
-        <div><b>Active Vault Database File:</b> <span id="bannerDbFile" style="font-family: var(--font-mono); color: var(--emerald);">secrets.enc</span></div>
+        <div><b>Active Vault Database File:</b> <span id="bannerDbFile" style="font-family: var(--font-mono); color: var(--emerald);">secrets.enc</span> <span id="bannerDbTier" class="badge badge-ver" style="margin-left: 8px;">DEV</span></div>
         <div id="bannerDbPath" class="db-path">/Users/arjan/.config/sec-agent/secrets.enc</div>
       </div>
       <div style="text-align: right; color: var(--text-muted); font-size: 0.85rem;">
@@ -946,6 +970,7 @@ const guiHTMLContent = `<!DOCTYPE html>
     <div class="search-bar-container">
       <input type="text" id="searchInput" class="search-input" placeholder="🔍 Search secret keys, domain records, or attributes..." oninput="filterSecrets()">
       <div class="view-mode-toggle">
+        <button id="btnRevealAll" class="btn-toggle" onclick="toggleGlobalReveal()">👁️ Reveal All</button>
         <button id="viewGroupedBtn" class="btn-toggle active" onclick="setViewMode('grouped')">📦 Grouped Records</button>
         <button id="viewFlatBtn" class="btn-toggle" onclick="setViewMode('flat')">📄 Flat List</button>
       </div>
@@ -1008,7 +1033,24 @@ const guiHTMLContent = `<!DOCTYPE html>
     let secretsData = [];
     let activeSecret = null;
     let revealed = false;
+    let globalRevealed = false;
+    let cardRevealedMap = {};
     let idleTimer = null;
+
+    function toggleGlobalReveal() {
+      globalRevealed = !globalRevealed;
+      const btn = document.getElementById('btnRevealAll');
+      if (btn) {
+        btn.innerHTML = globalRevealed ? '🙈 Mask All' : '👁️ Reveal All';
+        btn.className = globalRevealed ? 'btn-toggle active' : 'btn-toggle';
+      }
+      filterSecrets();
+    }
+
+    function toggleCardReveal(parent) {
+      cardRevealedMap[parent] = !cardRevealedMap[parent];
+      filterSecrets();
+    }
 
     function resetIdleTimer() {
       if (idleTimer) clearTimeout(idleTimer);
@@ -1059,6 +1101,7 @@ const guiHTMLContent = `<!DOCTYPE html>
         document.getElementById('bannerDbPath').innerText = data.database_path || '';
         document.getElementById('bannerDbSize').innerText = data.database_size || '0 B';
         document.getElementById('bannerDbModified').innerText = data.database_modified || '';
+        document.getElementById('bannerDbTier').innerText = data.profile_tier || 'DEV';
         if (data.version) {
           document.getElementById('guiVersionBadge').innerText = data.version;
         }
@@ -1231,10 +1274,15 @@ const guiHTMLContent = `<!DOCTYPE html>
 
       for (let i = 0; i < groups.length; i++) {
         let g = groups[i];
+        let isCardRevealed = globalRevealed || !!cardRevealedMap[g.parent];
+
         html += '<div class="record-card">';
         html += '<div class="record-card-header">';
         html += '<div class="record-card-title">🔐 ' + g.parent + '</div>';
+        html += '<div style="display: flex; gap: 8px; align-items: center;">';
+        html += '<button class="btn-card-toggle" onclick="event.stopPropagation(); toggleCardReveal(\'' + escapeJS(g.parent) + '\')">' + (isCardRevealed ? '🙈 Hide' : '👁️ Reveal') + '</button>';
         html += '<span class="badge badge-ver">' + g.fields.length + ' item' + (g.fields.length > 1 ? 's' : '') + '</span>';
+        html += '</div>';
         html += '</div>';
         html += '<div class="record-card-body">';
 
@@ -1242,21 +1290,27 @@ const guiHTMLContent = `<!DOCTYPE html>
           let f = g.fields[j];
           let s = f.secret;
           let attrLower = f.attr.toLowerCase();
-          let val = s.value || '••••••••';
+          let val = s.value || '';
+          let displayMasked = !isCardRevealed;
 
           html += '<div class="field-row">';
           html += '<div class="field-label">' + f.attr + '</div>';
 
           if (attrLower === 'url' || attrLower === 'uri' || attrLower === 'link' || (val.startsWith && (val.startsWith('http://') || val.startsWith('https://')))) {
-            html += '<div class="field-value-box">';
-            html += '<a href="' + val + '" target="_blank" style="color: var(--accent); text-decoration: none; word-break: break-all;">' + val + ' ↗</a>';
-            html += '<button class="btn-copy-sm" onclick="copyTextToClipboard(\'' + escapeJS(val) + '\')">📋</button>';
+            html += '<div class="field-value-box" onclick="openModal(\'' + s.key + '\')" style="cursor: pointer;">';
+            if (displayMasked) {
+              html += '<span style="color: var(--amber);">••••••••</span>';
+              html += '<button class="btn-copy-sm" onclick="event.stopPropagation(); openModal(\'' + s.key + '\')">👁️ Inspect</button>';
+            } else {
+              html += '<a href="' + val + '" target="_blank" onclick="event.stopPropagation();" style="color: var(--accent); text-decoration: none; word-break: break-all;">' + val + ' ↗</a>';
+              html += '<button class="btn-copy-sm" onclick="event.stopPropagation(); copyTextToClipboard(\'' + escapeJS(val) + '\')">📋</button>';
+            }
             html += '</div>';
           } else if (attrLower === 'notes' || attrLower === 'comment') {
-            html += '<div class="field-value-box" style="background: rgba(255,255,255,0.02); color: var(--text-muted); font-size: 0.85rem; font-family: var(--font-sans); white-space: pre-wrap;">' + val + '</div>';
+            html += '<div class="field-value-box" style="background: rgba(255,255,255,0.02); color: var(--text-muted); font-size: 0.85rem; font-family: var(--font-sans); white-space: pre-wrap;">' + (displayMasked ? '••••••••' : val) + '</div>';
           } else {
             html += '<div class="field-value-box" onclick="openModal(\'' + s.key + '\')" style="cursor: pointer;">';
-            html += '<span style="color: ' + (attrLower.includes('pass') || attrLower.includes('secret') || attrLower.includes('key') ? 'var(--amber)' : 'var(--text)') + ';">' + (attrLower.includes('pass') || attrLower.includes('secret') || attrLower.includes('key') ? '••••••••' : val) + '</span>';
+            html += '<span style="color: ' + (displayMasked ? 'var(--amber)' : 'var(--text)') + ';">' + (displayMasked ? '••••••••' : val) + '</span>';
             html += '<button class="btn-copy-sm" onclick="event.stopPropagation(); openModal(\'' + s.key + '\')">👁️ Inspect</button>';
             html += '</div>';
           }

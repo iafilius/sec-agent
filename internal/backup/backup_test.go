@@ -195,3 +195,103 @@ func TestFullMetadataKdbxReaderStream(t *testing.T) {
 	}
 }
 
+func TestKdbxMultiCycleRoundtripFidelity(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "sec-test-multicycle-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	kdbxPath1 := filepath.Join(tempDir, "cycle1.kdbx")
+	kdbxPath2 := filepath.Join(tempDir, "cycle2.kdbx")
+	password := "multicycle-master-pass"
+
+	now := time.Now().Truncate(time.Second)
+
+	originalSecrets := map[string]store.SecretEntry{
+		"cloud/aws/production_key": {
+			Value:        "AKIAIOSFODNN7EXAMPLE",
+			Comment:      "AWS IAM master access key for cloud deployment",
+			Created:      now.Add(-48 * time.Hour),
+			LastModified: now.Add(-2 * time.Hour),
+			Expires:      now.Add(365 * 24 * time.Hour),
+			Metadata: map[string]string{
+				"env":        "prod",
+				"account_id": "123456789012",
+				"region":     "eu-west-1",
+			},
+		},
+		"network/openwrt/router": {
+			Value:        "Dropbear_SSH_Pass_99!",
+			Comment:      "OpenWrt LuCI admin & SSH key",
+			Created:      now.Add(-100 * time.Hour),
+			LastModified: now.Add(-5 * time.Hour),
+			Metadata: map[string]string{
+				"UserName": "root",
+				"URL":      "https://192.168.1.1",
+			},
+		},
+		"database/postgres/cluster": {
+			Value:        "pG_s3cr3t_p@ssw0rd",
+			Comment:      "Sovereign PostgreSQL admin password",
+			Created:      now,
+			LastModified: now,
+			Metadata: map[string]string{
+				"port": "5432",
+			},
+		},
+	}
+
+	// 1. Export Original Secrets to Cycle 1 KDBX
+	if err := ExportToKdbx(kdbxPath1, password, originalSecrets); err != nil {
+		t.Fatalf("Cycle 1 ExportToKdbx failed: %v", err)
+	}
+
+	// 2. Import Cycle 1 KDBX
+	cycle1Secrets, err := ImportFromKdbx(kdbxPath1, password)
+	if err != nil {
+		t.Fatalf("Cycle 1 ImportFromKdbx failed: %v", err)
+	}
+
+	if len(cycle1Secrets) != len(originalSecrets) {
+		t.Fatalf("Cycle 1 size mismatch: expected %d, got %d", len(originalSecrets), len(cycle1Secrets))
+	}
+
+	// 3. Export Cycle 1 Imported Secrets to Cycle 2 KDBX (Roundtrip 2)
+	if err := ExportToKdbx(kdbxPath2, password, cycle1Secrets); err != nil {
+		t.Fatalf("Cycle 2 ExportToKdbx failed: %v", err)
+	}
+
+	// 4. Import Cycle 2 KDBX
+	cycle2Secrets, err := ImportFromKdbx(kdbxPath2, password)
+	if err != nil {
+		t.Fatalf("Cycle 2 ImportFromKdbx failed: %v", err)
+	}
+
+	// 5. Assert 100% Equivalence between Cycle 1 and Cycle 2
+	if len(cycle2Secrets) != len(cycle1Secrets) {
+		t.Fatalf("Cycle 2 size mismatch: expected %d, got %d", len(cycle1Secrets), len(cycle2Secrets))
+	}
+
+	for key, entry1 := range cycle1Secrets {
+		entry2, exists := cycle2Secrets[key]
+		if !exists {
+			t.Errorf("Cycle 2 missing key: %s", key)
+			continue
+		}
+		if entry2.Value != entry1.Value {
+			t.Errorf("[%s] Cycle 2 value mismatch: expected %q, got %q", key, entry1.Value, entry2.Value)
+		}
+		if entry2.Comment != entry1.Comment {
+			t.Errorf("[%s] Cycle 2 comment mismatch: expected %q, got %q", key, entry1.Comment, entry2.Comment)
+		}
+		if entry2.Created.Unix() != entry1.Created.Unix() {
+			t.Errorf("[%s] Cycle 2 created time mismatch: expected %v, got %v", key, entry1.Created, entry2.Created)
+		}
+		if !reflect.DeepEqual(entry1.Metadata, entry2.Metadata) {
+			t.Errorf("[%s] Cycle 2 metadata mismatch: expected %v, got %v", key, entry1.Metadata, entry2.Metadata)
+		}
+	}
+}
+
+
