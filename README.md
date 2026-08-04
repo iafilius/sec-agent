@@ -46,30 +46,50 @@ SEC-AGENT (Secure Enclave Model)
 
 `sec-agent` is built on a **secure-by-design** model to prevent credential leakage:
 
-```
-                    [ ATTACKER IN SSH SESSION ]
-                                 │
-                        Queries Secret Store
-                                 │
-                                 ▼
-               [ OS-LEVEL HARDWARE CRYPTO INTERCEPT ]
-                                 │
-                ┌─────────────────┴─────────────────┐
-                ▼ (Remote/Hijacked Connection)      ▼ (Physical Console)
-          [ Bypass Blocked ]                 [ Touch ID / PIN Prompt ]
-                │                                   │
-                ▼                                   ▼
-           [ ACCESS DENIED ]                   [ ACCESS GRANTED ]
+```text
+                                [ ATTACKER / SYSADMIN ]
+                                           │
+                        Resets macOS Password & Enrolls Fingerprint
+                                           │
+                                           ▼
+                    [ SECURE ENCLAVE BIOMETRIC HARDWARE TRAP ]
+                                           │
+                      kSecAccessControlBiometryCurrentSet Triggered
+                                           │
+                         ┌─────────────────┴─────────────────┐
+                         ▼                                   ▼
+          [ Slot 0 Master Key Destroyed ]       [ Touch ID Tap by Attacker ]
+                         │                                   │
+                         ▼                                   ▼
+             [ Hardware Key Erased ]                [ ACCESS DENIED ]
+                         │                                   │
+                         └─────────────────┬─────────────────┘
+                                           │
+                                           ▼
+                          [ RECOVERY ONLY VIA OFFLINE SEED ]
+                                           │
+                       User enters 24-word paper BIP39 seed
+                                           │
+                                           ▼
+                          [ ACCESS RESTORED FOR OWNER ]
 ```
 
-*   **Touch ID Physical Presence Gate**: Master encryption keys are stored inside the macOS Secure Enclave (`SecAccessControl`). Decrypting them requires hardware-backed physical user validation (Touch ID contact or Apple Watch click), instantly blocking remote attackers.
-*   **Cryptographic Session Isolation**: Initializing `sec open` generates a temporary random session token in the active shell context (`SEC_SESSION_TOKEN`). The background socket daemon enforces this token on all queries, preventing separate terminal processes or browser processes from querying your secrets.
-*   **Multi-Layer Session Hijacking Intercepts**: On every query request, the daemon walks the caller's process tree to block `sshd` shell parents. In addition, it inspects the client process's active environment variables using BSD `ps e -ww -p <PID>` to detect remote shell variables (`SSH_CLIENT`, `SSH_TTY`, `SSH_CONNECTION`). It also checks for active VNC graphical sharing (`AppleVNCServer`), Xcode remote debugging (`remotepairingd`), and native sharing (`screensharingd`). If detected, the daemon locks itself and wipes all memory cache keys instantly.
-*   **Disaster-Proof Write Transactions**: All filesystem mutations (database saves, dotenv migrations, KeePassXC exports) utilize atomic sibling renames. The payload is written to a temporary file, flushed to storage blocks via `fsync()`, and atomically replaced. Profile-isolated backups of the last 10 database snapshots are rotated automatically under `~/.config/sec-agent/backups/<profile>/`.
-*   **SMP & Parallel Concurrency Resilient**: Built with goroutine-per-connection Unix sockets and `sync.Mutex` in-memory guards. Fully resistant to race conditions under high-throughput parallel execution (e.g. `make -j8`, concurrent `terraform plan`, or multi-agent AI swarm workloads).
-*   **Hardened Runtime Isolation**: The daemon executes under macOS Hardened Runtime protections with no debugging entitlements. System Integrity Protection (SIP) blocks standard user-space debuggers and memory readers (including root UID 0) from inspecting its memory.
-*   **Post-Quantum Cryptography (PQC) & Decoupled Architecture**: Database payloads (`secrets.enc`) are encrypted at rest with AES-256-GCM (offering 128-bit post-quantum security against Grover's algorithm). Exposing the encrypted file to local MDM scanners or IT backups yields zero usable data. Furthermore, the backend crypto engine (`internal/crypto/`) is strictly decoupled from the CLI/IPC layer, ensuring future NIST PQC algorithm upgrades (e.g. ML-KEM/Kyber) require zero changes to CLI flags, shell wrappers, or AI Agent Skills.
-*   **Offline First**: No cloud synchronization, no third-party APIs, and zero SaaS dependency.
+* **v2.0 Dual-Slot Vault Envelope**: `sec-agent` utilizes a LUKS-style dual key-slot envelope (`VaultEnvelope`):
+  * **Slot 0 (Daily Biometric Slot)**: Master key protected in macOS Keychain under `kSecAccessControlBiometryCurrentSet`. Unlocks instantly with a Touch ID tap (zero passwords typed).
+  * **Slot 1 (Offline Recovery Slot)**: Master key encrypted with AES-256-GCM using an Argon2id key derived from an offline 24-word BIP39 seed phrase (CPU/memory-hard KDF: $m=64\text{MB}, t=3, p=4$).
+* **Corporate Admin & Fingerprint Tamper Defense**: In enterprise environments where a system administrator (or root attacker) resets the macOS account password and enrolls a new fingerprint in System Settings:
+  * The Secure Enclave hardware detects the biometric enrollment database modification.
+  * The Secure Enclave **instantly and permanently purges `Slot 0`** from hardware storage.
+  * When the attacker taps the sensor with their new fingerprint, the key no longer exists in hardware (`errSecItemNotFound`).
+  * Commands like `sec migrate-v2 --force` fail and skip locked vaults because the attacker cannot decrypt the active vault payload without the original key or the physical 24-word paper seed.
+* **Touch ID Physical Presence Gate**: Decrypting daily session keys requires hardware-backed physical user validation (Touch ID contact or Apple Watch click), instantly blocking remote attackers and headless background scripts.
+* **Cryptographic Session Isolation**: Initializing `sec open` generates a temporary random session token in the active shell context (`SEC_SESSION_TOKEN`). The background socket daemon enforces this token on all queries, preventing separate terminal processes or browser processes from querying your secrets.
+* **Multi-Layer Session Hijacking Intercepts**: On every query request, the daemon walks the caller's process tree to block `sshd` shell parents. In addition, it inspects the client process's active environment variables using BSD `ps e -ww -p <PID>` to detect remote shell variables (`SSH_CLIENT`, `SSH_TTY`, `SSH_CONNECTION`). It also checks for active VNC graphical sharing (`AppleVNCServer`), Xcode remote debugging (`remotepairingd`), and native sharing (`screensharingd`). If detected, the daemon locks itself and wipes all memory cache keys instantly.
+* **Disaster-Proof Write Transactions**: All filesystem mutations (database saves, dotenv migrations, KeePassXC exports) utilize atomic sibling renames. The payload is written to a temporary file, flushed to storage blocks via `fsync()`, and atomically replaced. Profile-isolated backups of the last 10 database snapshots are rotated automatically under `~/.config/sec-agent/backups/<profile>/`.
+* **SMP & Parallel Concurrency Resilient**: Built with goroutine-per-connection Unix sockets and `sync.Mutex` in-memory guards. Fully resistant to race conditions under high-throughput parallel execution (e.g. `make -j8`, concurrent `terraform plan`, or multi-agent AI swarm workloads).
+* **Hardened Runtime Isolation**: The daemon executes under macOS Hardened Runtime protections with no debugging entitlements. System Integrity Protection (SIP) blocks standard user-space debuggers and memory readers (including root UID 0) from inspecting its memory.
+* **Post-Quantum Cryptography (PQC) & Decoupled Architecture**: Database payloads (`secrets.enc`) are encrypted at rest with AES-256-GCM (offering 128-bit post-quantum security against Grover's algorithm). Exposing the encrypted file to local MDM scanners or IT backups yields zero usable data. Furthermore, the backend crypto engine (`internal/crypto/`) is strictly decoupled from the CLI/IPC layer, ensuring future NIST PQC algorithm upgrades (e.g. ML-KEM/Kyber) require zero changes to CLI flags, shell wrappers, or AI Agent Skills.
+* **Offline First**: No cloud synchronization, no third-party APIs, and zero SaaS dependency.
 
 ---
 
