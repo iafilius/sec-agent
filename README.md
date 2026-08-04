@@ -421,6 +421,15 @@ In enterprise environments, developer laptops are often enrolled in Mobile Devic
 
 ---
 
+## 🗺️ Roadmap & TODO Suggestions
+
+The following architectural enhancements are tracked for future evaluation:
+
+* **Legacy Database Vacuum & Cleanup (`sec cleanup`)**: An automated cleanup utility to scan `~/.config/sec-agent/` and `~/.config/sec-agent/backups/`, verify active v2.0 Dual-Slot vault health, and safely archive or purge un-migrated v1.0 databases and old timestamped backup snapshots.
+* **Hardware Token Recovery Factor (YubiKey / FIDO2 / CTAP2)**: An optional hardware recovery slot (`Slot 2`) enabling YubiKey HMAC-SHA1 challenge-response or FIDO2 `hmac-secret` hardware token taps as an alternative or secondary recovery factor alongside the 24-word Argon2id paper seed phrase.
+
+---
+
 ## 📄 License
 
 This project is licensed under the **GNU General Public License v3.0 (GPLv3)** - see the [LICENSE](LICENSE) file for details.  
