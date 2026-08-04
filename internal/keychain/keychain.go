@@ -7,7 +7,7 @@ package keychain
 #include <stdlib.h>
 #include <string.h>
 
-// Helper to set a generic password with ad-hoc safe permissions
+// Helper to set a generic password with ad-hoc safe permissions (BiometryAny - legacy/v1.0)
 int set_secret(const char* service, const char* account, const unsigned char* secret, int secret_len) {
     CFStringRef cfService = CFStringCreateWithCString(kCFAllocatorDefault, service, kCFStringEncodingUTF8);
     CFStringRef cfAccount = CFStringCreateWithCString(kCFAllocatorDefault, account, kCFStringEncodingUTF8);
@@ -52,7 +52,57 @@ int set_secret(const char* service, const char* account, const unsigned char* se
     return (int)status;
 }
 
-// Helper to retrieve a generic password
+// Helper to set a generic password protected by BiometryCurrentSet (Slot 0 / v2.0).
+// The Secure Enclave invalidates this item if any fingerprint is added or removed.
+int set_secret_current_set(const char* service, const char* account, const unsigned char* secret, int secret_len) {
+    CFStringRef cfService = CFStringCreateWithCString(kCFAllocatorDefault, service, kCFStringEncodingUTF8);
+    CFStringRef cfAccount = CFStringCreateWithCString(kCFAllocatorDefault, account, kCFStringEncodingUTF8);
+    CFDataRef cfSecret = CFDataCreate(kCFAllocatorDefault, secret, secret_len);
+
+    // Delete existing item to avoid duplicates
+    CFMutableDictionaryRef delQuery = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFDictionarySetValue(delQuery, kSecClass, kSecClassGenericPassword);
+    CFDictionarySetValue(delQuery, kSecAttrService, cfService);
+    CFDictionarySetValue(delQuery, kSecAttrAccount, cfAccount);
+    SecItemDelete(delQuery);
+
+    CFMutableDictionaryRef query = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFDictionarySetValue(query, kSecClass, kSecClassGenericPassword);
+    CFDictionarySetValue(query, kSecAttrService, cfService);
+    CFDictionarySetValue(query, kSecAttrAccount, cfAccount);
+    CFDictionarySetValue(query, kSecValueData, cfSecret);
+
+    CFErrorRef error = NULL;
+    SecAccessControlRef access = SecAccessControlCreateWithFlags(
+        kCFAllocatorDefault,
+        kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+        kSecAccessControlBiometryCurrentSet | kSecAccessControlUserPresence,
+        &error
+    );
+    if (access != NULL) {
+        CFDictionarySetValue(query, kSecAttrAccessControl, access);
+        CFRelease(access);
+    } else {
+        // Fallback: at minimum require device unlock (should not happen on modern macOS)
+        CFDictionarySetValue(query, kSecAttrAccessible, kSecAttrAccessibleWhenUnlockedThisDeviceOnly);
+    }
+
+    OSStatus status = SecItemAdd(query, NULL);
+    if (status == errSecDuplicateItem) {
+        SecItemDelete(delQuery);
+        status = SecItemAdd(query, NULL);
+    }
+
+    CFRelease(delQuery);
+    CFRelease(cfService);
+    CFRelease(cfAccount);
+    CFRelease(cfSecret);
+    CFRelease(query);
+
+    return (int)status;
+}
+
+
 int get_secret(const char* service, const char* account, unsigned char** out_bytes, int* out_len) {
     CFStringRef cfService = CFStringCreateWithCString(kCFAllocatorDefault, service, kCFStringEncodingUTF8);
     CFStringRef cfAccount = CFStringCreateWithCString(kCFAllocatorDefault, account, kCFStringEncodingUTF8);
@@ -247,4 +297,26 @@ func List(service string) ([]string, error) {
 	}
 
 	return accounts, nil
+}
+
+// SetCurrentSet stores a secret protected by kSecAccessControlBiometryCurrentSet.
+// Unlike Set (which uses BiometryAny), this item is invalidated by the Secure Enclave
+// the moment any fingerprint is added or removed in macOS System Settings.
+// This is the Slot 0 entry point for the v2.0 Dual-Slot architecture.
+func SetCurrentSet(service, account string, secret []byte) error {
+	cService := C.CString(service)
+	cAccount := C.CString(account)
+	defer C.free(unsafe.Pointer(cService))
+	defer C.free(unsafe.Pointer(cAccount))
+
+	var secretPtr *C.uchar
+	if len(secret) > 0 {
+		secretPtr = (*C.uchar)(unsafe.Pointer(&secret[0]))
+	}
+
+	status := C.set_secret_current_set(cService, cAccount, secretPtr, C.int(len(secret)))
+	if status != ErrSecSuccess {
+		return fmt.Errorf("keychain SetCurrentSet failed with OSStatus %d", status)
+	}
+	return nil
 }

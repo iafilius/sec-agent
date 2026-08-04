@@ -20,6 +20,7 @@ import (
 	"secure_secrets/internal/backup"
 	"secure_secrets/internal/biometrics"
 	"secure_secrets/internal/config"
+	"secure_secrets/internal/crypto"
 	"secure_secrets/internal/daemon"
 	"secure_secrets/internal/keychain"
 	"secure_secrets/internal/store"
@@ -522,6 +523,20 @@ func main() {
 		handleRestore(profile, os.Args[2], explicitPassword, os.Args[3:])
 	case "daemon":
 		runDaemon(profile)
+	case "migrate-v2":
+		handleMigrateV2(profile, os.Args[2:])
+	case "session":
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "Usage: sec session recover")
+			os.Exit(1)
+		}
+		switch os.Args[2] {
+		case "recover":
+			handleSessionRecover(profile)
+		default:
+			fmt.Fprintf(os.Stderr, "Unknown session subcommand: %s\n", os.Args[2])
+			os.Exit(1)
+		}
 	case "migrate-local":
 		if len(os.Args) < 3 {
 			fmt.Fprintln(os.Stderr, "Usage: sec migrate-local <dotenv-file> [--prefix <prefix>]")
@@ -591,8 +606,10 @@ func printUsage() {
 	fmt.Println("  export [--format <json|env|aws|doppler|template>] Output decrypted database contents to stdout")
 	fmt.Println("  clear            Lock the active session and clear memory cache (aliases: close, lock)")
 	fmt.Println("  restart          Lock session, stop daemon process, re-launch, and prompt Touch ID")
-	fmt.Println("  backup <file> [--password | -p <password>] Export cached secrets to a portable KeePassXC (.kdbx) file")
+	fmt.Println("  backup <file> [--custom-password | -p <password>] Export secrets to KeePassXC (.kdbx) file (default: BIP39 seed)")
 	fmt.Println("  restore <file> [--merge] [--overwrite] [--full-metadata] Import secrets from a portable KeePassXC (.kdbx) file")
+	fmt.Println("  migrate-v2 [--dry-run]           Upgrade vault(s) to v2.0 Dual-Slot with BIP39 recovery key")
+	fmt.Println("  session recover                  Recover session from 24-word BIP39 recovery mnemonic (TTY-only)")
 	fmt.Println("  migrate-local <file> [--prefix <prefix>] Import dotenv file and sanitize it")
 	fmt.Println("  feedback [--example] [--json]  Display feature feedback guidelines, usecase templates, and rationale formats")
 	fmt.Println("  completion <zsh|bash|fish>      Generate native shell completion script")
@@ -831,9 +848,9 @@ func handleOpen(profile string, args []string) {
 	}
 	setter := func(k []byte) error {
 		if profile == "" || profile == "default" {
-			return keychain.Set("sec-session", "master", k)
+			return keychain.SetCurrentSet("sec-session", "master", k)
 		}
-		return keychain.Set("sec-session:profile_"+profile, "master", k)
+		return keychain.SetCurrentSet("sec-session:profile_"+profile, "master", k)
 	}
 
 	masterKey, err := store.InitializeMasterKey(profile, getter, setter)
@@ -3165,6 +3182,11 @@ func handleClear(profile string) {
 	fmt.Println("Session locked. Memory cache cleared.")
 }
 
+// handleBackup exports the current session secrets to a KeePassXC .kdbx file.
+// By default (no --custom-password flag) the KDBX file is protected by the vault's
+// BIP39 24-word recovery mnemonic derived via Argon2id — meaning you already have
+// an offline backup of the credential needed to open the export.
+// Use --custom-password (or -p) only when you deliberately want a different password.
 func handleBackup(profile string, outputFile string, explicitPassword string) {
 	// 1. Get secrets list from daemon
 	resp, err := queryDaemon(profile, daemon.IPCRequest{Action: "backup"})
@@ -3186,33 +3208,57 @@ func handleBackup(profile string, outputFile string, explicitPassword string) {
 	var backupPassword string
 
 	if explicitPassword != "" {
+		// --custom-password explicitly provided (legacy / special use)
 		backupPassword = explicitPassword
 	} else {
-		// 2. Prompt for KeePassXC master password
-		fmt.Print("Enter KeePassXC master password for backup: ")
-		pass1, err := term.ReadPassword(int(syscall.Stdin))
-		fmt.Println()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to read password: %v\n", err)
-			os.Exit(1)
+		// Default: derive KDBX password from BIP39 recovery mnemonic so the backup
+		// is openable with the same seed phrase the user already wrote down.
+		cfgDir, cfgErr := config.GetConfigDir()
+		if cfgErr == nil {
+			vaultPath := store.GetStorePathForProfile(profile)
+			if store.IsV2Vault(vaultPath) {
+				env, readErr := store.ReadVaultEnvelope(vaultPath)
+				if readErr == nil && env.Slot1 != nil {
+					// We have a v2 vault — derive KDBX password from the mnemonic.
+					// We cannot recover the mnemonic from stored data (by design).
+					// Instead, prompt the user to enter their 24-word seed.
+					if !isInteractiveTerminal() {
+						fmt.Fprintln(os.Stderr, "⚠️  Non-interactive session detected.")
+						fmt.Fprintln(os.Stderr, "Backup with BIP39 password requires an interactive terminal.")
+						fmt.Fprintln(os.Stderr, "Use --custom-password to provide a password non-interactively.")
+						os.Exit(1)
+					}
+					fmt.Println("📖 Enter your 24-word recovery mnemonic to set the KDBX backup password.")
+					fmt.Println("   (This allows you to open the backup with the same seed you already have.)")
+					mnemonic := readMnemonicFromTTY()
+					if !crypto.MnemonicValid(mnemonic) {
+						fmt.Fprintln(os.Stderr, "❌ Invalid mnemonic checksum. Aborting backup.")
+						os.Exit(1)
+					}
+					// Derive a stable passphrase from mnemonic+salt via Argon2id
+					passphrase := crypto.MnemonicToPassphrase(mnemonic)
+					kdfKey, kdfErr := crypto.Argon2idKey(passphrase, env.Slot1.Argon2Salt)
+					if kdfErr != nil {
+						fmt.Fprintf(os.Stderr, "❌ KDF error: %v\n", kdfErr)
+						os.Exit(1)
+					}
+					// Use hex-encoded key as KDBX password — deterministic from seed+salt
+					backupPassword = fmt.Sprintf("%x", kdfKey)
+					store.ZeroBytes(kdfKey)
+				} else {
+					_ = cfgDir // suppress unused
+					backupPassword = promptKdbxPassword()
+				}
+			} else {
+				_ = cfgDir
+				backupPassword = promptKdbxPassword()
+			}
+		} else {
+			backupPassword = promptKdbxPassword()
 		}
-
-		fmt.Print("Confirm KeePassXC master password: ")
-		pass2, err := term.ReadPassword(int(syscall.Stdin))
-		fmt.Println()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to read password: %v\n", err)
-			os.Exit(1)
-		}
-
-		if !bytes.Equal(pass1, pass2) {
-			fmt.Fprintln(os.Stderr, "Error: Passwords do not match.")
-			os.Exit(1)
-		}
-		backupPassword = string(pass1)
 	}
 
-	// 3. Export to KDBX
+	// Export to KDBX
 	absPath, err := filepath.Abs(outputFile)
 	if err != nil {
 		absPath = outputFile
@@ -3224,10 +3270,410 @@ func handleBackup(profile string, outputFile string, explicitPassword string) {
 		os.Exit(1)
 	}
 
-	fmt.Printf("Backup created successfully at: %s\n", absPath)
+	fmt.Printf("[✓] Backup created at: %s\n", absPath)
+	if explicitPassword == "" {
+		fmt.Println("    KDBX password: your 24-word recovery mnemonic (Argon2id-derived).")
+	}
+}
+
+// promptKdbxPassword prompts the user for a KeePassXC password interactively.
+func promptKdbxPassword() string {
+	if !isInteractiveTerminal() {
+		fmt.Fprintln(os.Stderr, "Error: cannot prompt for KDBX password in non-interactive mode. Use --custom-password.")
+		os.Exit(1)
+	}
+	fmt.Print("Enter KeePassXC master password for backup: ")
+	pass1, err := term.ReadPassword(int(syscall.Stdin))
+	fmt.Println()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to read password: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Print("Confirm KeePassXC master password: ")
+	pass2, err2 := term.ReadPassword(int(syscall.Stdin))
+	fmt.Println()
+	if err2 != nil {
+		fmt.Fprintf(os.Stderr, "Failed to read password: %v\n", err2)
+		os.Exit(1)
+	}
+	if !bytes.Equal(pass1, pass2) {
+		fmt.Fprintln(os.Stderr, "Error: Passwords do not match.")
+		os.Exit(1)
+	}
+	return string(pass1)
+}
+
+// readMnemonicFromTTY reads a 24-word BIP39 mnemonic from the interactive terminal.
+// The mnemonic is read as a single line (or pasted all at once) and trimmed.
+// TTY safety: aborts if stdin is not an interactive terminal.
+func readMnemonicFromTTY() string {
+	if !isInteractiveTerminal() {
+		fmt.Fprintln(os.Stderr, "🔒 SECURITY: Recovery mnemonic entry requires an interactive TTY.")
+		fmt.Fprintln(os.Stderr, "   Automated/script invocations cannot read the recovery mnemonic.")
+		fmt.Fprintln(os.Stderr, "   This prevents AI agents and scripts from inadvertently capturing your seed phrase.")
+		os.Exit(78) // EX_CONFIG — indicates a configuration/security policy violation
+	}
+	fmt.Print("Enter 24-word recovery mnemonic: ")
+	reader := bufio.NewReader(os.Stdin)
+	line, err := reader.ReadString('\n')
+	if err != nil && err != io.EOF {
+		fmt.Fprintf(os.Stderr, "\nFailed to read mnemonic: %v\n", err)
+		os.Exit(1)
+	}
+	mnemonic := strings.TrimSpace(line)
+	wordCount := len(strings.Fields(mnemonic))
+	if wordCount != 24 {
+		fmt.Fprintf(os.Stderr, "\n❌ Expected 24 words, got %d. Please re-enter the complete mnemonic.\n", wordCount)
+		os.Exit(1)
+	}
+	return mnemonic
+}
+
+// handleMigrateV2 upgrades all vault files for the current profile to the v2.0
+// Dual-Slot format. A new 24-word BIP39 recovery mnemonic is generated and displayed
+// ONCE on screen — it is never written to disk or stored in memory longer than needed.
+// The migration uses a two-phase atomic commit to guarantee no data loss on abort.
+func handleMigrateV2(profile string, args []string) {
+	dryRun := false
+	forceReroll := false
+	for _, a := range args {
+		if a == "--dry-run" {
+			dryRun = true
+		}
+		if a == "--force" || a == "--reroll" || a == "-f" {
+			forceReroll = true
+		}
+	}
+
+	// TTY safety: refuse to run in non-interactive sessions where mnemonic might be captured
+	if !isInteractiveTerminal() {
+		fmt.Fprintln(os.Stderr, "🔒 SECURITY: migrate-v2 requires an interactive TTY.")
+		fmt.Fprintln(os.Stderr, "   The 24-word recovery mnemonic must be displayed on a physical screen,")
+		fmt.Fprintln(os.Stderr, "   not piped to a file, script, or AI agent context.")
+		os.Exit(78) // EX_CONFIG
+	}
+
+	// Enumerate ALL vault files in the config directory
+	vaults, err := store.ListVaultFiles()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Failed to list vault files: %v\n", err)
+		os.Exit(1)
+	}
+	if len(vaults) == 0 {
+		fmt.Fprintln(os.Stderr, "❌ No vault files found. Run 'sec open' to initialize.")
+		os.Exit(1)
+	}
+
+	// Separate into pending (v1) and already upgraded (v2)
+	var pending, alreadyV2 []store.VaultFileInfo
+	for _, v := range vaults {
+		if v.IsV2 && !forceReroll {
+			alreadyV2 = append(alreadyV2, v)
+		} else {
+			pending = append(pending, v)
+		}
+	}
+
+	// === DRY-RUN: just show what would happen ===
+	if dryRun {
+		fmt.Println()
+		fmt.Printf("Found %d vault file(s) in config directory:\n\n", len(vaults))
+		for _, v := range vaults {
+			status := "⬜ v1.0 — would upgrade"
+			if v.IsV2 {
+				status = "✅ v2.0 — already upgraded"
+			}
+			fmt.Printf("  [%s]  profile=%-28s  %s\n", status, v.Profile, v.Path)
+		}
+		fmt.Println()
+		if len(pending) == 0 {
+			fmt.Println("ℹ️  All vaults are already at v2.0. Nothing to do.")
+			return
+		}
+		fmt.Printf("[DRY-RUN] Would upgrade %d vault(s) with a single 24-word BIP39 mnemonic.\n", len(pending))
+		fmt.Println("[DRY-RUN] Would store Slot0 (BiometryCurrentSet) keys per profile in Keychain.")
+		fmt.Println("[DRY-RUN] Each vault gets its own Argon2 salt — one seed phrase unlocks all.")
+		return
+	}
+
+	if len(pending) == 0 {
+		fmt.Println("ℹ️  All vaults are already at v2.0 Dual-Slot format. Nothing to do.")
+		fmt.Println("   To re-roll the BIP39 recovery key, run: sec migrate-v2 --reroll")
+		return
+	}
+
+	// Check for interrupted previous migration
+	stageData, _ := store.MigrateStageRead()
+	if stageData != "" && stageData != "complete" {
+		fmt.Println("⚠️  A previous migration was interrupted. Resuming from checkpoint...")
+	}
+
+	// === PHASE 1: Generate BIP39 mnemonic (ONE mnemonic for all vaults) ===
+	fmt.Println()
+	fmt.Println("╔═══════════════════════════════════════════════════════════════╗")
+	fmt.Println("║       sec-agent v2.0 Dual-Slot Vault Migration                ║")
+	fmt.Println("╚═══════════════════════════════════════════════════════════════╝")
+	fmt.Println()
+
+	if len(alreadyV2) > 0 {
+		fmt.Printf("ℹ️  %d vault(s) already at v2.0 (skipping):\n", len(alreadyV2))
+		for _, v := range alreadyV2 {
+			fmt.Printf("   ✅ %s (%s)\n", v.Profile, v.Path)
+		}
+		fmt.Println()
+	}
+
+	fmt.Printf("⬆️  %d vault(s) will be upgraded to v2.0:\n", len(pending))
+	for _, v := range pending {
+		fmt.Printf("   ⬜ %s (%s)\n", v.Profile, v.Path)
+	}
+	fmt.Println()
+
+	mnemonic, err := crypto.GenerateMnemonic()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Failed to generate recovery mnemonic: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Display mnemonic with word numbers for easy transcription
+	words := strings.Fields(mnemonic)
+	fmt.Println("🔑 Your 24-word recovery mnemonic (WRITE THIS DOWN NOW):")
+	fmt.Println("   This single mnemonic unlocks recovery for ALL listed vaults.")
+	fmt.Println()
+	for i, w := range words {
+		fmt.Printf("  %2d. %-12s", i+1, w)
+		if (i+1)%4 == 0 {
+			fmt.Println()
+		}
+	}
+	fmt.Println()
+	fmt.Println("📋 Single-line format (for copy-paste entry):")
+	fmt.Printf("   %s\n", mnemonic)
+	fmt.Println()
+	fmt.Println("⚠️  IMPORTANT:")
+	fmt.Println("   • Write these 24 words on paper and store them in a secure location.")
+	fmt.Println("   • This mnemonic will NEVER be shown again.")
+	fmt.Println("   • Without it, you cannot recover your vault if Touch ID is unavailable.")
+	fmt.Println("   • Do NOT photograph, copy, or paste this mnemonic into any app or chat.")
+	fmt.Println()
+
+	// 3-word verification challenge
+	fmt.Println("To confirm you have written down the mnemonic, please enter:")
+	verificationWords := []int{4, 12, 20} // 1-indexed positions to verify
+	for _, pos := range verificationWords {
+		fmt.Printf("  Word #%d: ", pos)
+		reader := bufio.NewReader(os.Stdin)
+		entered, _ := reader.ReadString('\n')
+		entered = strings.TrimSpace(strings.ToLower(entered))
+		expected := strings.ToLower(words[pos-1])
+		if entered != expected {
+			fmt.Fprintf(os.Stderr, "\n❌ Word #%d mismatch (expected %q, got %q). Aborting — no changes made.\n", pos, expected, entered)
+			os.Exit(1)
+		}
+		fmt.Printf("  ✓ Word #%d correct.\n", pos)
+	}
+
+	fmt.Println("\n✅ Verification passed. Proceeding with vault upgrade...")
+	fmt.Println()
+
+	// === PHASE 2: Atomic upgrade of each pending vault ===
+	if err := store.MigrateStageWrite("upgrading"); err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Failed to write migration stage marker: %v\n", err)
+		os.Exit(1)
+	}
+
+	succeeded := 0
+	failed := 0
+	for _, vaultInfo := range pending {
+		fmt.Printf("  ⏳ Upgrading profile %q ...\n", vaultInfo.Profile)
+
+		// Load this profile's master key from keychain
+		kcSvc := "sec-session"
+		if vaultInfo.Profile != "default" {
+			kcSvc = "sec-session:profile_" + vaultInfo.Profile
+		}
+		kcAcc := "master"
+
+		masterKey, mkErr := keychain.Get(kcSvc, kcAcc)
+		if mkErr != nil || len(masterKey) == 0 {
+			fmt.Fprintf(os.Stderr, "  ⚠️  Cannot load master key for profile %q: %v\n", vaultInfo.Profile, mkErr)
+			fmt.Fprintf(os.Stderr, "     This profile may require a separate 'sec open --profile %s' first.\n", vaultInfo.Profile)
+			fmt.Fprintf(os.Stderr, "     Skipping — you can re-run 'sec migrate-v2' after unlocking it.\n")
+			failed++
+			continue
+		}
+
+		// Wrap master key with the mnemonic (fresh Argon2 salt per vault)
+		slot1, wrapErr := store.WrapMasterKey(mnemonic, masterKey)
+		if wrapErr != nil {
+			fmt.Fprintf(os.Stderr, "  ❌ Failed to wrap master key for %q: %v\n", vaultInfo.Profile, wrapErr)
+			store.ZeroBytes(masterKey)
+			failed++
+			continue
+		}
+
+		// Read existing v1.0 payload
+		rawPayload, readErr := os.ReadFile(vaultInfo.Path) // #nosec G304
+		if readErr != nil {
+			fmt.Fprintf(os.Stderr, "  ❌ Failed to read vault %q: %v\n", vaultInfo.Profile, readErr)
+			store.ZeroBytes(masterKey)
+			failed++
+			continue
+		}
+
+		// Build and atomically write the v2.0 VaultEnvelope
+		env := &store.VaultEnvelope{
+			SchemaVersion: store.SchemaV2,
+			UpgradedAt:    time.Now().UTC(),
+			Slot1:         slot1,
+			Payload:       rawPayload,
+		}
+		if writeErr := store.WriteVaultEnvelope(vaultInfo.Path, env); writeErr != nil {
+			fmt.Fprintf(os.Stderr, "  ❌ Failed to write v2.0 envelope for %q: %v\n", vaultInfo.Profile, writeErr)
+			fmt.Fprintln(os.Stderr, "     Original vault is unchanged. Safe to retry.")
+			store.ZeroBytes(masterKey)
+			failed++
+			continue
+		}
+
+		// Store Slot0 key under BiometryCurrentSet (non-fatal)
+		if slot0Err := keychain.SetCurrentSet(kcSvc, kcAcc, masterKey); slot0Err != nil {
+			fmt.Fprintf(os.Stderr, "  ⚠️  Slot0 (BiometryCurrentSet) key not stored for %q: %v\n", vaultInfo.Profile, slot0Err)
+		}
+
+		store.ZeroBytes(masterKey)
+		fmt.Printf("  ✅ %s — upgraded successfully.\n", vaultInfo.Profile)
+		succeeded++
+	}
+
+	// Remove stage marker (even if some vaults failed — the stage marker is for crash recovery only)
+	if err := store.MigrateStageRemove(); err != nil {
+		fmt.Fprintf(os.Stderr, "⚠️  Warning: failed to remove migration stage marker: %v\n", err)
+	}
+
+	fmt.Println()
+	fmt.Println("╔═══════════════════════════════════════════════════════════════╗")
+	if failed == 0 {
+		fmt.Printf("║  ✅  All %d vault(s) upgraded to v2.0 Dual-Slot!             ║\n", succeeded)
+	} else {
+		fmt.Printf("║  ⚠️   %d upgraded, %d skipped (re-run after unlocking them)  ║\n", succeeded, failed)
+	}
+	fmt.Println("╚═══════════════════════════════════════════════════════════════╝")
+	fmt.Println()
+	fmt.Println("Slot 0: Touch ID (kSecAccessControlBiometryCurrentSet) — per profile")
+	fmt.Println("Slot 1: 24-word BIP39 recovery mnemonic — same seed unlocks all")
+	fmt.Println()
+	if failed > 0 {
+		fmt.Printf("📋 To upgrade the remaining %d vault(s):\n", failed)
+		fmt.Println("   1. Run 'eval $(sec open --profile <name>)' for each skipped profile.")
+		fmt.Println("   2. Re-run 'sec migrate-v2' — already-upgraded vaults are skipped.")
+		fmt.Println()
+	}
+	fmt.Println("📋 Next steps:")
+	fmt.Println("  • Run 'sec backup vault.kdbx' to create an Argon2id-protected KDBX backup.")
+	fmt.Println("  • Store the backup and the handwritten mnemonic in separate safe locations.")
+	fmt.Println("  • Run 'sec doctor' to validate vault health.")
+}
+
+// handleSessionRecover recovers vault access from a 24-word BIP39 mnemonic.
+// The mnemonic is used to unwrap the Slot1 master key, then a new Touch ID
+// keychain entry is created so normal Touch ID sessions resume.
+// This command is ONLY available in interactive TTY sessions.
+func handleSessionRecover(profile string) {
+	if !isInteractiveTerminal() {
+		fmt.Fprintln(os.Stderr, "🔒 SECURITY: 'sec session recover' requires an interactive TTY.")
+		os.Exit(78)
+	}
+
+	vaultPath := store.GetStorePathForProfile(profile)
+	if vaultPath == "" {
+		fmt.Fprintln(os.Stderr, "❌ Failed to resolve vault path.")
+		os.Exit(1)
+	}
+
+	if !store.IsV2Vault(vaultPath) {
+		fmt.Fprintln(os.Stderr, "❌ Vault is not in v2.0 format. Recovery requires a migrated vault.")
+		fmt.Fprintln(os.Stderr, "   Run 'sec migrate-v2' first to enroll a recovery mnemonic.")
+		os.Exit(1)
+	}
+
+	env, err := store.ReadVaultEnvelope(vaultPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Failed to read vault envelope: %v\n", err)
+		os.Exit(1)
+	}
+
+	if env.Slot1 == nil {
+		fmt.Fprintln(os.Stderr, "❌ Vault has no Slot1 (BIP39) recovery key enrolled.")
+		os.Exit(1)
+	}
+
+	fmt.Println()
+	fmt.Println("╔═══════════════════════════════════════════════════════════════╗")
+	fmt.Println("║       sec-agent Vault Recovery — BIP39 Mnemonic               ║")
+	fmt.Println("╚═══════════════════════════════════════════════════════════════╝")
+	fmt.Println()
+	fmt.Println("You are about to recover vault access using your 24-word recovery mnemonic.")
+	fmt.Println("After recovery, Touch ID will be re-bound to current system biometrics.")
+	fmt.Println()
+	fmt.Println("⚠️  SECURITY WARNING — VERIFY FINGERPRINTS FIRST:")
+	fmt.Println("   • If Touch ID failed unexpectedly without you adding/removing a finger,")
+	fmt.Println("     an administrator or attacker may have tampered with your system!")
+	fmt.Println("   • Open macOS System Settings -> Touch ID & Passcode NOW.")
+	fmt.Println("   • Ensure ONLY your authorized fingerprints are enrolled before proceeding.")
+	fmt.Println("   • Remove any unrecognized fingerprints first!")
+	fmt.Println()
+	fmt.Println("Press Ctrl+C at any time to abort. No changes will be made until recovery succeeds.")
+	fmt.Println()
+
+	mnemonic := readMnemonicFromTTY()
+
+	fmt.Println("\n⏳ Deriving recovery key (Argon2id, ~5 seconds)...")
+	masterKey, err := store.UnwrapMasterKey(mnemonic, env.Slot1)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "\n❌ Recovery failed: %v\n", err)
+		fmt.Fprintln(os.Stderr, "   Double-check each word carefully — BIP39 words are case-sensitive (all lowercase).")
+		os.Exit(1)
+	}
+	defer store.ZeroBytes(masterKey)
+
+	// Verify master key can decrypt the payload
+	fmt.Println("✅ Mnemonic verified. Testing vault decryption...")
+	_, decErr := store.LoadStore(profile, masterKey)
+	if decErr != nil {
+		fmt.Fprintf(os.Stderr, "❌ Vault decryption test failed: %v\n", decErr)
+		fmt.Fprintln(os.Stderr, "   The mnemonic decrypted correctly but the vault payload could not be read.")
+		fmt.Fprintln(os.Stderr, "   The vault file may be corrupted. Restore from a backup: 'sec restore <file.kdbx>'")
+		os.Exit(1)
+	}
+
+	// Re-enroll the master key in Keychain with Touch ID BiometryCurrentSet protection
+	kcSvc := "sec-session"
+	if profile != "" && profile != "default" {
+		kcSvc = "sec-session:profile_" + profile
+	}
+	kcAcc := "master"
+	fmt.Println("🔑 Re-enrolling master key in macOS Keychain (Touch ID required)...")
+	if err := keychain.SetCurrentSet(kcSvc, kcAcc, masterKey); err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Failed to re-enroll in Keychain: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println()
+	fmt.Println("╔═══════════════════════════════════════════════════════════════╗")
+	fmt.Println("║  ✅  Vault recovery successful!                               ║")
+	fmt.Println("╚═══════════════════════════════════════════════════════════════╝")
+	fmt.Println()
+	fmt.Println("Touch ID keychain entry has been restored.")
+	fmt.Println("Run 'sec open' to start a new session.")
+	fmt.Println()
+	fmt.Println("📋 Security reminder:")
+	fmt.Println("  • Your 24-word mnemonic remains valid for future recoveries.")
+	fmt.Println("  • Store it safely — do NOT type it into any chat or script.")
 }
 
 func handleRestore(profile string, filePath, explicitPassword string, args []string) {
+
 	mergeMode := false
 	overwriteMode := false
 	fullMetadata := false

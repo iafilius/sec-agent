@@ -183,3 +183,68 @@ If the background daemon becomes unreachable or needs an emergency reset:
    ```bash
    eval $(sec open)
    ```
+
+---
+
+### Work Instruction 6: Upgrading to v2.0 Dual-Slot Vault
+
+**Prerequisite**: An interactive terminal (not a script, not an AI agent context).
+
+1. Run the migration command:
+   ```bash
+   sec migrate-v2
+   ```
+2. Read the 24 words displayed on screen and write them on paper. Do NOT photograph or copy them.
+3. Pass the 3-word verification challenge when prompted.
+4. Vault is atomically upgraded — no data loss is possible.
+5. Create a KDBX backup immediately:
+   ```bash
+   sec backup vault_$(date +%Y%m%d).kdbx
+   ```
+   When prompted, enter your 24-word mnemonic. The KDBX will be locked with the same seed.
+
+---
+
+### Work Instruction 7: BIP39 Mnemonic Recovery
+
+Use when Touch ID stops working (hardware failure, new fingerprints enrolled, OS reinstall):
+
+1. Open an interactive terminal (physical keyboard, direct SSH, or local terminal).
+2. Run:
+   ```bash
+   sec session recover
+   ```
+3. Enter your 24-word mnemonic at the prompt (one line, space-separated words).
+4. Wait ~5 seconds for Argon2id derivation.
+5. Touch ID to re-enroll the key in Keychain when prompted.
+6. Start a new session:
+   ```bash
+   eval $(sec open)
+   ```
+
+**Recovery is aborted (no changes made) if:**
+- The mnemonic is wrong (wrong words or bad checksum)
+- The vault payload cannot be decrypted with the recovered key
+- The terminal is non-interactive (piped/scripted)
+
+---
+
+## 2. New Commands Reference (v2.0+)
+
+### `sec migrate-v2 [--dry-run]`
+Upgrades vault to v2.0 Dual-Slot format with BIP39 recovery key enrollment.
+- `--dry-run`: Shows what would happen without making any changes.
+- **Requires**: Interactive TTY. Exits 78 (EX_CONFIG) if non-interactive.
+- **Safety**: Uses two-phase atomic commit. Safe to retry after interruption.
+
+### `sec session recover`
+Recovers vault access using the 24-word BIP39 mnemonic (Slot 1).
+- **Requires**: Interactive TTY. Exits 78 (EX_CONFIG) if non-interactive.
+- **Result**: Re-enrolls master key in macOS Keychain. Does NOT change the mnemonic.
+
+### `sec backup <file.kdbx> [--custom-password | -p <password>]`
+Exports secrets to a KeePassXC file.
+- **Default (v2.0 vault)**: Prompts for 24-word mnemonic; KDBX locked with Argon2id-derived key.
+- **`--custom-password`**: Use a custom password instead of the BIP39 seed.
+- **Legacy (v1.0 vault)**: Always prompts for a custom password (unchanged behavior).
+

@@ -83,6 +83,7 @@ func GetStorePath(profile string) (string, error) {
 }
 
 // LoadStore reads and decrypts the store from disk using the master key.
+// It transparently handles both v1.0 (raw AES-GCM) and v2.0 (JSON envelope) vaults.
 // If the store file does not exist, it returns an empty store.
 func LoadStore(profile string, masterKey []byte) (*EncryptedStore, error) {
 	path, err := GetStorePath(profile)
@@ -97,6 +98,14 @@ func LoadStore(profile string, masterKey []byte) (*EncryptedStore, error) {
 			return &EncryptedStore{Secrets: make(map[string]SecretEntry)}, nil
 		}
 		return nil, fmt.Errorf("failed to read store file: %w", err)
+	}
+
+	// v2.0 detection: JSON envelope starts with '{'
+	if len(data) > 0 && data[0] == '{' {
+		var env VaultEnvelope
+		if jsonErr := json.Unmarshal(data, &env); jsonErr == nil && env.Payload != nil {
+			data = env.Payload // unwrap to inner AES-GCM ciphertext
+		}
 	}
 
 	decrypted, err := crypto.Decrypt(masterKey, data)
@@ -131,6 +140,7 @@ func LoadStore(profile string, masterKey []byte) (*EncryptedStore, error) {
 	return &store, nil
 }
 
+
 // SaveStore encrypts and writes the store to disk using the master key.
 // It uses temporary-file writing and atomic renames to prevent corruption
 // on disk full, read-only disks, or power outages.
@@ -152,6 +162,14 @@ func SaveStore(profile string, store *EncryptedStore, masterKey []byte) error {
 	ciphertext, err := crypto.Encrypt(masterKey, plaintext)
 	if err != nil {
 		return fmt.Errorf("failed to encrypt store: %w", err)
+	}
+
+	if IsV2Vault(path) {
+		env, err := ReadVaultEnvelope(path)
+		if err == nil && env != nil {
+			env.Payload = ciphertext
+			return WriteVaultEnvelope(path, env)
+		}
 	}
 
 	dir := filepath.Dir(path)
@@ -257,7 +275,13 @@ func InitializeMasterKey(profile string, keychainGetter func() ([]byte, error), 
 		return key, nil
 	}
 
-	// Not found or error, let's generate a new one
+	// Check if vault store file already exists on disk
+	storePath := GetStorePathForProfile(profile)
+	if _, statErr := os.Stat(storePath); statErr == nil {
+		return nil, fmt.Errorf("master key missing or invalidated in macOS Keychain (Touch ID biometric set changed?). Please run 'sec session recover' to restore access with your 24-word seed")
+	}
+
+	// Vault store does NOT exist on disk: this is a brand-new vault initialization
 	newKey, err := crypto.GenerateRandomKey()
 	if err != nil {
 		return nil, err

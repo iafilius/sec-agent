@@ -1,10 +1,10 @@
 ---
 name: sec-agent-integration
 description: Use the sec-agent CLI utility to start background daemons, store secrets, run applications in isolated environments, migrate dotenv files, install AI skills, inspect snapshots, and manage backups.
-version: v2.1.8
+version: v2.2.0
 ---
 
-# sec-agent Secrets Management Integration (v2.1.8)
+# sec-agent Secrets Management Integration (v2.2.0)
 
 This skill enables AI coding agents and autonomous assistants to use the `sec-agent` CLI tool (v1.9.4+) to securely retrieve credentials, run application build/test/terraform pipelines in isolated process environments, migrate dotenv configuration files, install integration skills across IDEs, inspect automatic snapshots, and manage KeePassXC `.kdbx` backups on macOS.
 
@@ -94,6 +94,16 @@ When vault corruption or session state issues occur, follow this 4-step recovery
 2. **Restore Database Payload**: Run `sec-agent restore ~/.config/sec-agent/backups/secrets_<timestamp>.enc --overwrite`.
 3. **Reset Daemon Socket State**: Run `sec-agent restart`.
 4. **Re-authenticate Shell Session**: Run `eval $(sec-agent open)`.
+
+### 3.3. Dual-Slot Biometric & 24-Word Recovery Seed Governance (v2.0+)
+sec-agent v2.0+ utilizes a **LUKS-Style Dual Key-Slot Architecture**:
+* **Slot 0**: Master key protected by macOS Keychain Touch ID under `kSecAccessControlBiometryCurrentSet`. Invalidated automatically if any fingerprint is added or removed in macOS System Settings.
+* **Slot 1**: Master key wrapped with AES-256-GCM using an Argon2id key derived from an offline 24-word BIP39 Recovery Seed.
+
+**CRITICAL RULES FOR AI ASSISTANTS & AGENTS**:
+1. **NO Seed Handling in Non-Interactive TTYs**: `sec migrate-v2` and `sec session recover` enforce a TTY safety lock (`isatty`). They WILL EXIT WITH CODE 78 (`EX_CONFIG`) if executed in headless, piped, or subagent tool call environments.
+2. **NEVER Request or Log Recovery Seeds**: AI agents MUST NOT prompt for, parse, store, or output 24-word seed phrases.
+3. **Emergency Un-Bricking Protocol**: If Touch ID authentication fails due to hardware change or OS update, inform the human user: *"Touch ID is invalidated. Please open your physical terminal and run `sec session recover` to restore access with your 24-word paper seed."*
 
 ---
 
