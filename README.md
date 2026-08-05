@@ -421,11 +421,48 @@ In enterprise environments, developer laptops are often enrolled in Mobile Devic
 
 ---
 
+## 🧹 Storage Cleanup & Dry-Run Inspection (`sec cleanup`)
+
+`sec-agent` includes an interactive and previewable storage cleanup tool to keep your configuration directory (`~/.config/sec-agent/`) and macOS Keychain free of stale files:
+
+```bash
+# Preview files and Keychain keys that would be removed without deleting anything
+sec cleanup --dry-run
+
+# Perform actual cleanup and purge legacy .bak files and orphaned sockets
+sec cleanup
+```
+
+### Dry-Run Output Example:
+```text
+🔍 sec-agent Storage & Keychain CLEANUP (DRY-RUN PREVIEW)
+───────────────────────────────────────────────────────────────────────
+📁 Legacy Backup Files Identified:
+  • [DRY-RUN WOULD REMOVE] /Users/arjan/.config/sec-agent/secrets.enc.bak.20260715
+
+🔒 Orphaned Lock & Socket Files Identified:
+  • [DRY-RUN WOULD REMOVE] /Users/arjan/.config/sec-agent/sec-agent_old.sock
+
+Summary: 2 item(s) would be deleted (approx. 14201 bytes freed).
+To perform actual deletion, run: 'sec cleanup'
+```
+
+---
+
+## 🔄 Backward Compatibility & Legacy Vault Restoration
+
+`sec-agent` maintains 100% backward compatibility with legacy v1.0 vaults and backups:
+
+* **Automatic Unwrapping**: When opening or restoring a legacy v1.0 `.enc` file (raw AES-256-GCM ciphertext without a JSON envelope), `store.LoadStore` seamlessly decrypts the legacy payload.
+* **Automatic v2.0 Upgrading**: As soon as `sec set` or `sec restore` saves the store, `sec-agent` automatically wraps it in a **v2.0 Dual-Slot `VaultEnvelope`** with `kSecAccessControlBiometryCurrentSet` Secure Enclave protection.
+* **Recovery Seed Preparation**: Users are strongly encouraged to print or write down their **24-word recovery seed phrase** (generated during initialization or `sec session recover`) and store it in an offline paper vault or password manager. If macOS fingerprints are added or re-enrolled by an administrator, the 24-word seed phrase is required to re-bind Touch ID.
+
+---
+
 ## 🗺️ Roadmap & TODO Suggestions
 
 The following architectural enhancements are tracked for future evaluation:
 
-* **Legacy Database Vacuum & Cleanup (`sec cleanup`)**: An automated cleanup utility to scan `~/.config/sec-agent/` and `~/.config/sec-agent/backups/`, verify active v2.0 Dual-Slot vault health, and safely archive or purge un-migrated v1.0 databases and old timestamped backup snapshots.
 * **Hardware Token Recovery Factor (YubiKey / FIDO2 / CTAP2)**: An optional hardware recovery slot (`Slot 2`) enabling YubiKey HMAC-SHA1 challenge-response or FIDO2 `hmac-secret` hardware token taps as an alternative or secondary recovery factor alongside the 24-word Argon2id paper seed phrase.
 
 ---

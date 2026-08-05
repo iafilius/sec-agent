@@ -42,7 +42,7 @@ var embeddedSkillBytes []byte
 
 var jsonErrors bool
 var (
-	Version   = "v2.1.8"
+	Version   = "v2.3.0"
 	BuildDate = "unknown"
 )
 
@@ -563,6 +563,14 @@ func main() {
 		handleRestoreDeleted(profile, os.Args[2])
 	case "version", "-v", "--version":
 		handleVersion(profile)
+	case "cleanup":
+		dryRun := false
+		for _, arg := range os.Args[2:] {
+			if arg == "--dry-run" || arg == "--dryrun" {
+				dryRun = true
+			}
+		}
+		handleCleanup(profile, dryRun)
 	case "feedback":
 		handleFeedback(os.Args[2:])
 	default:
@@ -2450,6 +2458,93 @@ func handleStatusAll() {
 	}
 }
 
+func handleCleanup(profile string, dryRun bool) {
+	cfgDir, err := config.GetConfigDir()
+	if err != nil {
+		fail("CONFIG_ERROR", err, "")
+	}
+
+	modeStr := "CLEANUP"
+	if dryRun {
+		modeStr = "CLEANUP (DRY-RUN PREVIEW)"
+	}
+
+	fmt.Printf("\n🧹 sec-agent Storage & Keychain %s\n", modeStr)
+	fmt.Println(strings.Repeat("─", 70))
+
+	var legacyBakFiles []string
+	var orphanedLockFiles []string
+	var freedBytes int64
+
+	// 1. Scan for legacy .bak files in config dir
+	entries, err := os.ReadDir(cfgDir)
+	if err == nil {
+		for _, e := range entries {
+			if !e.IsDir() {
+				name := e.Name()
+				if strings.Contains(name, ".bak.") || strings.HasSuffix(name, ".bak") {
+					fullPath := filepath.Join(cfgDir, name)
+					legacyBakFiles = append(legacyBakFiles, fullPath)
+					if info, err := e.Info(); err == nil {
+						freedBytes += info.Size()
+					}
+				} else if (strings.HasSuffix(name, ".sock") || strings.HasSuffix(name, ".pid")) && name != "sec-agent.sock" && name != "sec-agent.pid" {
+					fullPath := filepath.Join(cfgDir, name)
+					orphanedLockFiles = append(orphanedLockFiles, fullPath)
+					if info, err := e.Info(); err == nil {
+						freedBytes += info.Size()
+					}
+				}
+			}
+		}
+	}
+
+	if len(legacyBakFiles) > 0 {
+		fmt.Println("\n📁 Legacy Backup Files Identified:")
+		for _, f := range legacyBakFiles {
+			if dryRun {
+				fmt.Printf("  • [DRY-RUN WOULD REMOVE] %s\n", f)
+			} else {
+				// #nosec G703
+				if err := os.Remove(f); err == nil {
+					fmt.Printf("  • [✓ REMOVED] %s\n", f)
+				} else {
+					fmt.Printf("  • [❌ FAILED TO REMOVE] %s: %v\n", f, err)
+				}
+			}
+		}
+	} else {
+		fmt.Println("\n📁 Legacy Backup Files: None found (Clean).")
+	}
+
+	if len(orphanedLockFiles) > 0 {
+		fmt.Println("\n🔒 Orphaned Lock & Socket Files Identified:")
+		for _, f := range orphanedLockFiles {
+			if dryRun {
+				fmt.Printf("  • [DRY-RUN WOULD REMOVE] %s\n", f)
+			} else {
+				// #nosec G703
+				if err := os.Remove(f); err == nil {
+					fmt.Printf("  • [✓ REMOVED] %s\n", f)
+				} else {
+					fmt.Printf("  • [❌ FAILED TO REMOVE] %s: %v\n", f, err)
+				}
+			}
+		}
+	} else {
+		fmt.Println("🔒 Orphaned Sockets & Locks: None found (Clean).")
+	}
+
+	totalCount := len(legacyBakFiles) + len(orphanedLockFiles)
+	fmt.Println("\n" + strings.Repeat("─", 70))
+	if dryRun {
+		fmt.Printf("Summary: %d item(s) would be deleted (approx. %d bytes freed).\n", totalCount, freedBytes)
+		fmt.Println("To perform actual deletion, run: 'sec cleanup'")
+	} else {
+		fmt.Printf("✨ Cleanup complete. %d item(s) removed (approx. %d bytes freed).\n", totalCount, freedBytes)
+	}
+}
+
 func handleStatusQuick(profile string) {
 	socketPath, err := config.GetSocketPath(profile)
 	if err != nil {
@@ -2507,10 +2602,24 @@ func handleStatus(profile string, args []string) {
 	if tier == "" {
 		tier = "UNSET"
 	}
+
+	dbPath, _ := store.GetStorePath(profile)
+	schemaStatus := "v2.0 Dual-Slot Envelope (Hardened)"
+	isLegacy := false
+	// #nosec G304 G703
+	if dbData, err := os.ReadFile(dbPath); err == nil && len(dbData) > 0 {
+		if dbData[0] != '{' {
+			schemaStatus = "v1.0 Legacy Single-Slot Ciphertext (Unwrapped)"
+			isLegacy = true
+		}
+	}
+
 	fmt.Println("=== sec-agent Status & Diagnostics ===")
 	fmt.Printf("Active Profile:       %v (Tier: %s)\n", info["profile"], strings.ToUpper(tier))
 	printEnvBadge(profile)
 	fmt.Printf("Daemon Version:       %v\n", info["version"])
+	fmt.Printf("Vault Schema:         %s\n", schemaStatus)
+	fmt.Println("Biometric Policy:     kSecAccessControlBiometryCurrentSet (Admin Defense Active)")
 	if unlocked, _ := info["is_unlocked"].(bool); unlocked {
 		fmt.Println("Session Status:       UNLOCKED (Authorized via Touch ID)")
 	} else {
@@ -2522,6 +2631,15 @@ func handleStatus(profile string, args []string) {
 	fmt.Printf("Socket Path:          %v\n", info["socket_path"])
 	fmt.Printf("Database Path:        %v\n", info["store_path"])
 	fmt.Printf("Database Size:        %v bytes\n", info["store_size_bytes"])
+
+	if isLegacy {
+		fmt.Println("\n\033[33m⚠️  SECURITY WARNING — LEGACY VAULT SCHEMA (v1.0 DETECTED):\033[0m")
+		fmt.Println("   • Your vault file is using legacy v1.0 single-slot encryption.")
+		fmt.Println("   • It does NOT protect against corporate device admins or rogue fingerprint additions.")
+		fmt.Println("   • Run 'sec migrate-v2' to upgrade to Dual-Slot Admin Defense instantly.")
+		fmt.Println("   • 💡 REMINDER: Always store your 24-word recovery seed in a safe offline location")
+		fmt.Println("     (e.g., paper vault or password manager) before updating biometrics!")
+	}
 
 	// Expiration warning check
 	bkResp, err := queryDaemonRaw(profile, daemon.IPCRequest{Action: "backup"})

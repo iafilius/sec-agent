@@ -1281,6 +1281,35 @@ func TestDaemonParityAndAutoEviction(t *testing.T) {
 	}
 }
 
+func TestCleanupCommandDryRun(t *testing.T) {
+	cfgDir, err := config.GetConfigDir()
+	if err != nil {
+		t.Fatalf("failed to get config dir: %v", err)
+	}
+
+	testBakFile := filepath.Join(cfgDir, "test_legacy_vault.enc.bak.20260101")
+	if err := os.WriteFile(testBakFile, []byte("fake legacy backup"), 0600); err != nil {
+		t.Fatalf("failed to write test bak file: %v", err)
+	}
+	defer os.Remove(testBakFile)
+
+	// Dry run cleanup
+	handleCleanup("default", true)
+
+	// Verify file still exists after dry run
+	if _, err := os.Stat(testBakFile); os.IsNotExist(err) {
+		t.Errorf("expected test bak file to remain after --dry-run, but it was deleted")
+	}
+
+	// Real cleanup
+	handleCleanup("default", false)
+
+	// Verify file was deleted
+	if _, err := os.Stat(testBakFile); !os.IsNotExist(err) {
+		t.Errorf("expected test bak file to be deleted after cleanup")
+	}
+}
+
 
 
 
