@@ -2472,6 +2472,7 @@ func handleCleanup(profile string, dryRun bool) {
 	fmt.Printf("\n🧹 sec-agent Storage & Keychain %s\n", modeStr)
 	fmt.Println(strings.Repeat("─", 70))
 
+	var activeVaults []string
 	var legacyBakFiles []string
 	var orphanedLockFiles []string
 	var freedBytes int64
@@ -2482,8 +2483,13 @@ func handleCleanup(profile string, dryRun bool) {
 			return nil
 		}
 		name := info.Name()
-		// Exclude active main vault database files
+		// Identify active main vault database files
 		if name == "secrets.enc" || (strings.HasPrefix(name, "secrets_") && strings.HasSuffix(name, ".enc")) {
+			schemaTag := "v1.0 Legacy Vault"
+			if store.IsV2Vault(path) {
+				schemaTag = "v2.0 Dual-Slot Vault"
+			}
+			activeVaults = append(activeVaults, fmt.Sprintf("%s (%s)", path, schemaTag))
 			return nil
 		}
 		// Exclude active socket / pid files for active daemon
@@ -2507,8 +2513,15 @@ func handleCleanup(profile string, dryRun bool) {
 		return nil
 	})
 
+	if len(activeVaults) > 0 {
+		fmt.Printf("\n🛡️ Protected Active Vaults (Preserved — Never Deleted):\n")
+		for _, v := range activeVaults {
+			fmt.Printf("  • [✓ SAFE] %s\n", v)
+		}
+	}
+
 	if len(legacyBakFiles) > 0 {
-		fmt.Printf("\n📁 Legacy Backup Files & Snapshots Identified (%d items):\n", len(legacyBakFiles))
+		fmt.Printf("\n📁 Legacy (v1.0) & Rolling Backup Snapshots Identified (%d items):\n", len(legacyBakFiles))
 		for _, f := range legacyBakFiles {
 			if dryRun {
 				fmt.Printf("  • [DRY-RUN WOULD REMOVE] %s\n", f)
@@ -2522,7 +2535,7 @@ func handleCleanup(profile string, dryRun bool) {
 			}
 		}
 	} else {
-		fmt.Println("\n📁 Legacy Backup Files & Snapshots: None found (Clean).")
+		fmt.Println("\n📁 Legacy (v1.0) & Rolling Backup Snapshots: None found (Clean).")
 	}
 
 	if len(orphanedLockFiles) > 0 {
@@ -2546,10 +2559,12 @@ func handleCleanup(profile string, dryRun bool) {
 	totalCount := len(legacyBakFiles) + len(orphanedLockFiles)
 	fmt.Println("\n" + strings.Repeat("─", 70))
 	if dryRun {
-		fmt.Printf("Summary: %d item(s) would be deleted (approx. %d bytes freed).\n", totalCount, freedBytes)
+		fmt.Printf("Summary: %d item(s) would be deleted (approx. %s freed).\n", totalCount, formatBytes(freedBytes))
+		fmt.Println("Active vaults remain 100% untouched.")
 		fmt.Println("To perform actual deletion, run: 'sec cleanup'")
 	} else {
-		fmt.Printf("✨ Cleanup complete. %d item(s) removed (approx. %d bytes freed).\n", totalCount, freedBytes)
+		fmt.Printf("✨ Cleanup complete. %d item(s) removed (approx. %s freed).\n", totalCount, formatBytes(freedBytes))
+		fmt.Println("Active vaults remain 100% untouched.")
 	}
 }
 
