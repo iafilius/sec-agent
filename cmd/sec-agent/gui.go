@@ -335,6 +335,12 @@ func runGUIServer(activeProfile string, port int) {
 			tierStr = "dev"
 		}
 
+		isV2 := store.IsV2Vault(storePath)
+		schemaStr := "v1.0 Legacy"
+		if isV2 {
+			schemaStr = "v2.0 Dual-Slot (Hardened)"
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"profile":             p,
@@ -345,6 +351,8 @@ func runGUIServer(activeProfile string, port int) {
 			"database_size":       sizeStr,
 			"database_modified":   modStr,
 			"profile_tier":        strings.ToUpper(tierStr),
+			"is_v2":               isV2,
+			"vault_schema":        schemaStr,
 			"available_databases": dbs,
 			"error":               fmt.Sprintf("%v", err),
 		})
@@ -932,7 +940,7 @@ const guiHTMLContent = `<!DOCTYPE html>
   <main>
     <div class="db-banner">
       <div>
-        <div><b>Active Vault Database File:</b> <span id="bannerDbFile" style="font-family: var(--font-mono); color: var(--emerald);">secrets.enc</span> <span id="bannerDbTier" class="badge badge-ver" style="margin-left: 8px;">DEV</span></div>
+        <div><b>Active Vault Database File:</b> <span id="bannerDbFile" style="font-family: var(--font-mono); color: var(--emerald);">secrets.enc</span> <span id="bannerDbTier" class="badge badge-ver" style="margin-left: 8px;">DEV</span> <span id="bannerSecurityBadge" class="badge badge-ver" style="margin-left: 8px; background: rgba(16, 185, 129, 0.15); color: var(--emerald);" title="v2.0 Dual-Slot Envelope (Protected by Touch ID + Argon2id BIP39 Mnemonic)">🛡️ Dual-Slot Active</span></div>
         <div id="bannerDbPath" class="db-path">/Users/arjan/.config/sec-agent/secrets.enc</div>
       </div>
       <div style="text-align: right; color: var(--text-muted); font-size: 0.85rem;">
@@ -1093,6 +1101,23 @@ const guiHTMLContent = `<!DOCTYPE html>
         document.getElementById('bannerDbTier').innerText = data.profile_tier || 'DEV';
         if (data.version) {
           document.getElementById('guiVersionBadge').innerText = data.version;
+        }
+
+        const secBadge = document.getElementById('bannerSecurityBadge');
+        if (secBadge) {
+          if (data.is_v2) {
+            secBadge.className = 'badge badge-ver';
+            secBadge.style.background = 'rgba(16, 185, 129, 0.15)';
+            secBadge.style.color = 'var(--emerald)';
+            secBadge.innerText = '🛡️ Dual-Slot Active';
+            secBadge.title = 'v2.0 Dual-Slot Envelope (Protected by Touch ID + Argon2id BIP39 Mnemonic)';
+          } else {
+            secBadge.className = 'badge badge-stale';
+            secBadge.style.background = 'rgba(251, 191, 36, 0.15)';
+            secBadge.style.color = 'var(--amber)';
+            secBadge.innerText = '⚠️ v1.0 Upgrade Recommended';
+            secBadge.title = 'Legacy v1.0 Vault: Run "sec migrate-v2" & save 24-word recovery seed phrase offline!';
+          }
         }
 
         populateDbSelect(data.available_databases || []);
