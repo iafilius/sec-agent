@@ -80,7 +80,11 @@ verify-sip: build codesign
 	@echo "Attempting to inspect with lldb (expected to fail if SIP is enabled and Hardened Runtime is active)..."
 	@echo "Run: lldb -batch -o 'process launch' ./sec-agent"
 
-sec-check:
+privacy-check:
+	@chmod +x scripts/privacy_audit.sh
+	@./scripts/privacy_audit.sh publish
+
+sec-check: privacy-check
 	@echo "=== Running Go Vet ==="
 	go vet ./...
 	@echo "=== Running Go Vulncheck ==="
@@ -92,10 +96,11 @@ sync:
 	@echo "=== Cleaning old packages in publish/ ==="
 	rm -rf publish/cmd publish/docs publish/internal publish/backup publish/biometrics publish/config publish/crypto publish/daemon publish/keychain publish/store publish/main.go publish/main_test.go publish/migration_test.go publish/bin
 	@echo "=== Syncing core codebase and packages to publish/ ==="
-	cp -r cmd docs internal publish/
+	cp -r cmd docs internal scripts publish/
 	rm -rf publish/docs/internal publish/docs/medium_article_*
 	cp -r Formula .github go.mod go.sum Makefile LICENSE README.md publish/
-	@echo "=== Running sanity build & tests inside publish/ ==="
+	@echo "=== Running Privacy Audit & Sanity Build inside publish/ ==="
+	chmod +x scripts/privacy_audit.sh && ./scripts/privacy_audit.sh publish
 	cd publish && make build codesign && make sec-check && go test -v ./...
 
 release-brew: package

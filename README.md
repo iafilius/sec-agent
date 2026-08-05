@@ -517,11 +517,11 @@ sec cleanup
 ───────────────────────────────────────────────────────────────────────
 
 🛡️ Protected Active Vaults (Preserved — Never Deleted):
-  • [✓ SAFE] /Users/arjan/.config/sec-agent/secrets.enc (v2.0 Dual-Slot Vault)
-  • [✓ SAFE] /Users/arjan/.config/sec-agent/secrets_prod.enc (v2.0 Dual-Slot Vault)
+  • [✓ SAFE] ~/.config/sec-agent/secrets.enc (v2.0 Dual-Slot Vault)
+  • [✓ SAFE] ~/.config/sec-agent/secrets_prod.enc (v2.0 Dual-Slot Vault)
 
 📁 Legacy (v1.0) & Rolling Backup Snapshots Identified (54 items):
-  • [DRY-RUN WOULD REMOVE] /Users/arjan/.config/sec-agent/backups/dev/secrets.enc.1785922652106329000
+  • [DRY-RUN WOULD REMOVE] ~/.config/sec-agent/backups/dev/secrets.enc.1785922652106329000
 
 🔒 Orphaned Sockets & Locks: None found (Clean).
 

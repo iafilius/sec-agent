@@ -1308,10 +1308,9 @@ func TestCleanupCommandDryRun(t *testing.T) {
 }
 
 func TestV2SeedMigrationAndDiagnostics(t *testing.T) {
-	testMnemonic := "doctor coin soft cube empower dismiss poem repair flock brush whisper dragon organ space taste cradle mosquito mixture matter genius confirm evoke ozone open"
-
-	if !crypto.MnemonicValid(testMnemonic) {
-		t.Fatalf("expected testMnemonic to be valid")
+	testMnemonic, genErr := crypto.GenerateMnemonic()
+	if genErr != nil || !crypto.MnemonicValid(testMnemonic) {
+		t.Fatalf("failed to generate valid test mnemonic: %v", genErr)
 	}
 
 	// Test store load error message enhancement for cipher authentication failure

@@ -509,7 +509,7 @@ Output:
 ```text
 === sec-agent Global Workstation Status & Inventory ===
 CLI Version:            v1.7.0 (Build Date: 2026-07-23)
-Config Directory:       /Users/username/.config/sec
+Config Directory:       ~/.config/sec-agent
 
 PROFILE NAME             ENV TIER   SESSION STATUS    STORED KEYS  EXPIRED
 --------------------------------------------------------------------------------
