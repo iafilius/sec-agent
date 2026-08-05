@@ -57,7 +57,7 @@ sec backup list
 *Example Output*:
 ```text
 === 📁 sec-agent Vault Snapshots & Backups ===
-Search Path: /Users/arjan/.config/sec-agent/backups
+Search Path: ~/.config/sec-agent/backups
 
 Automatic Write Snapshots (.enc):
   • secrets_20260725_100000.enc  (4908 bytes, 2026-07-25 10:00:00)
@@ -174,11 +174,11 @@ sec-agent backup list
 *Example Output*:
 ```text
 === 📁 sec-agent Vault Snapshots & Backups ===
-Search Path: /Users/arjan/.config/sec-agent/backups
+Search Path: ~/.config/sec-agent/backups
 
 Automatic Write Snapshots (.enc):
   • secrets_20260725_100000.enc  (4908 bytes, 2026-07-25 10:00:00)
-    Path: /Users/arjan/.config/sec-agent/backups/secrets_20260725_100000.enc
+    Path: ~/.config/sec-agent/backups/secrets_20260725_100000.enc
   • secrets_20260724_204900.enc  (3391 bytes, 2026-07-24 20:49:00)
 
 Local KeePassXC Backup Files (.kdbx):

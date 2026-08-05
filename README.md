@@ -380,7 +380,7 @@ Upgrade all active vault profile stores (`default`, `dev`, `prod`, `router-ax360
 sec migrate-v2
 
 # Bind existing vaults to a pre-existing 24-word seed phrase across all profile stores
-sec migrate-v2 --seed "doctor coin soft cube empower dismiss poem repair flock brush whisper dragon organ space taste cradle mosquito mixture matter genius confirm evoke ozone open"
+sec migrate-v2 --seed "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
 ```
 
 ### Rotating 24-Word Recovery Seed Phrase

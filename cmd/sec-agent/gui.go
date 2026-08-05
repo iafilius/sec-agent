@@ -941,7 +941,7 @@ const guiHTMLContent = `<!DOCTYPE html>
     <div class="db-banner">
       <div>
         <div><b>Active Vault Database File:</b> <span id="bannerDbFile" style="font-family: var(--font-mono); color: var(--emerald);">secrets.enc</span> <span id="bannerDbTier" class="badge badge-ver" style="margin-left: 8px;">DEV</span> <span id="bannerSecurityBadge" class="badge badge-ver" style="margin-left: 8px; background: rgba(16, 185, 129, 0.15); color: var(--emerald);" title="v2.0 Dual-Slot Envelope (Protected by Touch ID + Argon2id BIP39 Mnemonic)">🛡️ Dual-Slot Active</span></div>
-        <div id="bannerDbPath" class="db-path">/Users/arjan/.config/sec-agent/secrets.enc</div>
+        <div id="bannerDbPath" class="db-path">~/.config/sec-agent/secrets.enc</div>
       </div>
       <div style="text-align: right; color: var(--text-muted); font-size: 0.85rem;">
         <div>Size: <span id="bannerDbSize">0 B</span></div>
