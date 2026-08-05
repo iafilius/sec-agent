@@ -2476,31 +2476,39 @@ func handleCleanup(profile string, dryRun bool) {
 	var orphanedLockFiles []string
 	var freedBytes int64
 
-	// 1. Scan for legacy .bak files in config dir
-	entries, err := os.ReadDir(cfgDir)
-	if err == nil {
-		for _, e := range entries {
-			if !e.IsDir() {
-				name := e.Name()
-				if strings.Contains(name, ".bak.") || strings.HasSuffix(name, ".bak") {
-					fullPath := filepath.Join(cfgDir, name)
-					legacyBakFiles = append(legacyBakFiles, fullPath)
-					if info, err := e.Info(); err == nil {
-						freedBytes += info.Size()
-					}
-				} else if (strings.HasSuffix(name, ".sock") || strings.HasSuffix(name, ".pid")) && name != "sec-agent.sock" && name != "sec-agent.pid" {
-					fullPath := filepath.Join(cfgDir, name)
-					orphanedLockFiles = append(orphanedLockFiles, fullPath)
-					if info, err := e.Info(); err == nil {
-						freedBytes += info.Size()
-					}
-				}
-			}
+	// #nosec G304 G703
+	_ = filepath.Walk(cfgDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info == nil || info.IsDir() {
+			return nil
 		}
-	}
+		name := info.Name()
+		// Exclude active main vault database files
+		if name == "secrets.enc" || (strings.HasPrefix(name, "secrets_") && strings.HasSuffix(name, ".enc")) {
+			return nil
+		}
+		// Exclude active socket / pid files for active daemon
+		if name == "sec-agent.sock" || name == "sec-agent.pid" {
+			return nil
+		}
+
+		isBackupSnapshot := strings.Contains(name, ".bak.") || strings.HasSuffix(name, ".bak") ||
+			(strings.HasPrefix(name, "secrets.enc.") && len(name) > len("secrets.enc.")) ||
+			(strings.HasPrefix(name, "secrets_") && strings.Contains(name, ".enc."))
+
+		isOrphanedLock := (strings.HasSuffix(name, ".sock") || strings.HasSuffix(name, ".pid") || strings.HasSuffix(name, ".tmp"))
+
+		if isBackupSnapshot {
+			legacyBakFiles = append(legacyBakFiles, path)
+			freedBytes += info.Size()
+		} else if isOrphanedLock {
+			orphanedLockFiles = append(orphanedLockFiles, path)
+			freedBytes += info.Size()
+		}
+		return nil
+	})
 
 	if len(legacyBakFiles) > 0 {
-		fmt.Println("\n📁 Legacy Backup Files Identified:")
+		fmt.Printf("\n📁 Legacy Backup Files & Snapshots Identified (%d items):\n", len(legacyBakFiles))
 		for _, f := range legacyBakFiles {
 			if dryRun {
 				fmt.Printf("  • [DRY-RUN WOULD REMOVE] %s\n", f)
@@ -2514,11 +2522,11 @@ func handleCleanup(profile string, dryRun bool) {
 			}
 		}
 	} else {
-		fmt.Println("\n📁 Legacy Backup Files: None found (Clean).")
+		fmt.Println("\n📁 Legacy Backup Files & Snapshots: None found (Clean).")
 	}
 
 	if len(orphanedLockFiles) > 0 {
-		fmt.Println("\n🔒 Orphaned Lock & Socket Files Identified:")
+		fmt.Printf("\n🔒 Orphaned Lock & Socket Files Identified (%d items):\n", len(orphanedLockFiles))
 		for _, f := range orphanedLockFiles {
 			if dryRun {
 				fmt.Printf("  • [DRY-RUN WOULD REMOVE] %s\n", f)
@@ -2532,7 +2540,7 @@ func handleCleanup(profile string, dryRun bool) {
 			}
 		}
 	} else {
-		fmt.Println("🔒 Orphaned Sockets & Locks: None found (Clean).")
+		fmt.Println("\n🔒 Orphaned Sockets & Locks: None found (Clean).")
 	}
 
 	totalCount := len(legacyBakFiles) + len(orphanedLockFiles)
