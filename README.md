@@ -237,7 +237,17 @@ sec rotate velocloud-provider-dev/vco_token
 sec ls --expiring 14d
 ```
 
-### 5. Global Workstation Status & Entropy Linter
+### 5. Native Cross-Profile Secret Copy & Workspace Auto-Open
+Safely copy credentials across vault profile stores in memory without shell process leaks, and unlock workspace profiles in a single Touch ID prompt:
+```bash
+# Copy a secret from default profile to router-ax3600-prod profile
+sec copy wifi/passphrase router/wifi_passphrase --from-profile default --to-profile router-ax3600-prod
+
+# Workspace .secrc Auto-Open: Automatically unlocks both 'default' and workspace target profile in 1 Touch ID tap
+eval $(sec open)
+```
+
+### 6. Global Workstation Status & Entropy Linter
 Single-pane-of-glass status dump and side-channel safe entropy audit:
 ```bash
 # Global status matrix across all vault profiles & background daemons
@@ -247,12 +257,50 @@ sec status --all
 sec check --scan-weak
 ```
 
-### 6. Lock Session
+### 7. Lock Session
 Wipe decrypted credentials from system memory and lock the daemon:
 ```bash
 sec lock
 # Session locked. Memory cache cleared.
 ```
+
+---
+
+## ⚙️ Workspace Configuration Files (`.secrc` / `.secenv` / `.sec.json`)
+
+To bind a codebase repository or directory tree to a dedicated `sec-agent` vault profile, place a `.secrc` (or `.secenv` / `.sec.json`) configuration file in your project root directory.
+
+### 📄 File Schema & Format
+```json
+{
+  "profile": "router-ax3600-prod",
+  "prefix": ""
+}
+```
+
+| Configuration Field | Type | Description | Default |
+| :--- | :--- | :--- | :--- |
+| **`profile`** | `string` | The target `sec-agent` vault profile for this workspace (e.g. `router-ax3600-prod`, `dev`, `staging`). | `"default"` |
+| **`prefix`** | `string` | Optional path prefix filter when injecting environment variables via `sec run`. | `""` |
+
+---
+
+### 🚀 Automatic Workspace Behavior
+
+1. **Single Touch ID Multi-Profile Session Unlock (`eval $(sec open)`)**:
+   Running `eval $(sec open)` inside your project directory automatically detects `.secrc` and unlocks **both** `default` and your workspace target profile (`router-ax3600-prod`) in a single Touch ID prompt:
+   ```text
+   ⚙️  Detected workspace config file (.secrc): profile = "router-ax3600-prod"
+   ✨ Unlocked profile "default" and workspace profile "router-ax3600-prod" in 1 Touch ID prompt.
+   ```
+
+2. **Automatic Directory Traversal**:
+   `sec-agent` automatically traverses upward from the current working directory to parent directories (up to workspace root) to discover `.secrc`.
+
+3. **Subprocess Scoping (`sec run -- <cmd>`)**:
+   `sec run` automatically reads `.secrc` to inject vault credentials from the workspace target profile into child processes without requiring explicit `--profile` CLI flags.
+
+
 
 ---
 
@@ -315,6 +363,36 @@ Your database contents belong to you. `sec` supports multiple export formats mat
 The `sec version` command allows you to inspect compiled VCS commit history, build timestamps, and Go modules dependencies, and queries the background daemon to warn you if a client-daemon version mismatch exists:
 ```bash
 sec version
+```
+
+---
+
+## 🔑 v2.0 Dual-Slot Recovery & Mnemonic Management
+
+`sec-agent` v2.0+ uses a Dual-Slot encryption architecture:
+- **Slot 0**: macOS Keychain protected by Touch ID biometric enrollment (`kSecAccessControlBiometryCurrentSet`).
+- **Slot 1**: Argon2id BIP39 24-word recovery seed phrase wrapping the inner master key.
+
+### Single 24-Word Recovery Seed Migration
+Upgrade all active vault profile stores (`default`, `dev`, `prod`, `router-ax3600-prod`, etc.) to v2.0 bound to a single 24-word recovery seed:
+```bash
+# Interactive migration (generates & displays 24-word seed on physical screen)
+sec migrate-v2
+
+# Bind existing vaults to a pre-existing 24-word seed phrase across all profile stores
+sec migrate-v2 --seed "doctor coin soft cube empower dismiss poem repair flock brush whisper dragon organ space taste cradle mosquito mixture matter genius confirm evoke ozone open"
+```
+
+### Rotating 24-Word Recovery Seed Phrase
+Rotate the BIP39 recovery seed across all v2.0 vault envelopes without altering Keychain Touch ID bindings or secret data:
+```bash
+sec session rotate-seed
+```
+
+### Un-bricking / Recovering Session Vaults
+If Touch ID biometric credentials are reset by macOS System Settings or hardware updates, recover vault access with your 24-word seed phrase:
+```bash
+sec session recover --profile router-ax3600-prod
 ```
 
 ---

@@ -1307,6 +1307,122 @@ func TestCleanupCommandDryRun(t *testing.T) {
 	}
 }
 
+func TestV2SeedMigrationAndDiagnostics(t *testing.T) {
+	testMnemonic := "doctor coin soft cube empower dismiss poem repair flock brush whisper dragon organ space taste cradle mosquito mixture matter genius confirm evoke ozone open"
+
+	if !crypto.MnemonicValid(testMnemonic) {
+		t.Fatalf("expected testMnemonic to be valid")
+	}
+
+	// Test store load error message enhancement for cipher authentication failure
+	badKey := make([]byte, 32)
+	for i := range badKey {
+		badKey[i] = 0xff
+	}
+
+	tmpDir := t.TempDir()
+	storeFile := filepath.Join(tmpDir, "secrets_test-prof.enc")
+
+	// Write an encrypted store with a different key
+	masterKey := make([]byte, 32)
+	for i := range masterKey {
+		masterKey[i] = 0x11
+	}
+
+	s := &store.EncryptedStore{
+		Secrets: map[string]store.SecretEntry{
+			"dummy": {Value: "value"},
+		},
+	}
+
+	if err := store.SaveStore("test-prof", s, masterKey); err != nil {
+		t.Fatalf("failed to save store: %v", err)
+	}
+
+	// Try loading with badKey to trigger GCM error
+	_, err := store.LoadStore("test-prof", badKey)
+	if err == nil {
+		t.Fatalf("expected LoadStore to fail with incorrect key")
+	}
+
+	if !strings.Contains(err.Error(), "master key mismatch") || !strings.Contains(err.Error(), "sec session recover --profile test-prof") {
+		t.Errorf("expected actionable error message with recovery instructions, got: %v", err)
+	}
+
+	_ = storeFile
+}
+
+func TestCrossProfileCopyAndUsability(t *testing.T) {
+	tmpDir := t.TempDir()
+	oldWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(oldWd) }()
+	_ = os.Chdir(tmpDir)
+
+	// 1. Verify loadWorkspaceConfig parses .secrc
+	secrcContent := `{"profile": "router-ax3600-prod"}`
+	if err := os.WriteFile(filepath.Join(tmpDir, ".secrc"), []byte(secrcContent), 0600); err != nil {
+		t.Fatalf("failed to write .secrc: %v", err)
+	}
+
+	cfg := loadWorkspaceConfig()
+	if cfg == nil || cfg.Profile != "router-ax3600-prod" {
+		t.Fatalf("expected loadWorkspaceConfig to parse profile 'router-ax3600-prod', got: %+v", cfg)
+	}
+
+	// 2. Verify cross-profile copy logic
+	srcProfile := "copy-src-prof"
+	dstProfile := "copy-dst-prof"
+	masterKey := make([]byte, 32)
+	for i := range masterKey {
+		masterKey[i] = 0x22
+	}
+
+	sSrc := &store.EncryptedStore{
+		Secrets: map[string]store.SecretEntry{
+			"wifi/passphrase": {Value: "secret-wifi-pass", Comment: "Original WiFi secret"},
+		},
+	}
+	if err := store.SaveStore(srcProfile, sSrc, masterKey); err != nil {
+		t.Fatalf("failed to save src store: %v", err)
+	}
+
+	sDst := &store.EncryptedStore{
+		Secrets: map[string]store.SecretEntry{},
+	}
+	if err := store.SaveStore(dstProfile, sDst, masterKey); err != nil {
+		t.Fatalf("failed to save dst store: %v", err)
+	}
+
+	// Read from src, write to dst
+	loadedSrc, err := store.LoadStore(srcProfile, masterKey)
+	if err != nil {
+		t.Fatalf("failed to load src store: %v", err)
+	}
+	entry := loadedSrc.Secrets["wifi/passphrase"]
+
+	loadedDst, err := store.LoadStore(dstProfile, masterKey)
+	if err != nil {
+		t.Fatalf("failed to load dst store: %v", err)
+	}
+	loadedDst.Secrets["router/wifi_passphrase"] = store.SecretEntry{
+		Value:   entry.Value,
+		Comment: "Copied from " + srcProfile + ":wifi/passphrase",
+	}
+	if err := store.SaveStore(dstProfile, loadedDst, masterKey); err != nil {
+		t.Fatalf("failed to save copied dst store: %v", err)
+	}
+
+	finalDst, err := store.LoadStore(dstProfile, masterKey)
+	if err != nil {
+		t.Fatalf("failed to load final dst store: %v", err)
+	}
+
+	if finalDst.Secrets["router/wifi_passphrase"].Value != "secret-wifi-pass" {
+		t.Errorf("expected copied secret value 'secret-wifi-pass', got %q", finalDst.Secrets["router/wifi_passphrase"].Value)
+	}
+}
+
+
 
 
 

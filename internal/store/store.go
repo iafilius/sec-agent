@@ -110,6 +110,13 @@ func LoadStore(profile string, masterKey []byte) (*EncryptedStore, error) {
 
 	decrypted, err := crypto.Decrypt(masterKey, data)
 	if err != nil {
+		if strings.Contains(err.Error(), "cipher: message authentication failed") {
+			profTag := profile
+			if profTag == "" {
+				profTag = "default"
+			}
+			return nil, fmt.Errorf("master key mismatch (Touch ID biometric set changed or key invalidated). If this is a v2.0 vault, run 'sec session recover --profile %s' to restore access with your 24-word seed. If this is a test store, re-initialize with 'rm ~/.config/sec-agent/secrets_%s.enc && sec init --profile %s': %w", profTag, profTag, profTag, err)
+		}
 		return nil, fmt.Errorf("failed to decrypt store (incorrect or expired key?): %w", err)
 	}
 

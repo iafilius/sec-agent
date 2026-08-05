@@ -256,6 +256,24 @@ When initializing secret management for a new workspace or migrating an existing
 3. **Inspect Security Scorecard (`sec status`)**: Check vault schema (`v2.0 Dual-Slot Envelope` vs `v1.0 Legacy`) and active Secure Enclave policy (`BiometryCurrentSet`).
 4. **Offline Recovery Seed Preparation**: Ensure users save their 24-word Argon2id recovery seed phrase generated during `sec init` or `sec session recover` in an offline safe location.
 
+### 5.20. v2.0 Unified Seed Migration & Seed Rotation Protocol
+1. **Unified Seed Migration (`sec migrate-v2 --seed "<mnemonic>"`)**: Use `--seed "<mnemonic>"` flag when performing v2.0 vault migrations to bind all workstation profile stores (`default`, `dev`, `prod`, `router-ax3600-prod`) to a single 24-word BIP39 recovery seed.
+2. **Seed Rotation (`sec session rotate-seed`)**: Rotate or change recovery seed phrases across all active v2.0 profile stores in a single operation without invalidating Touch ID Keychain items.
+3. **Actionable Un-bricking (`sec session recover --profile <name>`)**: When biometric sets change, use `sec session recover` to un-brick vault envelopes using the single 24-word seed.
+
+### 5.21. Workspace `.secrc` Auto-Open & Native Cross-Profile Copy (`sec copy`)
+1. **Workspace `.secrc` Auto-Open**: Place a `.secrc` (or `.secenv` / `.sec.json`) file in your repository root to configure workspace profile binding:
+   ```json
+   {
+     "profile": "router-ax3600-prod"
+   }
+   ```
+   Running `eval $(sec open)` inside the repository auto-detects `.secrc` and unlocks both `default` and `router-ax3600-prod` profile daemons concurrently in a single Touch ID prompt.
+2. **Native Cross-Profile Copy (`sec copy` / `sec cp`)**: Copy credentials between different profile vaults in memory without shell process leaks:
+   ```bash
+   sec copy wifi/passphrase router/wifi_passphrase --from-profile default --to-profile router-ax3600-prod
+   ```
+
 ---
 
 ## 6. Key Takeaways for AI Assistants
@@ -269,3 +287,6 @@ When initializing secret management for a new workspace or migrating an existing
 4. **Use Interactive Prompts or Stdin for `sec-agent set`**: Avoid outputting raw secret strings in command arguments.
 5. **Zero Disk Tokens & Automatic Subshell Resolution**: Zero token files are written to disk. The daemon automatically authorizes subshell executions via socket peer credentials (`LOCAL_PEERCRED`) and unlocked RAM state. Never attempt to read `session_*.token` files from disk.
 6. **In-Memory Hot-Reload (`sec restart --hot-reload`)**: During CLI upgrades, execute `sec restart --hot-reload` to hot-reload the daemon process image in memory via kernel pipe handoff without clearing active session state or requiring Touch ID re-authentication.
+7. **Workspace `.secrc` Auto-Open & Native Cross-Profile Copy**: `eval $(sec open)` auto-detects workspace `.secrc` / `.secenv` targets to unlock `default` and workspace target profiles in 1 Touch ID tap. Use `sec copy <src> <dst> --from-profile <p1> --to-profile <p2>` to safely copy credentials across vault profiles in memory.
+
+

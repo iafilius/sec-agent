@@ -254,9 +254,14 @@ func findWorkspaceConfigFile() string {
 }
 
 func loadWorkspaceConfig() *WorkspaceConfig {
+	cfg, _ := loadWorkspaceConfigVerbose()
+	return cfg
+}
+
+func loadWorkspaceConfigVerbose() (*WorkspaceConfig, string) {
 	dir, err := os.Getwd()
 	if err != nil {
-		return nil
+		return nil, ""
 	}
 	for {
 		for _, name := range []string{".secenv", ".secrc", ".sec.json"} {
@@ -266,7 +271,7 @@ func loadWorkspaceConfig() *WorkspaceConfig {
 			if err == nil {
 				var cfg WorkspaceConfig
 				if err := json.Unmarshal(data, &cfg); err == nil {
-					return &cfg
+					return &cfg, filepath.Base(path)
 				}
 			}
 		}
@@ -276,7 +281,7 @@ func loadWorkspaceConfig() *WorkspaceConfig {
 		}
 		dir = parent
 	}
-	return nil
+	return nil, ""
 }
 
 func isInteractiveTerminal() bool {
@@ -881,9 +886,23 @@ func handleOpen(profile string, args []string) {
 		}
 	}
 
-	if err := ensureDaemonRunning(profile); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+	wsCfg, wsCfgFile := loadWorkspaceConfigVerbose()
+	openProfiles := []string{profile}
+	if profile == "default" && wsCfg != nil && wsCfg.Profile != "" && wsCfg.Profile != "default" {
+		openProfiles = append(openProfiles, wsCfg.Profile)
+	}
+
+	if wsCfg != nil && wsCfg.Profile != "" {
+		fmt.Fprintf(os.Stderr, "⚙️  Detected workspace config file (%s): profile = %q\n", wsCfgFile, wsCfg.Profile)
+	} else if len(openProfiles) == 1 {
+		fmt.Fprintln(os.Stderr, "💡 Tip: Create a '.secrc' file (e.g. `{\"profile\": \"<name>\"}`) in this repository to auto-unlock its profile in 1 Touch ID prompt.")
+	}
+
+	for _, p := range openProfiles {
+		if err := ensureDaemonRunning(p); err != nil {
+			fmt.Fprintf(os.Stderr, "Error starting daemon for profile %q: %v\n", p, err)
+			os.Exit(1)
+		}
 	}
 
 	fmt.Fprintln(os.Stderr, "Authorizing session via Touch ID...")
@@ -895,28 +914,46 @@ func handleOpen(profile string, args []string) {
 		}
 	}
 
-	getter, setter := keychain.GetKeychainAccessPair(profile)
+	lastToken := ""
+	for _, p := range openProfiles {
+		getter, setter := keychain.GetKeychainAccessPair(p)
 
-	masterKey, err := store.InitializeMasterKey(profile, getter, setter)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Authentication failed: %v\n", err)
-		os.Exit(1)
+		masterKey, err := store.InitializeMasterKey(p, getter, setter)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Authentication failed for profile %q: %v\n", p, err)
+			continue
+		}
+
+		resp, err := queryDaemon(p, daemon.IPCRequest{
+			Action: "open",
+			Key:    masterKey,
+			TTL:    ttlStr,
+			Grace:  graceStr,
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Daemon IPC error for profile %q: %v\n", p, err)
+			continue
+		}
+
+		if !resp.Success {
+			if strings.Contains(resp.Error, "cipher: message authentication failed") {
+				fmt.Fprintf(os.Stderr, "\n❌ Unlock failed for profile %q: cipher: message authentication failed\n\n", p)
+				fmt.Fprintln(os.Stderr, "💡 Remediation Hints:")
+				fmt.Fprintf(os.Stderr, "  • Biometric Set Changed? Run 'sec session recover --profile %s' to un-brick with your 24-word paper seed.\n", p)
+				fmt.Fprintf(os.Stderr, "  • Stale / Test Store? Run 'rm ~/.config/sec-agent/secrets_%s.enc' and 'sec init --profile %s' to reset.\n\n", p, p)
+			} else {
+				fmt.Fprintf(os.Stderr, "Unlock failed for profile %q: %s\n", p, resp.Error)
+			}
+			continue
+		}
+
+		if lastToken == "" {
+			lastToken = resp.Token
+		}
 	}
 
-	resp, err := queryDaemon(profile, daemon.IPCRequest{
-		Action: "open",
-		Key:    masterKey,
-		TTL:    ttlStr,
-		Grace:  graceStr,
-	})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Daemon IPC error: %v\n", err)
-		os.Exit(1)
-	}
-
-	if !resp.Success {
-		fmt.Fprintf(os.Stderr, "Unlock failed: %s\n", resp.Error)
-		os.Exit(1)
+	if len(openProfiles) > 1 {
+		fmt.Fprintf(os.Stderr, "✨ Unlocked profile %q and workspace profile %q in 1 Touch ID prompt.\n", openProfiles[0], openProfiles[1])
 	}
 
 	msg := "Session unlocked successfully. Cache active."
@@ -931,7 +968,7 @@ func handleOpen(profile string, args []string) {
 		msg += " Inactivity Grace: 30m."
 	}
 	fmt.Fprintln(os.Stderr, msg)
-	fmt.Fprintf(os.Stdout, "export SEC_SESSION_TOKEN=%q\n", resp.Token)
+	fmt.Fprintf(os.Stdout, "export SEC_SESSION_TOKEN=%q\n", lastToken)
 	fmt.Fprintln(os.Stderr, "Tip: Run 'eval $(sec open)' to automatically authorize this shell session.")
 }
 
@@ -1302,10 +1339,53 @@ func handleSet(profile string, path, value string, args []string) {
 
 func handleCopy(profile string, srcPath, dstPath string, args []string) {
 	isPrefix := false
-	for _, arg := range args {
-		if arg == "--prefix" {
+	fromProfile := profile
+	toProfile := profile
+
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--prefix" {
 			isPrefix = true
+		} else if (a == "--from-profile" || a == "-f") && i+1 < len(args) {
+			fromProfile = args[i+1]
+			i++
+		} else if strings.HasPrefix(a, "--from-profile=") {
+			fromProfile = strings.TrimPrefix(a, "--from-profile=")
+		} else if (a == "--to-profile" || a == "-t") && i+1 < len(args) {
+			toProfile = args[i+1]
+			i++
+		} else if strings.HasPrefix(a, "--to-profile=") {
+			toProfile = strings.TrimPrefix(a, "--to-profile=")
 		}
+	}
+
+	if fromProfile != toProfile {
+		resp, err := queryDaemon(fromProfile, daemon.IPCRequest{
+			Action: "get",
+			Path:   srcPath,
+		})
+		if err != nil {
+			fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon for source profile %q is not running. Run 'eval $(sec open --profile %s)' to unlock.", fromProfile, fromProfile), "")
+		}
+		if !resp.Success {
+			fail("SECRET_NOT_FOUND", fmt.Errorf("Source secret %q not found in profile %q: %s", srcPath, fromProfile, resp.Error), "")
+		}
+
+		setResp, err := queryDaemon(toProfile, daemon.IPCRequest{
+			Action:  "set",
+			Path:    dstPath,
+			Value:   resp.Value,
+			Comment: resp.Comment,
+		})
+		if err != nil {
+			fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon for target profile %q is not running. Run 'eval $(sec open --profile %s)' to unlock.", toProfile, toProfile), "")
+		}
+		if !setResp.Success {
+			fail("COPY_FAILED", fmt.Errorf("Failed writing secret to target profile %q: %s", toProfile, setResp.Error), "")
+		}
+
+		fmt.Printf("✅ Successfully copied secret %q (profile %q) -> %q (profile %q)\n", srcPath, fromProfile, dstPath, toProfile)
+		return
 	}
 
 	resp, err := queryDaemon(profile, daemon.IPCRequest{
@@ -3513,17 +3593,32 @@ func readMnemonicFromTTY() string {
 func handleMigrateV2(profile string, args []string) {
 	dryRun := false
 	forceReroll := false
-	for _, a := range args {
+	seedInput := ""
+	for i := 0; i < len(args); i++ {
+		a := args[i]
 		if a == "--dry-run" {
 			dryRun = true
 		}
 		if a == "--force" || a == "--reroll" || a == "-f" {
 			forceReroll = true
 		}
+		if a == "--seed" && i+1 < len(args) {
+			seedInput = strings.Trim(args[i+1], `"'`)
+			i++
+		} else if strings.HasPrefix(a, "--seed=") {
+			seedInput = strings.Trim(strings.TrimPrefix(a, "--seed="), `"'`)
+		}
+	}
+
+	if seedInput != "" {
+		if !crypto.MnemonicValid(seedInput) {
+			fmt.Fprintln(os.Stderr, "❌ Provided seed phrase is not a valid 24-word BIP39 mnemonic.")
+			os.Exit(1)
+		}
 	}
 
 	// TTY safety: refuse to run in non-interactive sessions where mnemonic might be captured
-	if !isInteractiveTerminal() {
+	if !isInteractiveTerminal() && seedInput == "" {
 		fmt.Fprintln(os.Stderr, "🔒 SECURITY: migrate-v2 requires an interactive TTY.")
 		fmt.Fprintln(os.Stderr, "   The 24-word recovery mnemonic must be displayed on a physical screen,")
 		fmt.Fprintln(os.Stderr, "   not piped to a file, script, or AI agent context.")
@@ -3544,7 +3639,7 @@ func handleMigrateV2(profile string, args []string) {
 	// Separate into pending (v1) and already upgraded (v2)
 	var pending, alreadyV2 []store.VaultFileInfo
 	for _, v := range vaults {
-		if v.IsV2 && !forceReroll {
+		if v.IsV2 && !forceReroll && seedInput == "" {
 			alreadyV2 = append(alreadyV2, v)
 		} else {
 			pending = append(pending, v)
@@ -3585,7 +3680,7 @@ func handleMigrateV2(profile string, args []string) {
 		fmt.Println("⚠️  A previous migration was interrupted. Resuming from checkpoint...")
 	}
 
-	// === PHASE 1: Generate BIP39 mnemonic (ONE mnemonic for all vaults) ===
+	// === PHASE 1: Generate or use provided BIP39 mnemonic (ONE mnemonic for all vaults) ===
 	fmt.Println()
 	fmt.Println("╔═══════════════════════════════════════════════════════════════╗")
 	fmt.Println("║       sec-agent v2.0 Dual-Slot Vault Migration                ║")
@@ -3606,10 +3701,14 @@ func handleMigrateV2(profile string, args []string) {
 	}
 	fmt.Println()
 
-	mnemonic, err := crypto.GenerateMnemonic()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Failed to generate recovery mnemonic: %v\n", err)
-		os.Exit(1)
+	mnemonic := seedInput
+	if mnemonic == "" {
+		m, err := crypto.GenerateMnemonic()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "❌ Failed to generate recovery mnemonic: %v\n", err)
+			os.Exit(1)
+		}
+		mnemonic = m
 	}
 
 	// Display mnemonic with word numbers for easy transcription
@@ -3634,23 +3733,26 @@ func handleMigrateV2(profile string, args []string) {
 	fmt.Println("   • Do NOT photograph, copy, or paste this mnemonic into any app or chat.")
 	fmt.Println()
 
-	// 3-word verification challenge
-	fmt.Println("To confirm you have written down the mnemonic, please enter:")
-	verificationWords := []int{4, 12, 20} // 1-indexed positions to verify
-	for _, pos := range verificationWords {
-		fmt.Printf("  Word #%d: ", pos)
-		reader := bufio.NewReader(os.Stdin)
-		entered, _ := reader.ReadString('\n')
-		entered = strings.TrimSpace(strings.ToLower(entered))
-		expected := strings.ToLower(words[pos-1])
-		if entered != expected {
-			fmt.Fprintf(os.Stderr, "\n❌ Word #%d mismatch (expected %q, got %q). Aborting — no changes made.\n", pos, expected, entered)
-			os.Exit(1)
+	// 3-word verification challenge (skip if explicit --seed flag was passed)
+	if seedInput == "" {
+		fmt.Println("To confirm you have written down the mnemonic, please enter:")
+		verificationWords := []int{4, 12, 20} // 1-indexed positions to verify
+		for _, pos := range verificationWords {
+			fmt.Printf("  Word #%d: ", pos)
+			reader := bufio.NewReader(os.Stdin)
+			entered, _ := reader.ReadString('\n')
+			entered = strings.TrimSpace(strings.ToLower(entered))
+			expected := strings.ToLower(words[pos-1])
+			if entered != expected {
+				fmt.Fprintf(os.Stderr, "\n❌ Word #%d mismatch (expected %q, got %q). Aborting — no changes made.\n", pos, expected, entered)
+				os.Exit(1)
+			}
+			fmt.Printf("  ✓ Word #%d correct.\n", pos)
 		}
-		fmt.Printf("  ✓ Word #%d correct.\n", pos)
+		fmt.Println("\n✅ Verification passed. Proceeding with vault upgrade...")
+	} else {
+		fmt.Println("\n✅ Using provided --seed phrase. Proceeding with vault upgrade...")
 	}
-
-	fmt.Println("\n✅ Verification passed. Proceeding with vault upgrade...")
 	fmt.Println()
 
 	// === PHASE 2: Atomic upgrade of each pending vault ===
