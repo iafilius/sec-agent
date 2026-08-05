@@ -1282,16 +1282,13 @@ func TestDaemonParityAndAutoEviction(t *testing.T) {
 }
 
 func TestCleanupCommandDryRun(t *testing.T) {
-	cfgDir, err := config.GetConfigDir()
-	if err != nil {
-		t.Fatalf("failed to get config dir: %v", err)
-	}
+	tmpDir := t.TempDir()
+	t.Setenv("SEC_CONFIG_DIR", tmpDir)
 
-	testBakFile := filepath.Join(cfgDir, "test_legacy_vault.enc.bak.20260101")
+	testBakFile := filepath.Join(tmpDir, "test_legacy_vault.enc.bak.20260101")
 	if err := os.WriteFile(testBakFile, []byte("fake legacy backup"), 0600); err != nil {
 		t.Fatalf("failed to write test bak file: %v", err)
 	}
-	defer os.Remove(testBakFile)
 
 	// Dry run cleanup
 	handleCleanup("default", true)

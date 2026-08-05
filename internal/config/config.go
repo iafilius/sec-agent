@@ -26,6 +26,13 @@ func IsConfigDirInitialized() bool {
 
 // GetConfigDir returns the path to ~/.config/sec-agent/, automatically migrating from ~/.config/sec/ if present.
 func GetConfigDir() (string, error) {
+	if custom := os.Getenv("SEC_CONFIG_DIR"); custom != "" {
+		// #nosec G304 G703
+		if err := os.MkdirAll(custom, 0700); err != nil {
+			return "", err
+		}
+		return custom, nil
+	}
 	if os.Getenv("SEC_TEST_MODE") != "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
