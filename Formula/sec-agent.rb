@@ -1,9 +1,9 @@
 class SecAgent < Formula
   desc "macOS Enclave-Bound Session Agent for Encrypted Secrets"
   homepage "https://github.com/iafilius/sec-agent"
-  url "https://github.com/iafilius/sec-agent/releases/download/v2.2.0/sec-agent_v2.2.0_darwin_arm64.tar.gz"
-  version "2.2.0"
-  sha256 "27c9d9f5055dc2b7a1769806b8f1147b7ab60cd4bc9732e0081f167c64aac5b6"
+  url "https://github.com/iafilius/sec-agent/releases/download/v2.4.0/sec-agent_v2.4.0_darwin_arm64.tar.gz"
+  version "2.4.0"
+  sha256 "25edeab3e0b3a0a8f6b9bd0b18aaa4812413168a7f1b05e295d7d53007a0a36f"
   license "GPL-3.0-or-later"
 
   depends_on :macos
@@ -11,6 +11,10 @@ class SecAgent < Formula
   def install
     bin.install "sec-agent"
     bin.install_symlink bin/"sec-agent" => "sec"
+  end
+
+  def post_install
+    system "#{bin}/sec-agent", "restart", "--hot-reload" rescue nil
   end
 
   test do

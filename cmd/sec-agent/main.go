@@ -42,7 +42,7 @@ var embeddedSkillBytes []byte
 
 var jsonErrors bool
 var (
-	Version   = "v2.3.0"
+	Version   = "v2.4.0"
 	BuildDate = "unknown"
 )
 
@@ -254,14 +254,14 @@ func findWorkspaceConfigFile() string {
 }
 
 func loadWorkspaceConfig() *WorkspaceConfig {
-	cfg, _ := loadWorkspaceConfigVerbose()
+	cfg, _, _ := loadWorkspaceConfigVerbose()
 	return cfg
 }
 
-func loadWorkspaceConfigVerbose() (*WorkspaceConfig, string) {
+func loadWorkspaceConfigVerbose() (*WorkspaceConfig, string, string) {
 	dir, err := os.Getwd()
 	if err != nil {
-		return nil, ""
+		return nil, "", ""
 	}
 	for {
 		for _, name := range []string{".secenv", ".secrc", ".sec.json"} {
@@ -271,7 +271,7 @@ func loadWorkspaceConfigVerbose() (*WorkspaceConfig, string) {
 			if err == nil {
 				var cfg WorkspaceConfig
 				if err := json.Unmarshal(data, &cfg); err == nil {
-					return &cfg, filepath.Base(path)
+					return &cfg, filepath.Base(path), dir
 				}
 			}
 		}
@@ -281,7 +281,7 @@ func loadWorkspaceConfigVerbose() (*WorkspaceConfig, string) {
 		}
 		dir = parent
 	}
-	return nil, ""
+	return nil, "", ""
 }
 
 func isInteractiveTerminal() bool {
@@ -467,6 +467,8 @@ func main() {
 		handleDelete(profile, os.Args[2], os.Args[3:])
 	case "status":
 		handleStatus(profile, os.Args[2:])
+	case "init-shell":
+		handleInitShell(os.Args[2:])
 	case "audit", "log":
 		handleAudit(profile, os.Args[2:])
 	case "load":
@@ -886,7 +888,7 @@ func handleOpen(profile string, args []string) {
 		}
 	}
 
-	wsCfg, wsCfgFile := loadWorkspaceConfigVerbose()
+	wsCfg, wsCfgFile, _ := loadWorkspaceConfigVerbose()
 	openProfiles := []string{profile}
 	if profile == "default" && wsCfg != nil && wsCfg.Profile != "" && wsCfg.Profile != "default" {
 		openProfiles = append(openProfiles, wsCfg.Profile)
@@ -1341,6 +1343,8 @@ func handleCopy(profile string, srcPath, dstPath string, args []string) {
 	isPrefix := false
 	fromProfile := profile
 	toProfile := profile
+	hasExplicitFrom := false
+	hasExplicitTo := false
 
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -1348,14 +1352,25 @@ func handleCopy(profile string, srcPath, dstPath string, args []string) {
 			isPrefix = true
 		} else if (a == "--from-profile" || a == "-f") && i+1 < len(args) {
 			fromProfile = args[i+1]
+			hasExplicitFrom = true
 			i++
 		} else if strings.HasPrefix(a, "--from-profile=") {
 			fromProfile = strings.TrimPrefix(a, "--from-profile=")
+			hasExplicitFrom = true
 		} else if (a == "--to-profile" || a == "-t") && i+1 < len(args) {
 			toProfile = args[i+1]
+			hasExplicitTo = true
 			i++
 		} else if strings.HasPrefix(a, "--to-profile=") {
 			toProfile = strings.TrimPrefix(a, "--to-profile=")
+			hasExplicitTo = true
+		}
+	}
+
+	wsCfg, wsFile, _ := loadWorkspaceConfigVerbose()
+	if hasExplicitFrom && !hasExplicitTo {
+		if wsCfg != nil && wsCfg.Profile != "" {
+			toProfile = wsCfg.Profile
 		}
 	}
 
@@ -1384,7 +1399,11 @@ func handleCopy(profile string, srcPath, dstPath string, args []string) {
 			fail("COPY_FAILED", fmt.Errorf("Failed writing secret to target profile %q: %s", toProfile, setResp.Error), "")
 		}
 
-		fmt.Printf("✅ Successfully copied secret %q (profile %q) -> %q (profile %q)\n", srcPath, fromProfile, dstPath, toProfile)
+		toMeta := toProfile
+		if wsCfg != nil && wsCfg.Profile == toProfile && !hasExplicitTo {
+			toMeta = fmt.Sprintf("%s via %s", toProfile, wsFile)
+		}
+		fmt.Printf("✅ Successfully copied secret %q (profile %q) -> %q (profile %q)\n", srcPath, fromProfile, dstPath, toMeta)
 		return
 	}
 
@@ -2417,7 +2436,11 @@ func handleStatusAll() {
 
 	fmt.Println("=== sec-agent Global Workstation Status & Inventory ===")
 	fmt.Printf("CLI Version:            %s (Build Date: %s)\n", Version, BuildDate)
-	fmt.Printf("Config Directory:       %s\n\n", cfgDir)
+	fmt.Printf("Config Directory:       %s\n", cfgDir)
+	if wsCfg, wsFile, wsDir := loadWorkspaceConfigVerbose(); wsCfg != nil && wsCfg.Profile != "" {
+		fmt.Printf("Workspace Binding:     %s (via %s in %s)\n", wsCfg.Profile, wsFile, wsDir)
+	}
+	fmt.Println()
 
 	fmt.Printf("%-24s %-10s %-20s %-12s %s\n", "PROFILE NAME", "ENV TIER", "SESSION STATUS", "STORED KEYS", "EXPIRED")
 	fmt.Println(strings.Repeat("-", 80))
@@ -2644,8 +2667,77 @@ func handleCleanup(profile string, dryRun bool) {
 		fmt.Println("To perform actual deletion, run: 'sec cleanup'")
 	} else {
 		fmt.Printf("✨ Cleanup complete. %d item(s) removed (approx. %s freed).\n", totalCount, formatBytes(freedBytes))
-		fmt.Println("Active vaults remain 100% untouched.")
 	}
+}
+
+func handleInitShell(args []string) {
+	targetShell := "zsh"
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "-") {
+			targetShell = strings.ToLower(arg)
+			break
+		}
+	}
+	if targetShell != "bash" && targetShell != "zsh" {
+		envShell := os.Getenv("SHELL")
+		if strings.Contains(envShell, "bash") {
+			targetShell = "bash"
+		} else {
+			targetShell = "zsh"
+		}
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		fail("HOME_NOT_FOUND", fmt.Errorf("Could not determine user home directory: %v", err), "")
+	}
+
+	var rcFile string
+	if targetShell == "bash" {
+		rcFile = filepath.Join(homeDir, ".bashrc")
+	} else {
+		rcFile = filepath.Join(homeDir, ".zshrc")
+	}
+
+	existingContent := ""
+	// #nosec G304 G703
+	if data, err := os.ReadFile(rcFile); err == nil {
+		existingContent = string(data)
+	}
+
+	aliasLine := "alias sec=sec-agent"
+	compSnippet := fmt.Sprintf("if command -v sec-agent >/dev/null 2>&1; then eval \"$(sec-agent shell-completion %s)\"; fi", targetShell)
+
+	if strings.Contains(existingContent, aliasLine) && strings.Contains(existingContent, "shell-completion") {
+		fmt.Printf("✨ sec-agent shell integration and %s completions are already installed in %s\n", targetShell, rcFile)
+		return
+	}
+
+	var builder strings.Builder
+	if len(existingContent) > 0 && !strings.HasSuffix(existingContent, "\n") {
+		builder.WriteString("\n")
+	}
+	builder.WriteString("\n# sec-agent Shell Integration & Autocompletions\n")
+	if !strings.Contains(existingContent, aliasLine) {
+		builder.WriteString(aliasLine + "\n")
+	}
+	if !strings.Contains(existingContent, "shell-completion") {
+		builder.WriteString(compSnippet + "\n")
+	}
+
+	// #nosec G304 G703
+	f, err := os.OpenFile(rcFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		fail("FILE_WRITE_ERROR", fmt.Errorf("Failed opening %s for appending: %v", rcFile, err), "")
+	}
+	defer f.Close()
+
+	if _, err := f.WriteString(builder.String()); err != nil {
+		fail("FILE_WRITE_ERROR", fmt.Errorf("Failed appending shell integration to %s: %v", rcFile, err), "")
+	}
+
+	fmt.Printf("✅ Added 'alias sec=sec-agent' and %s completions to %s\n", targetShell, rcFile)
+	fmt.Printf("💡 Run 'source %s' or open a new terminal tab to activate.\n", rcFile)
 }
 
 func handleStatusQuick(profile string) {
@@ -2718,6 +2810,9 @@ func handleStatus(profile string, args []string) {
 	}
 
 	fmt.Println("=== sec-agent Status & Diagnostics ===")
+	if wsCfg, wsFile, wsDir := loadWorkspaceConfigVerbose(); wsCfg != nil && wsCfg.Profile != "" {
+		fmt.Printf("📌 Active Workspace Profile: %s (bound via %s in %s)\n", wsCfg.Profile, wsFile, wsDir)
+	}
 	fmt.Printf("Active Profile:       %v (Tier: %s)\n", info["profile"], strings.ToUpper(tier))
 	printEnvBadge(profile)
 	fmt.Printf("Daemon Version:       %v\n", info["version"])

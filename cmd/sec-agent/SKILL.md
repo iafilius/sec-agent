@@ -1,10 +1,10 @@
 ---
 name: sec-agent-integration
 description: Use the sec-agent CLI utility to start background daemons, store secrets, run applications in isolated environments, migrate dotenv files, install AI skills, inspect snapshots, and manage backups.
-version: v2.3.0
+version: v2.4.0
 ---
 
-# sec-agent Secrets Management Integration (v2.3.0)
+# sec-agent Secrets Management Integration (v2.4.0)
 
 This skill enables AI coding agents and autonomous assistants to use the `sec-agent` CLI tool (v1.9.4+) to securely retrieve credentials, run application build/test/terraform pipelines in isolated process environments, migrate dotenv configuration files, install integration skills across IDEs, inspect automatic snapshots, and manage KeePassXC `.kdbx` backups on macOS.
 
@@ -273,6 +273,11 @@ When initializing secret management for a new workspace or migrating an existing
    ```bash
    sec copy wifi/passphrase router/wifi_passphrase --from-profile default --to-profile router-ax3600-prod
    ```
+
+### 5.22. One-Click Shell Integration & Workspace Binding Indicators (v2.4.0)
+1. **One-Click Shell Installer (`sec init-shell`)**: Run `sec-agent init-shell [zsh|bash]` to idempotently add `alias sec=sec-agent` and Zsh/Bash autocompletions to `~/.zshrc` or `~/.bashrc`.
+2. **Workspace Profile Binding Indicator**: `sec status` and `sec status --all` display explicit active workspace `.secrc` bindings (e.g. `📌 Active Workspace Profile: router-ax3600-prod (bound via .secrc in /path/to/dir)`).
+3. **Auto-Target Workspace Profile in `sec copy`**: Omit `--to-profile` when passing `--from-profile` to automatically target the active workspace profile bound by `.secrc`.
 
 ---
 

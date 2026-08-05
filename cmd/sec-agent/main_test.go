@@ -1421,6 +1421,49 @@ func TestCrossProfileCopyAndUsability(t *testing.T) {
 	}
 }
 
+func TestInitShellAndWorkspaceStatusIndicator(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	// Test init-shell zsh
+	rcFile := filepath.Join(tmpDir, ".zshrc")
+	handleInitShell([]string{"zsh"})
+
+	contentBytes, err := os.ReadFile(rcFile)
+	if err != nil {
+		t.Fatalf("failed to read generated .zshrc: %v", err)
+	}
+	content := string(contentBytes)
+
+	if !strings.Contains(content, "alias sec=sec-agent") || !strings.Contains(content, "shell-completion zsh") {
+		t.Errorf("expected .zshrc to contain alias and zsh completions, got:\n%s", content)
+	}
+
+	// Re-run handleInitShell (idempotency check)
+	handleInitShell([]string{"zsh"})
+	contentBytes2, _ := os.ReadFile(rcFile)
+	if strings.Count(string(contentBytes2), "alias sec=sec-agent") != 1 {
+		t.Errorf("expected idempotent insertion of alias sec=sec-agent, got:\n%s", string(contentBytes2))
+	}
+
+	// Test workspace status indicator formatting
+	oldWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(oldWd) }()
+	_ = os.Chdir(tmpDir)
+
+	secrcContent := `{"profile": "my-test-workspace-profile"}`
+	if err := os.WriteFile(filepath.Join(tmpDir, ".secrc"), []byte(secrcContent), 0600); err != nil {
+		t.Fatalf("failed writing .secrc: %v", err)
+	}
+
+	cfg, file, dir := loadWorkspaceConfigVerbose()
+	evalTmpDir, _ := filepath.EvalSymlinks(tmpDir)
+	evalDir, _ := filepath.EvalSymlinks(dir)
+	if cfg == nil || cfg.Profile != "my-test-workspace-profile" || file != ".secrc" || evalDir != evalTmpDir {
+		t.Errorf("expected loadWorkspaceConfigVerbose to return cfg, .secrc, %s; got cfg=%+v, file=%s, dir=%s", evalTmpDir, cfg, file, evalDir)
+	}
+}
+
 
 
 
