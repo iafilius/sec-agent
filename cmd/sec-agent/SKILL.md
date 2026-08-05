@@ -1,10 +1,10 @@
 ---
 name: sec-agent-integration
 description: Use the sec-agent CLI utility to start background daemons, store secrets, run applications in isolated environments, migrate dotenv files, install AI skills, inspect snapshots, and manage backups.
-version: v2.2.0
+version: v2.3.0
 ---
 
-# sec-agent Secrets Management Integration (v2.2.0)
+# sec-agent Secrets Management Integration (v2.3.0)
 
 This skill enables AI coding agents and autonomous assistants to use the `sec-agent` CLI tool (v1.9.4+) to securely retrieve credentials, run application build/test/terraform pipelines in isolated process environments, migrate dotenv configuration files, install integration skills across IDEs, inspect automatic snapshots, and manage KeePassXC `.kdbx` backups on macOS.
 
@@ -249,6 +249,12 @@ When initializing secret management for a new workspace or migrating an existing
 2. **Dedicated Workspace Profile**: Always create a `.secrc` file in the project root targeting a dedicated profile (`"profile": "<project>-dev"`).
 3. **Use Relative Keys (`"prefix": ""`)**: Set `"prefix": ""` in `.secrc` so keys resolve to clean relative paths inside dedicated stores (`secrets_<profile>.enc`) without double-scoping.
 4. **Hygienic Migration Protocol**: Follow `docs/VAULT_DESIGN_AND_PROJECT_MIGRATION_GUIDE.md` to purge legacy keys from `secrets.enc` (default profile) and remove old socket files.
+
+### 5.19. Granular Storage Cleanup & Security Scorecard Protocol (v2.3.0)
+1. **Preview Before Deleting (`sec cleanup --dry-run`)**: Execute `sec cleanup --dry-run` to preview all historical rolling backup snapshots (`secrets*.enc.<timestamp>`), legacy `.bak` files, and orphaned `.sock` / `.pid` files along with a list of `🛡️ Protected Active Vaults` that are guaranteed to remain untouched.
+2. **Purge Obsolete Snapshots (`sec cleanup`)**: Execute `sec cleanup` to delete identified snapshot files and reclaim disk space.
+3. **Inspect Security Scorecard (`sec status`)**: Check vault schema (`v2.0 Dual-Slot Envelope` vs `v1.0 Legacy`) and active Secure Enclave policy (`BiometryCurrentSet`).
+4. **Offline Recovery Seed Preparation**: Ensure users save their 24-word Argon2id recovery seed phrase generated during `sec init` or `sec session recover` in an offline safe location.
 
 ---
 

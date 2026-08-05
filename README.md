@@ -435,15 +435,21 @@ sec cleanup
 
 ### Dry-Run Output Example:
 ```text
-🔍 sec-agent Storage & Keychain CLEANUP (DRY-RUN PREVIEW)
+🧹 sec-agent Storage & Keychain CLEANUP (DRY-RUN PREVIEW)
 ───────────────────────────────────────────────────────────────────────
-📁 Legacy Backup Files Identified:
-  • [DRY-RUN WOULD REMOVE] /Users/arjan/.config/sec-agent/secrets.enc.bak.20260715
 
-🔒 Orphaned Lock & Socket Files Identified:
-  • [DRY-RUN WOULD REMOVE] /Users/arjan/.config/sec-agent/sec-agent_old.sock
+🛡️ Protected Active Vaults (Preserved — Never Deleted):
+  • [✓ SAFE] /Users/arjan/.config/sec-agent/secrets.enc (v2.0 Dual-Slot Vault)
+  • [✓ SAFE] /Users/arjan/.config/sec-agent/secrets_prod.enc (v2.0 Dual-Slot Vault)
 
-Summary: 2 item(s) would be deleted (approx. 14201 bytes freed).
+📁 Legacy (v1.0) & Rolling Backup Snapshots Identified (54 items):
+  • [DRY-RUN WOULD REMOVE] /Users/arjan/.config/sec-agent/backups/dev/secrets.enc.1785922652106329000
+
+🔒 Orphaned Sockets & Locks: None found (Clean).
+
+───────────────────────────────────────────────────────────────────────
+Summary: 54 item(s) would be deleted (approx. 1.1 MB freed).
+Active vaults remain 100% untouched.
 To perform actual deletion, run: 'sec cleanup'
 ```
 
