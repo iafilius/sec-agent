@@ -210,6 +210,9 @@ func (d *Daemon) Start() error {
 		return fmt.Errorf("failed to secure socket permissions: %w", err)
 	}
 
+	d.writePIDLockfile()
+	defer d.removePIDLockfile()
+
 	// Periodically check for session expiration
 	go d.expiryTicker()
 
@@ -223,6 +226,39 @@ func (d *Daemon) Start() error {
 	}
 }
 
+type PIDLockInfo struct {
+	PID        int    `json:"pid"`
+	Executable string `json:"executable"`
+	Version    string `json:"version"`
+	Profile    string `json:"profile"`
+}
+
+func (d *Daemon) writePIDLockfile() {
+	pidPath, err := config.GetPIDFilePath(d.profile)
+	if err != nil {
+		return
+	}
+	execPath, _ := os.Executable()
+	info := PIDLockInfo{
+		PID:        os.Getpid(),
+		Executable: execPath,
+		Version:    d.version,
+		Profile:    d.profile,
+	}
+	data, err := json.Marshal(info)
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(pidPath, data, 0600)
+}
+
+func (d *Daemon) removePIDLockfile() {
+	pidPath, err := config.GetPIDFilePath(d.profile)
+	if err == nil {
+		_ = os.Remove(pidPath)
+	}
+}
+
 // Stop stops the server and wipes memory cache.
 func (d *Daemon) Stop() {
 	d.mu.Lock()
@@ -232,6 +268,7 @@ func (d *Daemon) Stop() {
 		_ = d.listener.Close()
 	}
 	_ = os.Remove(d.socketPath)
+	d.removePIDLockfile()
 }
 
 func (d *Daemon) wipeMemory() {

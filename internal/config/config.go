@@ -110,6 +110,18 @@ func GetSocketPath(profile string) (string, error) {
 	return filepath.Join(dir, fmt.Sprintf("sec-agent_%s.sock", profile)), nil
 }
 
+// GetPIDFilePath returns the path to the PID lockfile for the given profile.
+func GetPIDFilePath(profile string) (string, error) {
+	dir, err := GetConfigDir()
+	if err != nil {
+		return "", err
+	}
+	if profile == "" || profile == "default" {
+		return filepath.Join(dir, "sec-agent.pid"), nil
+	}
+	return filepath.Join(dir, fmt.Sprintf("sec-agent_%s.pid", profile)), nil
+}
+
 // PurgeAllSessionTokenFiles removes any legacy or active session.token or session_*.token files from ~/.config/sec-agent/
 func PurgeAllSessionTokenFiles() {
 	dir, err := GetConfigDir()

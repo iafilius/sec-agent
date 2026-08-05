@@ -148,18 +148,7 @@ func ensureUnlocked(profile string) (*daemon.IPCResponse, error) {
 		}
 	}
 
-	getter := func() ([]byte, error) {
-		if profile == "" || profile == "default" {
-			return keychain.Get("sec-session", "master")
-		}
-		return keychain.Get("sec-session:profile_"+profile, "master")
-	}
-	setter := func(k []byte) error {
-		if profile == "" || profile == "default" {
-			return keychain.Set("sec-session", "master", k)
-		}
-		return keychain.Set("sec-session:profile_"+profile, "master", k)
-	}
+	getter, setter := keychain.GetKeychainAccessPair(profile)
 
 	masterKey, err := store.InitializeMasterKey(profile, getter, setter)
 	if err != nil {

@@ -14,6 +14,7 @@ import (
 	"secure_secrets/internal/config"
 	"secure_secrets/internal/crypto"
 	"secure_secrets/internal/daemon"
+	"secure_secrets/internal/keychain"
 	"secure_secrets/internal/store"
 )
 
@@ -1153,6 +1154,133 @@ func TestOOMGuardrailAndPreallocation(t *testing.T) {
 		t.Fatal("expected daemon pointer to be non-nil")
 	}
 }
+
+func TestGUIV2KeychainUnlockAlignment(t *testing.T) {
+	profile := "gui-v2-alignment-test"
+	os.Setenv("SEC_TEST_MODE", "1")
+	defer os.Unsetenv("SEC_TEST_MODE")
+
+	sockPath, _ := config.GetSocketPath(profile)
+	dbPath, _ := store.GetStorePath(profile)
+	_ = os.Remove(sockPath)
+	_ = os.Remove(dbPath)
+	defer os.Remove(sockPath)
+	defer os.Remove(dbPath)
+
+	d, err := daemon.NewDaemon(profile, 30*time.Second, "v2.2.0")
+	if err != nil {
+		t.Fatalf("failed to create daemon: %v", err)
+	}
+	go func() {
+		_ = d.Start()
+	}()
+	defer d.Stop()
+
+	// Give daemon time to start
+	time.Sleep(100 * time.Millisecond)
+
+	// Create a v2.0 vault envelope matching SEC_TEST_MODE key
+	key := []byte("01234567890123456789012345678901")
+
+	st := &store.EncryptedStore{
+		Secrets: map[string]store.SecretEntry{
+			"gui/test": {Value: "gui_val_123"},
+		},
+	}
+
+	mnemonic, err := crypto.GenerateMnemonic()
+	if err != nil {
+		t.Fatalf("failed to generate mnemonic: %v", err)
+	}
+
+	rawStore, err := json.Marshal(st)
+	if err != nil {
+		t.Fatalf("failed to marshal store: %v", err)
+	}
+
+	payload, err := crypto.Encrypt(key, rawStore)
+	if err != nil {
+		t.Fatalf("failed to encrypt store payload: %v", err)
+	}
+
+	slot1, err := store.WrapMasterKey(mnemonic, key)
+	if err != nil {
+		t.Fatalf("failed to wrap master key: %v", err)
+	}
+
+	env := &store.VaultEnvelope{
+		SchemaVersion: store.SchemaV2,
+		UpgradedAt:    time.Now().UTC(),
+		Slot1:         slot1,
+		Payload:       payload,
+	}
+
+	if err := store.WriteVaultEnvelope(dbPath, env); err != nil {
+		t.Fatalf("failed to write v2 vault envelope: %v", err)
+	}
+
+	// Store key in Keychain using SetCurrentSet
+	if err := keychain.SetCurrentSet("sec-session:profile_"+profile, "master", key); err != nil {
+		t.Fatalf("failed to set master key in keychain: %v", err)
+	}
+	defer keychain.Delete("sec-session:profile_"+profile, "master")
+
+	// Verify ensureUnlocked can unlock the v2 store under SEC_TEST_MODE=1
+	resp, err := ensureUnlocked(profile)
+	if err != nil {
+		t.Fatalf("ensureUnlocked failed for v2 store: %v", err)
+	}
+	if resp == nil || !resp.Success {
+		t.Fatalf("expected successful IPC response from ensureUnlocked, got: %+v", resp)
+	}
+}
+
+func TestDaemonParityAndAutoEviction(t *testing.T) {
+	profile := "daemon-parity-test"
+	os.Setenv("SEC_TEST_MODE", "1")
+	defer os.Unsetenv("SEC_TEST_MODE")
+
+	sockPath, _ := config.GetSocketPath(profile)
+	pidPath, _ := config.GetPIDFilePath(profile)
+	_ = os.Remove(sockPath)
+	_ = os.Remove(pidPath)
+	defer os.Remove(sockPath)
+	defer os.Remove(pidPath)
+
+	d, err := daemon.NewDaemon(profile, 30*time.Second, "v1.0.0-old")
+	if err != nil {
+		t.Fatalf("failed to create daemon: %v", err)
+	}
+	go func() {
+		_ = d.Start()
+	}()
+	defer d.Stop()
+
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify PID lockfile exists
+	if _, err := os.Stat(pidPath); err != nil {
+		t.Fatalf("expected PID lockfile to exist at %s: %v", pidPath, err)
+	}
+
+	// Write a fake external PID to test eviction without killing current test process
+	fakeInfo := daemon.PIDLockInfo{
+		PID:        999999,
+		Executable: "/usr/local/bin/sec-agent-old",
+		Version:    "v1.0.0-old",
+		Profile:    profile,
+	}
+	fakeData, _ := json.Marshal(fakeInfo)
+	_ = os.WriteFile(pidPath, fakeData, 0600)
+
+	// Verify evictStaleDaemon removes PID lockfile and cleans up
+	evictStaleDaemon(profile)
+
+	if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
+		t.Errorf("expected PID lockfile to be removed after eviction")
+	}
+}
+
 
 
 

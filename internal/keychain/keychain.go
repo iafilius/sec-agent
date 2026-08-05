@@ -19,7 +19,6 @@ int set_secret(const char* service, const char* account, const unsigned char* se
     CFDictionarySetValue(delQuery, kSecAttrService, cfService);
     CFDictionarySetValue(delQuery, kSecAttrAccount, cfAccount);
     SecItemDelete(delQuery);
-    CFRelease(delQuery);
 
     // Create adding query
     CFMutableDictionaryRef query = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
@@ -43,7 +42,14 @@ int set_secret(const char* service, const char* account, const unsigned char* se
     }
 
     OSStatus status = SecItemAdd(query, NULL);
+    if (status == errSecDuplicateItem) {
+        CFMutableDictionaryRef updateAttr = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+        CFDictionarySetValue(updateAttr, kSecValueData, cfSecret);
+        status = SecItemUpdate(delQuery, updateAttr);
+        CFRelease(updateAttr);
+    }
 
+    CFRelease(delQuery);
     CFRelease(cfService);
     CFRelease(cfAccount);
     CFRelease(cfSecret);
@@ -59,7 +65,7 @@ int set_secret_current_set(const char* service, const char* account, const unsig
     CFStringRef cfAccount = CFStringCreateWithCString(kCFAllocatorDefault, account, kCFStringEncodingUTF8);
     CFDataRef cfSecret = CFDataCreate(kCFAllocatorDefault, secret, secret_len);
 
-    // Delete existing item to avoid duplicates
+    // First delete any existing item to avoid duplicate errors
     CFMutableDictionaryRef delQuery = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
     CFDictionarySetValue(delQuery, kSecClass, kSecClassGenericPassword);
     CFDictionarySetValue(delQuery, kSecAttrService, cfService);
@@ -89,8 +95,10 @@ int set_secret_current_set(const char* service, const char* account, const unsig
 
     OSStatus status = SecItemAdd(query, NULL);
     if (status == errSecDuplicateItem) {
-        SecItemDelete(delQuery);
-        status = SecItemAdd(query, NULL);
+        CFMutableDictionaryRef updateAttr = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+        CFDictionarySetValue(updateAttr, kSecValueData, cfSecret);
+        status = SecItemUpdate(delQuery, updateAttr);
+        CFRelease(updateAttr);
     }
 
     CFRelease(delQuery);
@@ -320,3 +328,23 @@ func SetCurrentSet(service, account string, secret []byte) error {
 	}
 	return nil
 }
+
+// GetKeychainAccessPair returns a centralized getter/setter closure pair for a profile.
+// This guarantees that all entrypoints (CLI, Web GUI, Daemon) query and save master keys
+// under identical service names and access control rules (BiometryCurrentSet).
+func GetKeychainAccessPair(profile string) (getter func() ([]byte, error), setter func([]byte) error) {
+	svc := "sec-session"
+	if profile != "" && profile != "default" {
+		svc = "sec-session:profile_" + profile
+	}
+	acc := "master"
+
+	getter = func() ([]byte, error) {
+		return Get(svc, acc)
+	}
+	setter = func(k []byte) error {
+		return SetCurrentSet(svc, acc, k)
+	}
+	return getter, setter
+}
+

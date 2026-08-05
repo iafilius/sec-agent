@@ -751,13 +751,60 @@ func queryDaemonRaw(profile string, req daemon.IPCRequest) (*daemon.IPCResponse,
 	return &resp, nil
 }
 
+func evictStaleDaemon(profile string) {
+	_, _ = queryDaemonRaw(profile, daemon.IPCRequest{Action: "clear"})
+	socketPath, _ := config.GetSocketPath(profile)
+	pidPath, _ := config.GetPIDFilePath(profile)
+	if pidPath != "" {
+		// #nosec G304 G703
+		if data, err := os.ReadFile(pidPath); err == nil {
+			var info daemon.PIDLockInfo
+			if json.Unmarshal(data, &info) == nil && info.PID > 0 && info.PID != os.Getpid() && info.PID != os.Getppid() {
+				if os.Getenv("SEC_TEST_MODE") != "1" {
+					proc, err := os.FindProcess(info.PID)
+					if err == nil && proc != nil {
+						_ = proc.Kill()
+					}
+				}
+			}
+		}
+		// #nosec G703
+		_ = os.Remove(pidPath)
+	}
+	if socketPath != "" {
+		// #nosec G703
+		_ = os.Remove(socketPath)
+	}
+}
+
 func ensureDaemonRunning(profile string) error {
-	_, err := queryDaemon(profile, daemon.IPCRequest{Action: "ping"})
-	if err == nil {
-		return nil // Already running
+	currentExec, _ := os.Executable()
+	resp, err := queryDaemonRaw(profile, daemon.IPCRequest{Action: "ping"})
+	if err == nil && resp != nil {
+		versionMismatch := resp.Version != "" && resp.Version != Version
+		execMismatch := false
+		pidPath, _ := config.GetPIDFilePath(profile)
+		if pidPath != "" {
+			// #nosec G304 G703
+			if data, err := os.ReadFile(pidPath); err == nil {
+				var info daemon.PIDLockInfo
+				if json.Unmarshal(data, &info) == nil {
+					if info.Executable != "" && currentExec != "" && info.Executable != currentExec {
+						execMismatch = true
+					}
+				}
+			}
+		}
+
+		if versionMismatch || execMismatch {
+			fmt.Fprintln(os.Stderr, "[NOTICE] Mismatched background daemon detected. Evicting and restarting fresh daemon...")
+			evictStaleDaemon(profile)
+		} else {
+			return nil // Running and parity verified
+		}
 	}
 
-	// Not running, let's start it
+	// Not running (or evicted), let's start it
 	bin, err := os.Executable()
 	if err != nil {
 		return err
@@ -840,18 +887,7 @@ func handleOpen(profile string, args []string) {
 		}
 	}
 
-	getter := func() ([]byte, error) {
-		if profile == "" || profile == "default" {
-			return keychain.Get("sec-session", "master")
-		}
-		return keychain.Get("sec-session:profile_"+profile, "master")
-	}
-	setter := func(k []byte) error {
-		if profile == "" || profile == "default" {
-			return keychain.SetCurrentSet("sec-session", "master", k)
-		}
-		return keychain.SetCurrentSet("sec-session:profile_"+profile, "master", k)
-	}
+	getter, setter := keychain.GetKeychainAccessPair(profile)
 
 	masterKey, err := store.InitializeMasterKey(profile, getter, setter)
 	if err != nil {
@@ -3658,6 +3694,9 @@ func handleSessionRecover(profile string) {
 		fmt.Fprintf(os.Stderr, "❌ Failed to re-enroll in Keychain: %v\n", err)
 		os.Exit(1)
 	}
+
+	// Evict any stale background daemon for this profile to ensure fresh RAM cache on next open
+	evictStaleDaemon(profile)
 
 	fmt.Println()
 	fmt.Println("╔═══════════════════════════════════════════════════════════════╗")
