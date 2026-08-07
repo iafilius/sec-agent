@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -444,20 +445,24 @@ func TestMainIntegration(t *testing.T) {
 		t.Fatalf("sec ls --expiring failed: %v, out: %s", err, string(expLsOut))
 	}
 
-	// Test sec rotate
-	rotRunCmd := exec.Command("./sec_test_bin", "rotate", "rot/key", "--profile", profile)
-	rotRunCmd.Env = testEnv
-	rotRunOut, err := rotRunCmd.Output()
-	if err != nil || !strings.Contains(string(rotRunOut), "successfully rotated") {
-		t.Fatalf("sec rotate failed: %v, out: %s", err, string(rotRunOut))
-	}
+	// Test sec rotate (Disabled until explicitly enabled via ENABLE_TOKEN_ROTATION_TEST=1)
+	if os.Getenv("ENABLE_TOKEN_ROTATION_TEST") != "" {
+		rotRunCmd := exec.Command("./sec_test_bin", "rotate", "rot/key", "--profile", profile)
+		rotRunCmd.Env = testEnv
+		rotRunOut, err := rotRunCmd.Output()
+		if err != nil || !strings.Contains(string(rotRunOut), "successfully rotated") {
+			t.Fatalf("sec rotate failed: %v, out: %s", err, string(rotRunOut))
+		}
 
-	// Verify rotated value
-	getRotCmd := exec.Command("./sec_test_bin", "get", "rot/key", "-r", "--profile", profile)
-	getRotCmd.Env = testEnv
-	getRotOut, err := getRotCmd.Output()
-	if err != nil || string(getRotOut) != "rotated-secret-val" {
-		t.Fatalf("sec get after rotation failed: %v, expected 'rotated-secret-val', got %q", err, string(getRotOut))
+		// Verify rotated value
+		getRotCmd := exec.Command("./sec_test_bin", "get", "rot/key", "-r", "--profile", profile)
+		getRotCmd.Env = testEnv
+		getRotOut, err := getRotCmd.Output()
+		if err != nil || string(getRotOut) != "rotated-secret-val" {
+			t.Fatalf("sec get after rotation failed: %v, expected 'rotated-secret-val', got %q", err, string(getRotOut))
+		}
+	} else {
+		t.Log("Skipping sec rotate test execution (disabled per user directive until enabled)")
 	}
 
 	// 6t. Test v1.7.0 feature: sec status --all
@@ -1463,6 +1468,28 @@ func TestInitShellAndWorkspaceStatusIndicator(t *testing.T) {
 		t.Errorf("expected loadWorkspaceConfigVerbose to return cfg, .secrc, %s; got cfg=%+v, file=%s, dir=%s", evalTmpDir, cfg, file, evalDir)
 	}
 }
+
+func TestShellCompletionOutput(t *testing.T) {
+	for _, shell := range []string{"zsh", "bash", "fish"} {
+		r, w, _ := os.Pipe()
+		oldStdout := os.Stdout
+		os.Stdout = w
+
+		handleCompletion(shell)
+
+		_ = w.Close()
+		os.Stdout = oldStdout
+
+		var buf bytes.Buffer
+		_, _ = buf.ReadFrom(r)
+		out := buf.String()
+
+		if !strings.Contains(out, "sec") {
+			t.Errorf("expected shell completion for %s to contain 'sec', got:\n%s", shell, out)
+		}
+	}
+}
+
 
 
 

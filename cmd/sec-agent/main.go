@@ -352,7 +352,7 @@ func main() {
 			os.Exit(0)
 		}
 
-		if cmd != "init" && cmd != "setup" && cmd != "version" && cmd != "completion" {
+		if cmd != "init" && cmd != "setup" && cmd != "version" && cmd != "completion" && cmd != "shell-completion" {
 			if !config.IsConfigDirInitialized() {
 				fail("VAULT_UNINITIALIZED", fmt.Errorf("sec-agent configuration directory (~/.config/sec-agent/) is missing or uninitialized"), "Please initialize your vault environment by running: sec-agent init")
 			}
@@ -509,7 +509,7 @@ func main() {
 		handleCheck(profile, os.Args[2:])
 	case "restart":
 		handleRestart(profile, os.Args[2:])
-	case "completion":
+	case "completion", "shell-completion":
 		shell := "zsh"
 		if len(os.Args) >= 3 {
 			shell = os.Args[2]
