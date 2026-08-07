@@ -5006,7 +5006,11 @@ func handleBackupList(profile string) {
 func handleCompletion(shell string) {
 	switch shell {
 	case "zsh":
-		fmt.Print(`#compdef sec
+		fmt.Print(`#compdef sec sec-agent
+
+if ! type compdef &>/dev/null; then
+    autoload -U compinit && compinit
+fi
 
 _sec() {
     local -a commands
@@ -5039,9 +5043,7 @@ _sec() {
     _describe -t commands 'sec command' commands
 }
 
-if type compdef &>/dev/null; then
-    compdef _sec sec sec-agent
-fi
+compdef _sec sec sec-agent
 `)
 	case "bash":
 		fmt.Print(`# bash completion for sec
