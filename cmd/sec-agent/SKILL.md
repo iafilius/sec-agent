@@ -1,18 +1,32 @@
 ---
 name: sec-agent-integration
 description: Use the sec-agent CLI utility to start background daemons, store secrets, run applications in isolated environments, migrate dotenv files, install AI skills, inspect snapshots, and manage backups.
-version: v2.4.0
+version: v2.4.3
 ---
 
-# sec-agent Secrets Management Integration (v2.4.0)
+# sec-agent Secrets Management Integration (v2.4.3)
 
 This skill enables AI coding agents and autonomous assistants to use the `sec-agent` CLI tool (v1.9.4+) to securely retrieve credentials, run application build/test/terraform pipelines in isolated process environments, migrate dotenv configuration files, install integration skills across IDEs, inspect automatic snapshots, and manage KeePassXC `.kdbx` backups on macOS.
 
 ---
 
-## 1. Quick Diagnostics, Guided Setup & Vault Pre-flight Guard
+## 1. Quick Diagnostics, Guided Setup & Upfront Session Bootstrapping
 
-### 1.1. Pre-flight Initialization Guard (`sec-agent init`)
+### 1.1. Upfront Session Bootstrapping Protocol for AI Assistants (Turn 1 Execution)
+**MANDATORY FOR AI CODING AGENTS & AUTONOMOUS ASSISTANTS**:
+When an AI agent starts any task or session that involves executing commands, running tests/pipelines, or fetching workspace secrets:
+
+1. **Turn-1 Session Pre-Flight Check**: Immediately execute `sec status --quick` (<5ms execution).
+2. **Session Memory & Daemon Retention**:
+   * `sec-agent` runs an enclave-bound background daemon that **retains unlocked session secrets in RAM** (default 8-hour TTL).
+   * **Touch ID / Fingerprint authorization is required only ONCE per session.** Once unlocked, all subsequent subagent tool calls, child processes, and background commands inherit access frictionlessly without further prompts.
+3. **Turn-1 Authorization Prompting (Preventing Mid-Run Interruption)**:
+   * **If Daemon is ACTIVE / RUNNING**: Proceed 100% frictionlessly throughout the entire task trajectory!
+   * **If Daemon is SESSION LOCKED / NOT RUNNING**: Prompt the user **IMMEDIATELY at Turn 1** before doing extensive research, code editing, or planning:
+     > 🔑 **`sec-agent` session is currently locked.**
+     > Please approve the Touch ID prompt (or run `eval $(sec open)` in your terminal) so I can retain session access for our entire execution run.
+
+### 1.2. Pre-flight Initialization Guard (`sec-agent init`)
 When running `sec-agent` on a fresh workstation or uninitialized environment:
 * If `~/.config/sec-agent/` does not exist, commands will return:
   ```text
@@ -23,7 +37,7 @@ When running `sec-agent` on a fresh workstation or uninitialized environment:
   ```
 * **Guided & Non-Interactive Onboarding**: Run `sec-agent init` (or `sec-agent setup`). Pass `--non-interactive` (or `-y` / `--yes`) in non-interactive CI/CD setups to initialize configuration directories (`~/.config/sec-agent/` and `~/.config/sec-agent/backups/`) silently without terminal prompt menus.
 
-### 1.2. Diagnostics & Fast-Path Status Verification
+### 1.3. Diagnostics & Fast-Path Status Verification
 ```bash
 # Ultra-fast (<5ms) pre-flight socket permission & daemon PID check
 sec-agent status --quick [-q]
@@ -284,10 +298,11 @@ When initializing secret management for a new workspace or migrating an existing
 ## 6. Key Takeaways for AI Assistants
 
 1. **Always Favor `sec-agent run -- <cmd>`**: Never ask users to write plaintext secrets to `.env` files.
-2. **REUSABLE SESSIONS (Strictly Forbidden to use `--auto-open` in AI Automation)**:
+2. **UPFRONT SESSION BOOTSTRAPPING & REUSABLE SESSIONS**:
+   * **Pre-flight Check at Turn 1**: AI agents MUST run `sec status --quick` at the very beginning of a session or task requiring workspace execution or secrets.
+   * **Turn-1 Touch ID Prompting**: If session is locked, prompt the user ONCE at Turn 1 before starting work: *"🔑 The sec-agent session is locked. Please approve Touch ID (or run `eval $(sec open)`) to retain session access for our run."*
+   * **Daemon Session Memory**: Once unlocked, the background daemon retains session secrets in RAM (8-hour TTL). All subagent tool calls, subshells, and background pipeline runs inherit access frictionlessly without further prompts.
    * **DO NOT pass `--auto-open` or set `SEC_AUTO_OPEN=1` in AI agent tool calls**.
-   * If a session is locked, ask the user **once**: *"The sec-agent session is locked. Please run `eval $(sec-agent open)` in your terminal to authorize."*
-   * Reuses the single Touch ID authorization for all subsequent subagent tool calls.
 3. **Use Scoped Profiles**: Always pass `--profile` or check `.secrc`.
 4. **Use Interactive Prompts or Stdin for `sec-agent set`**: Avoid outputting raw secret strings in command arguments.
 5. **Zero Disk Tokens & Automatic Subshell Resolution**: Zero token files are written to disk. The daemon automatically authorizes subshell executions via socket peer credentials (`LOCAL_PEERCRED`) and unlocked RAM state. Never attempt to read `session_*.token` files from disk.
