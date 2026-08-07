@@ -5039,7 +5039,9 @@ _sec() {
     _describe -t commands 'sec command' commands
 }
 
-_sec "$@"
+if type compdef &>/dev/null; then
+    compdef _sec sec sec-agent
+fi
 `)
 	case "bash":
 		fmt.Print(`# bash completion for sec
@@ -5048,7 +5050,7 @@ _sec_completions() {
     local cmds="open get set mv cp rm ls diff doctor gen import check load run status audit env export clear restart backup restore completion version"
     COMPREPLY=( $(compgen -W "${cmds}" -- ${cur}) )
 }
-complete -F _sec_completions sec
+complete -F _sec_completions sec sec-agent
 `)
 	case "fish":
 		fmt.Print(`# fish completion for sec
