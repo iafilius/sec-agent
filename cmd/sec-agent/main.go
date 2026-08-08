@@ -5012,35 +5012,148 @@ if ! type compdef &>/dev/null; then
     autoload -U compinit && compinit
 fi
 
+_sec_keys() {
+    if command -v sec-agent >/dev/null 2>&1; then
+        local -a keys
+        keys=($(sec-agent ls --json 2>/dev/null | grep -o '"key":"[^"]*"' | cut -d'"' -f4))
+        if [ ${#keys[@]} -gt 0 ]; then
+            _values 'secret key' $keys
+        fi
+    fi
+}
+
 _sec() {
-    local -a commands
-    commands=(
-        'open:Initialize/unlock the secrets session using Touch ID'
-        'get:Retrieve a secret or group of secrets'
-        'set:Store a secret with optional comment and env alias'
-        'mv:Rename a secret key path or prefix namespace'
-        'cp:Duplicate a secret key path or prefix group'
-        'rm:Delete a secret or prefix group'
-        'ls:List secret paths without exposing values'
-        'diff:Compare secret paths against another profile or .env file'
-        'doctor:Run workstation system & security diagnostic checks'
-        'gen:Generate random password and save to path'
-        'import:Bulk import secrets from JSON, Doppler, or AWS payloads'
-        'check:Pre-flight validation of required vault keys or template'
-        'load:Batch-load scoped group secrets for shell sourcing'
-        'run:Execute a command with scoped secrets injected'
-        'status:Display session health, profile, and diagnostic metrics'
-        'audit:View recent daemon security audit logs'
-        'env:Output shell exports for secrets under prefix'
-        'export:Output decrypted database contents to stdout'
-        'clear:Lock the active session and clear memory cache'
-        'restart:Restart the active session daemon and re-authenticate'
-        'backup:Export cached secrets to a portable KeePassXC (.kdbx) file'
-        'restore:Import secrets from a portable KeePassXC (.kdbx) file'
-        'completion:Generate shell completion script (zsh, bash, fish)'
-        'version:Print CLI and active daemon version'
-    )
-    _describe -t commands 'sec command' commands
+    local context state state_descr line
+    typeset -A opt_args
+
+    _arguments -C \
+        '--profile[Target secret profile]:profile:' \
+        '--json[Output results in JSON format]' \
+        '1: :->command' \
+        '*:: :->args'
+
+    case $state in
+        command)
+            local -a commands
+            commands=(
+                'open:Initialize/unlock the secrets session using Touch ID'
+                'get:Retrieve a secret or group of secrets'
+                'set:Store a secret with optional comment and env alias'
+                'mv:Rename a secret key path or prefix namespace'
+                'cp:Duplicate a secret key path or prefix group'
+                'rm:Delete a secret or prefix group'
+                'ls:List secret paths without exposing values'
+                'diff:Compare secret paths against another profile or .env file'
+                'doctor:Run workstation system & security diagnostic checks'
+                'gen:Generate random password and save to path'
+                'import:Bulk import secrets from JSON, Doppler, or AWS payloads'
+                'check:Pre-flight validation of required vault keys or template'
+                'load:Batch-load scoped group secrets for shell sourcing'
+                'run:Execute a command with scoped secrets injected'
+                'status:Display session health, profile, and diagnostic metrics'
+                'audit:View recent daemon security audit logs'
+                'env:Output shell exports for secrets under prefix'
+                'export:Output decrypted database contents to stdout'
+                'clear:Lock the active session and clear memory cache'
+                'restart:Restart the active session daemon and re-authenticate'
+                'backup:Export cached secrets to a portable KeePassXC (.kdbx) file'
+                'restore:Import secrets from a portable KeePassXC (.kdbx) file'
+                'profile:Inspect, list, switch, or create secret profiles'
+                'lease:Inspect, list, or revoke temporary subagent leases'
+                'skill:Manage installed AI agent integration skills'
+                'init-shell:Install alias and autocompletions into shell startup'
+                'completion:Generate shell completion script (zsh, bash, fish)'
+                'cleanup:Clean legacy backup snapshots and orphaned sockets'
+                'version:Print CLI and active daemon version'
+            )
+            _describe -t commands 'sec command' commands
+            ;;
+        args)
+            case $words[1] in
+                get|rm|mv|cp|diff|history|rollback)
+                    _sec_keys
+                    ;;
+                profile)
+                    local -a subcmds
+                    subcmds=(
+                        'list:List all configured secret profiles'
+                        'use:Switch active secret profile context'
+                        'create:Create a new profile namespace'
+                        'show:Display current active profile name'
+                    )
+                    _describe -t subcmds 'profile subcommand' subcmds
+                    ;;
+                lease)
+                    local -a subcmds
+                    subcmds=(
+                        'list:List active temporary subagent leases'
+                        'revoke:Revoke subagent lease token immediately'
+                        'inspect:Inspect subagent lease details and TTL'
+                    )
+                    _describe -t subcmds 'lease subcommand' subcmds
+                    ;;
+                skill)
+                    local -a subcmds
+                    subcmds=(
+                        'update:Sync AI skills across all installed IDE targets'
+                        'list:List detected AI agent skills'
+                        'install:Install sec-agent integration skill'
+                    )
+                    _describe -t subcmds 'skill subcommand' subcmds
+                    ;;
+                import)
+                    local -a subcmds
+                    subcmds=(
+                        'doppler:Import secrets from Doppler JSON export'
+                        'aws:Import secrets from AWS Secrets Manager'
+                        'json:Import secrets from generic JSON payload'
+                        'env:Import secrets from local .env file'
+                    )
+                    _describe -t subcmds 'import source' subcmds
+                    ;;
+                init-shell)
+                    local -a subcmds
+                    subcmds=(
+                        'zsh:Install alias sec=sec-agent and Zsh completions'
+                        'bash:Install alias sec=sec-agent and Bash completions'
+                    )
+                    _describe -t subcmds 'shell target' subcmds
+                    ;;
+                completion)
+                    local -a subcmds
+                    subcmds=(
+                        'zsh:Generate Zsh autocompletion script'
+                        'bash:Generate Bash autocompletion script'
+                        'fish:Generate Fish autocompletion script'
+                    )
+                    _describe -t subcmds 'shell generator' subcmds
+                    ;;
+                status)
+                    local -a flags
+                    flags=(
+                        '--quick:Ultra-fast (<5ms) daemon socket permission check'
+                        '--all:View single-pane status across all profiles'
+                        '--json:Output status metrics in JSON'
+                    )
+                    _describe -t flags 'status flags' flags
+                    ;;
+                restart)
+                    local -a flags
+                    flags=(
+                        '--hot-reload:Restart daemon while preserving RAM cache'
+                    )
+                    _describe -t flags 'restart flags' flags
+                    ;;
+                cleanup)
+                    local -a flags
+                    flags=(
+                        '--dry-run:Preview removable snapshots without deleting'
+                    )
+                    _describe -t flags 'cleanup flags' flags
+                    ;;
+            esac
+            ;;
+    esac
 }
 
 compdef _sec sec sec-agent
@@ -5048,15 +5161,74 @@ compdef _sec sec sec-agent
 	case "bash":
 		fmt.Print(`# bash completion for sec
 _sec_completions() {
-    local cur="${COMP_WORDS[COMP_CWORD]}"
-    local cmds="open get set mv cp rm ls diff doctor gen import check load run status audit env export clear restart backup restore completion version"
-    COMPREPLY=( $(compgen -W "${cmds}" -- ${cur}) )
+    local cur prev
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+
+    local cmds="open get set mv cp rm ls diff doctor gen import check load run status audit env export clear restart backup restore profile lease skill init-shell completion cleanup version"
+
+    if [ $COMP_CWORD -eq 1 ]; then
+        COMPREPLY=( $(compgen -W "${cmds}" -- ${cur}) )
+        return 0
+    fi
+
+    case "${COMP_WORDS[1]}" in
+        profile)
+            COMPREPLY=( $(compgen -W "list use create show" -- ${cur}) )
+            ;;
+        lease)
+            COMPREPLY=( $(compgen -W "list revoke inspect" -- ${cur}) )
+            ;;
+        skill)
+            COMPREPLY=( $(compgen -W "update list install" -- ${cur}) )
+            ;;
+        import)
+            COMPREPLY=( $(compgen -W "doppler aws json env" -- ${cur}) )
+            ;;
+        init-shell)
+            COMPREPLY=( $(compgen -W "zsh bash" -- ${cur}) )
+            ;;
+        completion)
+            COMPREPLY=( $(compgen -W "zsh bash fish" -- ${cur}) )
+            ;;
+        get|rm|mv|cp|diff|history|rollback)
+            if command -v sec-agent >/dev/null 2>&1; then
+                local keys=$(sec-agent ls --json 2>/dev/null | grep -o '"key":"[^"]*"' | cut -d'"' -f4)
+                COMPREPLY=( $(compgen -W "${keys}" -- ${cur}) )
+            fi
+            ;;
+        status)
+            COMPREPLY=( $(compgen -W "--quick --all --json" -- ${cur}) )
+            ;;
+        restart)
+            COMPREPLY=( $(compgen -W "--hot-reload" -- ${cur}) )
+            ;;
+        cleanup)
+            COMPREPLY=( $(compgen -W "--dry-run" -- ${cur}) )
+            ;;
+    esac
 }
 complete -F _sec_completions sec sec-agent
 `)
 	case "fish":
 		fmt.Print(`# fish completion for sec
-complete -c sec -n "__fish_use_subcommand" -a "open get set mv cp rm ls diff doctor gen import check load run status audit env export clear restart backup restore completion version"
+complete -c sec -n "__fish_use_subcommand" -a "open get set mv cp rm ls diff doctor gen import check load run status audit env export clear restart backup restore profile lease skill init-shell completion cleanup version"
+
+complete -c sec -n "__fish_seen_subcommand_from profile" -a "list use create show"
+complete -c sec -n "__fish_seen_subcommand_from lease" -a "list revoke inspect"
+complete -c sec -n "__fish_seen_subcommand_from skill" -a "update list install"
+complete -c sec -n "__fish_seen_subcommand_from import" -a "doppler aws json env"
+complete -c sec -n "__fish_seen_subcommand_from init-shell" -a "zsh bash"
+complete -c sec -n "__fish_seen_subcommand_from completion" -a "zsh bash fish"
+
+complete -c sec -n "__fish_seen_subcommand_from status" -l quick -d "Ultra-fast daemon socket check"
+complete -c sec -n "__fish_seen_subcommand_from status" -l all -d "View status across all profiles"
+complete -c sec -n "__fish_seen_subcommand_from status" -l json -d "Output status in JSON"
+complete -c sec -n "__fish_seen_subcommand_from restart" -l hot-reload -d "Restart daemon preserving RAM cache"
+complete -c sec -n "__fish_seen_subcommand_from cleanup" -l dry-run -d "Preview cleanup without deleting"
+
+complete -c sec -l profile -d "Target secret profile"
+complete -c sec -l json -d "Output results in JSON format"
 `)
 	default:
 		fmt.Fprintf(os.Stderr, "Usage: sec completion <zsh|bash|fish>\n")

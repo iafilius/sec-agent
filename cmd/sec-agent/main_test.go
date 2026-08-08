@@ -1487,6 +1487,9 @@ func TestShellCompletionOutput(t *testing.T) {
 		if !strings.Contains(out, "sec") {
 			t.Errorf("expected shell completion for %s to contain 'sec', got:\n%s", shell, out)
 		}
+		if !strings.Contains(out, "profile") || !strings.Contains(out, "lease") || !strings.Contains(out, "skill") {
+			t.Errorf("expected shell completion for %s to contain level-2 subcommands 'profile', 'lease', 'skill', got:\n%s", shell, out)
+		}
 	}
 }
 
