@@ -4,10 +4,21 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"sync"
 )
+
+// MasterKeyFingerprint returns a 16-character hex representation of SHA-256(key).
+func MasterKeyFingerprint(key []byte) string {
+	if len(key) == 0 {
+		return "none"
+	}
+	h := sha256.Sum256(key)
+	return hex.EncodeToString(h[:])[:16]
+}
 
 var noncePool = sync.Pool{
 	New: func() interface{} {

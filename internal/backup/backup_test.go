@@ -23,7 +23,7 @@ func TestBackupRestoreRoundtrip(t *testing.T) {
 	now := time.Now().Truncate(time.Second) // Second resolution for XML compat
 
 	// Mock secrets data including comments, custom metadata, and timestamps
-	originalSecrets := map[string]store.SecretEntry{
+	originalSecrets := map[store.SecretKey]store.SecretEntry{
 		"database/prod/password": {
 			Value:        "db-pass-xyz-123",
 			Comment:      "Production database root user credential",
@@ -74,7 +74,7 @@ func TestBackupRestoreRoundtrip(t *testing.T) {
 	}
 
 	for key, originalEntry := range originalSecrets {
-		importedEntry, exists := importedSecrets[key]
+		importedEntry, exists := importedSecrets[store.SecretKey(key)]
 		if !exists {
 			t.Errorf("expected secret path %q was not found in imported dataset", key)
 			continue
@@ -119,7 +119,7 @@ func TestFullMetadataKdbxImport(t *testing.T) {
 	kdbxPath := filepath.Join(tempDir, "fullmeta_test.kdbx")
 	password := "fullmeta-pass"
 
-	originalSecrets := map[string]store.SecretEntry{
+	originalSecrets := map[store.SecretKey]store.SecretEntry{
 		"Xiaomi AX3600 OpenWrt Root": {
 			Value:   "router-secret-pass-123",
 			Comment: "LuCI Web Admin HTTPS 443 | SSH Dropbear -o HostKeyAlgorithms=+ssh-rsa",
@@ -168,7 +168,7 @@ func TestFullMetadataKdbxReaderStream(t *testing.T) {
 	kdbxPath := filepath.Join(tempDir, "stream.kdbx")
 	password := "stream-pass"
 
-	originalSecrets := map[string]store.SecretEntry{
+	originalSecrets := map[store.SecretKey]store.SecretEntry{
 		"Stream Test": {
 			Value:   "stream-val-456",
 			Comment: "In-memory stream test notes",
@@ -208,7 +208,7 @@ func TestKdbxMultiCycleRoundtripFidelity(t *testing.T) {
 
 	now := time.Now().Truncate(time.Second)
 
-	originalSecrets := map[string]store.SecretEntry{
+	originalSecrets := map[store.SecretKey]store.SecretEntry{
 		"cloud/aws/production_key": {
 			Value:        "AKIAIOSFODNN7EXAMPLE",
 			Comment:      "AWS IAM master access key for cloud deployment",

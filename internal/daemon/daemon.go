@@ -5,67 +5,154 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
-	"runtime/debug"
+	"secure_secrets/internal/config"
+	"secure_secrets/internal/crypto"
+	"secure_secrets/internal/store"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
-
-	"golang.org/x/sys/unix"
-	"secure_secrets/internal/config"
-	"secure_secrets/internal/store"
 )
+
+// IPCAction represents a strongly-typed IPC command action.
+type IPCAction string
+
+const (
+	IPCActionOpen           IPCAction = "open"
+	IPCActionPing           IPCAction = "ping"
+	IPCActionGet            IPCAction = "get"
+	IPCActionSet            IPCAction = "set"
+	IPCActionDelete         IPCAction = "delete"
+	IPCActionRestore        IPCAction = "restore"
+	IPCActionBackup         IPCAction = "backup"
+	IPCActionRestoreDeleted IPCAction = "restore_deleted"
+	IPCActionAudit          IPCAction = "audit"
+	IPCActionList           IPCAction = "list"
+	IPCActionGetGroup       IPCAction = "get_group"
+	IPCActionRename         IPCAction = "rename"
+	IPCActionCopy           IPCAction = "copy"
+	IPCActionClear          IPCAction = "clear"
+	IPCActionStatus         IPCAction = "status"
+	IPCActionHistory        IPCAction = "history"
+	IPCActionRollback       IPCAction = "rollback"
+	IPCActionReexec         IPCAction = "reexec"
+	IPCActionLease          IPCAction = "lease"
+)
+
+// String returns the string representation of IPCAction.
+func (a IPCAction) String() string {
+	return string(a)
+}
 
 // IPCRequest defines the format for messages sent to the daemon.
 type IPCRequest struct {
-	Action      string                         `json:"action"` // "open", "get", "set", "ping", "clear", "backup", "restore"
-	Path        string                         `json:"path,omitempty"`
-	Value       string                         `json:"value,omitempty"`
-	Comment     string                         `json:"comment,omitempty"`
-	Metadata    map[string]string              `json:"metadata,omitempty"`
-	TTL         string                         `json:"ttl,omitempty"`
-	Grace       string                         `json:"grace,omitempty"`
-	Secrets     map[string]store.SecretEntry   `json:"secrets,omitempty"`
-	Key         []byte                         `json:"key,omitempty"`
-	NewPath     string                         `json:"new_path,omitempty"`
-	IsPrefix    bool                           `json:"is_prefix,omitempty"`
-	Limit       int                            `json:"limit,omitempty"`
-	Expires     string                         `json:"expires,omitempty"`      // RFC3339 formatted expiration time
-	ShowExpired    bool                           `json:"show_expired,omitempty"` // Override to show expired secrets
-	Token          string                         `json:"token,omitempty"`        // Shell session token
-	ExtendsProfile string                         `json:"extends_profile,omitempty"`
-	TargetVersion  int                            `json:"target_version,omitempty"`
-	ShowTrash      bool                           `json:"show_trash,omitempty"`
-	Permanent      bool                           `json:"permanent,omitempty"`
+	Action         IPCAction                    `json:"action"`
+	Path           string                       `json:"path,omitempty"`
+	Value          string                       `json:"value,omitempty"`
+	Comment        string                       `json:"comment,omitempty"`
+	Metadata       map[string]string            `json:"metadata,omitempty"`
+	TTL            string                       `json:"ttl,omitempty"`
+	Grace          string                       `json:"grace,omitempty"`
+	Secrets        map[string]store.SecretEntry `json:"secrets,omitempty"`
+	Key            []byte                       `json:"key,omitempty"`
+	NewPath        string                       `json:"new_path,omitempty"`
+	IsPrefix       bool                         `json:"is_prefix,omitempty"`
+	Limit          int                          `json:"limit,omitempty"`
+	Expires        string                       `json:"expires,omitempty"`
+	ShowExpired    bool                         `json:"show_expired,omitempty"`
+	Token          string                       `json:"token,omitempty"`
+	ExtendsProfile string                       `json:"extends_profile,omitempty"`
+	TargetVersion  int                          `json:"target_version,omitempty"`
+	ShowTrash      bool                         `json:"show_trash,omitempty"`
+	Permanent      bool                         `json:"permanent,omitempty"`
+}
+
+// Validate checks whether the IPCRequest action is supported.
+func (req *IPCRequest) Validate() error {
+	switch req.Action {
+	case IPCActionOpen, IPCActionPing, IPCActionGet, IPCActionSet, IPCActionDelete,
+		IPCActionRestore, IPCActionBackup, IPCActionRestoreDeleted, IPCActionAudit,
+		IPCActionList, IPCActionGetGroup, IPCActionRename, IPCActionCopy,
+		IPCActionClear, IPCActionStatus, IPCActionHistory, IPCActionRollback, IPCActionReexec, IPCActionLease:
+		return nil
+	default:
+		return fmt.Errorf("unknown or unsupported IPC action: %q", req.Action)
+	}
 }
 
 // DaemonStatePayload defines the in-memory payload transferred across kernel pipe during hot-reload.
 type DaemonStatePayload struct {
-	MasterKey    []byte                       `json:"master_key"`
-	Profile      string                       `json:"profile"`
-	SessionStart time.Time                    `json:"session_start"`
-	SessionTTL   time.Duration                `json:"session_ttl"`
-	GraceTTL     time.Duration                `json:"grace_ttl"`
-	LastUsed     time.Time                    `json:"last_used"`
-	SessionToken string                       `json:"session_token"`
-	Secrets      map[string]store.SecretEntry `json:"secrets,omitempty"`
+	MasterKey    []byte                                `json:"master_key"`
+	Profile      string                                `json:"profile"`
+	SessionStart time.Time                             `json:"session_start"`
+	SessionTTL   time.Duration                         `json:"session_ttl"`
+	GraceTTL     time.Duration                         `json:"grace_ttl"`
+	LastUsed     time.Time                             `json:"last_used"`
+	SessionToken string                                `json:"session_token"`
+	Secrets      map[store.SecretKey]store.SecretEntry `json:"secrets,omitempty"`
+}
+
+// AuditEventAction represents a strongly-typed security audit event action.
+type AuditEventAction string
+
+const (
+	AuditEventOpen   AuditEventAction = "OPEN"
+	AuditEventGet    AuditEventAction = "GET"
+	AuditEventSet    AuditEventAction = "SET"
+	AuditEventDelete AuditEventAction = "DELETE"
+	AuditEventClear  AuditEventAction = "CLEAR"
+	AuditEventAudit  AuditEventAction = "AUDIT"
+	AuditEventReexec AuditEventAction = "REEXEC"
+)
+
+// Validate checks whether the audit action is valid.
+func (a AuditEventAction) Validate() error {
+	switch a {
+	case AuditEventOpen, AuditEventGet, AuditEventSet, AuditEventDelete, AuditEventClear, AuditEventAudit, AuditEventReexec:
+		return nil
+	default:
+		return fmt.Errorf("unsupported audit event action: %q", a)
+	}
 }
 
 // AuditLogEntry represents a single audit event record.
 type AuditLogEntry struct {
-	Timestamp string `json:"timestamp"`
-	Action    string `json:"action"`
-	Path      string `json:"path,omitempty"`
-	PeerPID   int    `json:"peer_pid"`
-	Success   bool   `json:"success"`
-	Error     string `json:"error,omitempty"`
+	Timestamp       string           `json:"timestamp"`
+	Action          AuditEventAction `json:"action"`
+	Profile         string           `json:"profile,omitempty"`
+	StoreFilePath   string           `json:"store_file_path,omitempty"`
+	Path            string           `json:"path,omitempty"`
+	MasterKeySHA256 string           `json:"master_key_sha256,omitempty"`
+	PeerPID         int              `json:"peer_pid,omitempty"`
+	ProcessName     string           `json:"process_name,omitempty"`
+	Actor           string           `json:"actor,omitempty"`
+	ClientMode      string           `json:"client_mode,omitempty"`
+	ValueLength     int              `json:"value_length,omitempty"`
+	SecretVersion   int              `json:"secret_version,omitempty"`
+	Success         bool             `json:"success"`
+	Error           string           `json:"error,omitempty"`
+	Details         string           `json:"details,omitempty"`
+}
+
+// DaemonStatusInfo represents strongly-typed diagnostic status metadata.
+type DaemonStatusInfo struct {
+	Profile        string `json:"profile"`
+	Version        string `json:"version"`
+	SocketPath     string `json:"socket_path"`
+	StorePath      string `json:"store_path"`
+	StoreSizeBytes int64  `json:"store_size_bytes"`
+	IsUnlocked     bool   `json:"is_unlocked"`
+	TotalSecrets   int    `json:"total_secrets"`
+	ExpiredSecrets int    `json:"expired_secrets"`
+	SessionStart   string `json:"session_start"`
+	LastUsed       string `json:"last_used"`
+	SessionTTL     string `json:"session_ttl"`
+	GraceTTL       string `json:"grace_ttl"`
 }
 
 // IPCResponse defines the format for replies from the daemon.
@@ -75,40 +162,40 @@ type IPCResponse struct {
 	Comment      string                       `json:"comment,omitempty"`
 	Metadata     map[string]string            `json:"metadata,omitempty"`
 	Error        string                       `json:"error,omitempty"`
+	ErrorCode    store.ErrorCode              `json:"error_code,omitempty"`
 	Secrets      map[string]store.SecretEntry `json:"secrets,omitempty"`
 	Created      time.Time                    `json:"created,omitempty"`
 	LastModified time.Time                    `json:"last_modified,omitempty"`
 	LastAccessed time.Time                    `json:"last_accessed,omitempty"`
 	AccessCount  uint64                       `json:"access_count,omitempty"`
 	Expires      time.Time                    `json:"expires,omitempty"`
-	Token        string                       `json:"token,omitempty"` // Shell session token
+	Token        string                       `json:"token,omitempty"`
 	Version      string                       `json:"version,omitempty"`
-	StatusInfo   map[string]interface{}       `json:"status_info,omitempty"`
+	StatusInfo   *DaemonStatusInfo            `json:"status_info,omitempty"`
 	History      []store.SecretVersion        `json:"history,omitempty"`
 	ItemVersion  int                          `json:"item_version,omitempty"`
 }
 
 // Daemon represents the background secrets agent.
 type Daemon struct {
-	mu           sync.Mutex
-	masterKey    []byte
-	secretsStore *store.EncryptedStore
-	sessionStart time.Time
-	sessionTTL   time.Duration
-	lastUsed     time.Time
-	graceTTL     time.Duration
-	socketPath   string
-	listener     net.Listener
-	profile      string
-	sessionToken string
-	version      string
+	mu             sync.Mutex
+	masterKey      []byte
+	secretsStore   *store.EncryptedStore
+	sessionStart   time.Time
+	sessionTTL     time.Duration
+	lastUsed       time.Time
+	graceTTL       time.Duration
+	socketPath     string
+	listener       net.Listener
+	profile        string
+	sessionToken   string
+	version        string
 	IsTestInstance bool
 }
 
 // NewDaemon creates a new daemon instance.
 func NewDaemon(profile string, ttl time.Duration, version string) (*Daemon, error) {
-	// Set Go runtime soft memory limit to 256 MB to protect against OOM spikes
-	debug.SetMemoryLimit(256 * 1024 * 1024)
+	initMemoryLimits()
 
 	sock, err := config.GetSocketPath(profile)
 	if err != nil {
@@ -120,19 +207,6 @@ func NewDaemon(profile string, ttl time.Duration, version string) (*Daemon, erro
 		profile:    profile,
 		version:    version,
 	}, nil
-}
-
-func (d *Daemon) checkMemoryGuardrail() bool {
-	var ms runtime.MemStats
-	runtime.ReadMemStats(&ms)
-	if ms.Alloc > 512*1024*1024 {
-		runtime.GC()
-		runtime.ReadMemStats(&ms)
-		if ms.Alloc > 512*1024*1024 {
-			return false
-		}
-	}
-	return true
 }
 
 func (d *Daemon) checkAndRestoreReexecState() error {
@@ -161,11 +235,11 @@ func (d *Daemon) checkAndRestoreReexecState() error {
 	if len(payload.MasterKey) > 0 {
 		storeInstance, err := store.LoadStore(d.profile, payload.MasterKey)
 		if err != nil || storeInstance == nil {
-			storeInstance = &store.EncryptedStore{Secrets: make(map[string]store.SecretEntry)}
+			storeInstance = &store.EncryptedStore{Secrets: make(map[store.SecretKey]store.SecretEntry)}
 		}
 		if len(payload.Secrets) > 0 {
 			if storeInstance.Secrets == nil {
-				storeInstance.Secrets = make(map[string]store.SecretEntry)
+				storeInstance.Secrets = make(map[store.SecretKey]store.SecretEntry)
 			}
 			for k, v := range payload.Secrets {
 				storeInstance.Secrets[k] = v
@@ -180,22 +254,19 @@ func (d *Daemon) checkAndRestoreReexecState() error {
 		d.lastUsed = payload.LastUsed
 		d.sessionToken = payload.SessionToken
 		d.mu.Unlock()
-		d.logAudit("reexec", d.profile, 0, true, "")
+		d.logAudit(AuditEventReexec, d.profile, 0, true, "")
 	}
 	return nil
 }
 
 // Start runs the IPC Unix socket server.
 func (d *Daemon) Start() error {
-	// Restore state if spawned from in-memory hot-reload pipe
 	_ = d.checkAndRestoreReexecState()
 
-	// Clean up existing socket file if it exists
 	if err := os.Remove(d.socketPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to remove old socket: %w", err)
 	}
 
-	// Purge any lingering token files on disk
 	config.PurgeAllSessionTokenFiles()
 
 	l, err := net.Listen("unix", d.socketPath)
@@ -204,7 +275,6 @@ func (d *Daemon) Start() error {
 	}
 	d.listener = l
 
-	// Set socket file permissions to 0600 (owner-only read/write)
 	if err := os.Chmod(d.socketPath, 0600); err != nil {
 		_ = l.Close()
 		return fmt.Errorf("failed to secure socket permissions: %w", err)
@@ -213,49 +283,14 @@ func (d *Daemon) Start() error {
 	d.writePIDLockfile()
 	defer d.removePIDLockfile()
 
-	// Periodically check for session expiration
 	go d.expiryTicker()
 
 	for {
 		conn, err := l.Accept()
 		if err != nil {
-			// Listener was closed
 			return nil
 		}
 		go d.handleConnection(conn)
-	}
-}
-
-type PIDLockInfo struct {
-	PID        int    `json:"pid"`
-	Executable string `json:"executable"`
-	Version    string `json:"version"`
-	Profile    string `json:"profile"`
-}
-
-func (d *Daemon) writePIDLockfile() {
-	pidPath, err := config.GetPIDFilePath(d.profile)
-	if err != nil {
-		return
-	}
-	execPath, _ := os.Executable()
-	info := PIDLockInfo{
-		PID:        os.Getpid(),
-		Executable: execPath,
-		Version:    d.version,
-		Profile:    d.profile,
-	}
-	data, err := json.Marshal(info)
-	if err != nil {
-		return
-	}
-	_ = os.WriteFile(pidPath, data, 0600)
-}
-
-func (d *Daemon) removePIDLockfile() {
-	pidPath, err := config.GetPIDFilePath(d.profile)
-	if err == nil {
-		_ = os.Remove(pidPath)
 	}
 }
 
@@ -271,169 +306,24 @@ func (d *Daemon) Stop() {
 	d.removePIDLockfile()
 }
 
-func (d *Daemon) wipeMemory() {
-	if d.masterKey != nil {
-		// Zero out master key bytes in memory
-		for i := range d.masterKey {
-			d.masterKey[i] = 0
-		}
-		d.masterKey = nil
-	}
-	d.secretsStore = nil
-	d.sessionStart = time.Time{}
-	d.lastUsed = time.Time{}
-	d.sessionToken = ""
-}
-
-func (d *Daemon) expiryTicker() {
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		d.mu.Lock()
-		if d.isExpired() {
-			d.wipeMemory()
-		}
-		d.mu.Unlock()
-	}
-}
-
-func (d *Daemon) isExpired() bool {
-	if d.sessionStart.IsZero() {
-		return false // Not initialized
-	}
-	// Within hard TTL
-	if time.Since(d.sessionStart) <= d.sessionTTL {
-		return false
-	}
-	// Within inactivity grace period
-	if !d.lastUsed.IsZero() && time.Since(d.lastUsed) <= d.graceTTL {
-		return false
-	}
-	return true
-}
-
-// getsockopt local peer PID
-func getPeerPID(conn *net.UnixConn) (int, error) {
-	rawConn, err := conn.SyscallConn()
-	if err != nil {
-		return 0, err
-	}
-	var peerPID int
-	var sysErr error
-	err = rawConn.Control(func(fd uintptr) {
-		peerPID, sysErr = unix.GetsockoptInt(int(fd), unix.SOL_LOCAL, unix.LOCAL_PEERPID)
-	})
-	if err != nil {
-		return 0, err
-	}
-	if sysErr != nil {
-		return 0, sysErr
-	}
-	return peerPID, nil
-}
-
-// isHijacked checks if the client connection is running via SSH or Screensharing is active
-func (d *Daemon) isHijacked(peerPID int) bool {
-	// 1. Check if macOS screensharing/VNC/remote pairing services are active
-	sharingServices := []string{"screensharingd", "AppleVNCServer", "remotepairingd"}
-	for _, svc := range sharingServices {
-		// #nosec G204
-		cmd := exec.Command("pgrep", svc)
-		if err := cmd.Run(); err == nil {
-			return true // Screen sharing or VNC server is running!
-		}
-	}
-
-	// 2. Check peer environment variables for SSH tags using BSD ps
-	// #nosec G204
-	envOut, err := exec.Command("ps", "e", "-ww", "-p", strconv.Itoa(peerPID)).Output()
-	if err == nil {
-		envStr := string(envOut)
-		if strings.Contains(envStr, "SSH_CLIENT=") ||
-			strings.Contains(envStr, "SSH_TTY=") ||
-			strings.Contains(envStr, "SSH_CONNECTION=") {
-			return true // Remote SSH session detected in peer process environment!
-		}
-	}
-
-	// 3. Walk up the process tree starting from peerPID to check for sshd (defense in depth)
-	currentPID := peerPID
-	for currentPID > 1 {
-		// #nosec G204
-		out, err := exec.Command("ps", "-o", "ppid=,comm=", "-p", strconv.Itoa(currentPID)).Output()
-		if err != nil {
-			break
-		}
-
-		parts := strings.Fields(string(out))
-		if len(parts) < 2 {
-			break
-		}
-
-		ppidVal, err := strconv.Atoi(parts[0])
-		if err != nil {
-			break
-		}
-
-		comm := parts[1]
-		if strings.Contains(strings.ToLower(comm), "sshd") {
-			return true // Found sshd in ancestor tree!
-		}
-
-		currentPID = ppidVal
-	}
-
-	return false
-}
-
-func (d *Daemon) handleConnection(c net.Conn) {
-	defer c.Close()
-
-	unixConn, ok := c.(*net.UnixConn)
-	if !ok {
-		return
-	}
-
-	peerPID, err := getPeerPID(unixConn)
-	if err != nil {
-		d.sendError(c, fmt.Sprintf("failed to resolve peer PID: %v", err))
-		return
-	}
-
-	// Check if hijacked - if yes, immediately wipe cache and lock
-	if d.isHijacked(peerPID) {
-		d.mu.Lock()
-		d.wipeMemory()
-		d.mu.Unlock()
-		d.sendError(c, "ACCESS DENIED: Remote session hijacking or screen sharing detected.")
-		return
-	}
-
-	decoder := json.NewDecoder(c)
-	var req IPCRequest
-	if err := decoder.Decode(&req); err != nil {
-		if err != io.EOF {
-			d.sendError(c, "invalid request encoding")
-		}
-		return
-	}
-
+func (d *Daemon) processRequest(c net.Conn, req IPCRequest, peerPID int) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	// Check expiration before servicing request
+	if err := req.Validate(); err != nil {
+		d.sendErrorCode(c, err.Error(), store.ErrCodeInternalError)
+		return
+	}
+
 	if d.isExpired() {
 		d.wipeMemory()
 	}
 
-	// Validate session token for protected actions
-	if req.Action != "open" && req.Action != "ping" {
+	if req.Action != IPCActionOpen && req.Action != IPCActionPing {
 		if d.sessionToken == "" || d.masterKey == nil {
 			d.sendResponse(c, IPCResponse{Success: false, Error: "Session locked or expired. Please run 'sec open' to authorize."})
 			return
 		}
-		// Allow subshell execution when req.Token is empty: caller is verified via socket peer credentials (0600) and daemon RAM is UNLOCKED
 		if req.Token != "" && req.Token != d.sessionToken {
 			d.sendResponse(c, IPCResponse{Success: false, Error: "ACCESS DENIED: Invalid session token"})
 			return
@@ -441,14 +331,14 @@ func (d *Daemon) handleConnection(c net.Conn) {
 	}
 
 	switch req.Action {
-	case "ping":
+	case IPCActionPing:
 		if d.masterKey == nil {
 			d.sendResponse(c, IPCResponse{Success: false, Error: "Session locked", Version: d.version})
 		} else {
 			d.sendResponse(c, IPCResponse{Success: true, Value: "Active", Version: d.version})
 		}
 
-	case "reexec":
+	case IPCActionReexec:
 		if d.masterKey == nil {
 			d.sendResponse(c, IPCResponse{Success: false, Error: "Session locked. Cannot hot-reload a locked daemon.", Version: d.version})
 			return
@@ -460,7 +350,7 @@ func (d *Daemon) handleConnection(c net.Conn) {
 			return
 		}
 
-		var activeSecrets map[string]store.SecretEntry
+		var activeSecrets map[store.SecretKey]store.SecretEntry
 		if d.secretsStore != nil && d.secretsStore.Secrets != nil {
 			activeSecrets = d.secretsStore.Secrets
 		}
@@ -496,14 +386,12 @@ func (d *Daemon) handleConnection(c net.Conn) {
 			return
 		}
 
-		// Acknowledge reexec to client before spawning new process
 		d.sendResponse(c, IPCResponse{
 			Success: true,
 			Value:   "Daemon hot-reloading in memory via pipe handoff...",
 			Version: d.version,
 		})
 
-		// Unbind listener so child process can bind unix socket immediately
 		if d.listener != nil {
 			_ = d.listener.Close()
 		}
@@ -517,11 +405,11 @@ func (d *Daemon) handleConnection(c net.Conn) {
 
 		if err := cmd.Start(); err != nil {
 			_ = r.Close()
-			d.logAudit("reexec", d.profile, peerPID, false, err.Error())
+			d.logAudit(AuditEventReexec, d.profile, peerPID, false, err.Error())
 			return
 		}
 		_ = r.Close()
-		d.logAudit("reexec", d.profile, peerPID, true, "")
+		d.logAudit(AuditEventReexec, d.profile, peerPID, true, "")
 		go func() {
 			time.Sleep(50 * time.Millisecond)
 			if !d.IsTestInstance && os.Getenv("SEC_TEST_MODE") != "1" {
@@ -530,7 +418,7 @@ func (d *Daemon) handleConnection(c net.Conn) {
 		}()
 		return
 
-	case "open":
+	case IPCActionOpen:
 		if len(req.Key) != 32 {
 			d.sendError(c, "invalid master key length")
 			return
@@ -546,13 +434,11 @@ func (d *Daemon) handleConnection(c net.Conn) {
 		d.sessionStart = time.Now()
 		d.lastUsed = time.Now()
 
-		// Set custom TTL if provided
 		if req.TTL != "" {
 			if parsedTTL, err := time.ParseDuration(req.TTL); err == nil {
 				d.sessionTTL = parsedTTL
 			}
 		}
-		// Set custom grace TTL if provided
 		if req.Grace != "" {
 			if parsedGrace, err := time.ParseDuration(req.Grace); err == nil {
 				d.graceTTL = parsedGrace
@@ -577,7 +463,7 @@ func (d *Daemon) handleConnection(c net.Conn) {
 			Token:   d.sessionToken,
 		})
 
-	case "get":
+	case IPCActionGet:
 		if d.masterKey == nil {
 			d.sendError(c, "Session locked. Please unlock first.")
 			return
@@ -588,7 +474,6 @@ func (d *Daemon) handleConnection(c net.Conn) {
 			return
 		}
 
-		// Check expiration
 		if !entry.Expires.IsZero() && time.Now().After(entry.Expires) {
 			if !req.ShowExpired {
 				d.sendError(c, "Secret has expired")
@@ -600,17 +485,17 @@ func (d *Daemon) handleConnection(c net.Conn) {
 		entry.LastAccessed = now
 		entry.AccessCount++
 
-		// Update access metrics in active local store if entry belongs to local store
 		if d.secretsStore != nil && d.secretsStore.Secrets != nil {
-			if localEntry, ok := d.secretsStore.Secrets[req.Path]; ok {
+			if localEntry, ok := d.secretsStore.Secrets[store.SecretKey(req.Path)]; ok {
 				localEntry.LastAccessed = now
 				localEntry.AccessCount++
-				d.secretsStore.Secrets[req.Path] = localEntry
+				d.secretsStore.Secrets[store.SecretKey(req.Path)] = localEntry
 				_ = store.SaveStore(d.profile, d.secretsStore, d.masterKey)
 			}
 		}
 
-		d.lastUsed = now
+		d.lastUsed = time.Now()
+		d.logAudit(AuditEventGet, req.Path, peerPID, true, "")
 		d.sendResponse(c, IPCResponse{
 			Success:      true,
 			Value:        entry.Value,
@@ -621,242 +506,164 @@ func (d *Daemon) handleConnection(c net.Conn) {
 			LastAccessed: entry.LastAccessed,
 			AccessCount:  entry.AccessCount,
 			Expires:      entry.Expires,
+			ItemVersion:  entry.Version,
 		})
 
-	case "get_group":
+	case IPCActionSet:
 		if d.masterKey == nil {
 			d.sendError(c, "Session locked. Please unlock first.")
 			return
 		}
-		if !d.checkMemoryGuardrail() {
-			d.sendError(c, "RESOURCE_EXHAUSTED: Memory saturation threshold exceeded. Please use scoped prefix filtering.")
+		d.ensureStoreInitialized()
+
+		var expTime time.Time
+		if req.Expires != "" {
+			parsedTime, err := time.Parse(time.RFC3339, req.Expires)
+			if err != nil {
+				d.sendError(c, fmt.Sprintf("invalid expiration format (expected RFC3339): %v", err))
+				return
+			}
+			expTime = parsedTime
+		}
+
+		existing, ok := d.secretsStore.Secrets[store.SecretKey(req.Path)]
+		newVersion := 1
+		var history []store.SecretVersion
+
+		if ok {
+			newVersion = existing.Version + 1
+			history = existing.History
+
+			verSnapshot := store.SecretVersion{
+				Version:      existing.Version,
+				Value:        existing.Value,
+				Comment:      existing.Comment,
+				Metadata:     existing.Metadata,
+				LastModified: existing.LastModified,
+			}
+			history = append(history, verSnapshot)
+			if len(history) > 10 {
+				history = history[len(history)-10:]
+			}
+		}
+
+		entry := store.SecretEntry{
+			Value:        req.Value,
+			Comment:      req.Comment,
+			Metadata:     req.Metadata,
+			Created:      time.Now(),
+			LastModified: time.Now(),
+			Expires:      expTime,
+			Version:      newVersion,
+			History:      history,
+		}
+		if ok && !existing.Created.IsZero() {
+			entry.Created = existing.Created
+		}
+
+		d.secretsStore.Secrets[store.SecretKey(req.Path)] = entry
+		if err := store.SaveStore(d.profile, d.secretsStore, d.masterKey); err != nil {
+			d.sendError(c, fmt.Sprintf("failed to persist store: %v", err))
 			return
 		}
-		allSecrets := d.resolveAllSecrets(req.ExtendsProfile)
-		filteredGroup := make(map[string]store.SecretEntry, len(allSecrets))
-		now := time.Now()
-		storeUpdated := false
-		for k, entry := range allSecrets {
-			if req.Path != "" && !strings.HasPrefix(k, req.Path) {
-				continue
-			}
-			if !entry.Expires.IsZero() && now.After(entry.Expires) && !req.ShowExpired {
-				continue
-			}
-			entry.LastAccessed = now
-			entry.AccessCount++
-			filteredGroup[k] = entry
+		d.lastUsed = time.Now()
+		d.logAudit(AuditEventSet, req.Path, peerPID, true, "")
+		d.sendResponse(c, IPCResponse{Success: true})
 
-			if d.secretsStore != nil && d.secretsStore.Secrets != nil {
-				if localEntry, ok := d.secretsStore.Secrets[k]; ok {
-					localEntry.LastAccessed = now
-					localEntry.AccessCount++
-					d.secretsStore.Secrets[k] = localEntry
-					storeUpdated = true
+	case IPCActionDelete:
+		if d.masterKey == nil {
+			d.sendError(c, "Session locked. Please unlock first.")
+			return
+		}
+		d.ensureStoreInitialized()
+
+		if req.IsPrefix {
+			prefix := req.Path
+			if prefix != "" && !strings.HasSuffix(prefix, "/") {
+				prefix += "/"
+			}
+			now := time.Now()
+			deletedCount := 0
+			for k, entry := range d.secretsStore.Secrets {
+				keyStr := string(k)
+				if strings.HasPrefix(keyStr, prefix) || keyStr == req.Path {
+					if req.Permanent {
+						delete(d.secretsStore.Secrets, k)
+					} else {
+						entry.DeletedAt = &now
+						d.secretsStore.Secrets[k] = entry
+					}
+					deletedCount++
 				}
 			}
+			if deletedCount == 0 {
+				d.sendError(c, fmt.Sprintf("no secrets found matching prefix %q", req.Path))
+				return
+			}
+		} else {
+			if req.Permanent {
+				delete(d.secretsStore.Secrets, store.SecretKey(req.Path))
+			} else {
+				entry, ok := d.secretsStore.Secrets[store.SecretKey(req.Path)]
+				if !ok {
+					d.sendError(c, fmt.Sprintf("secret %q not found", req.Path))
+					return
+				}
+				now := time.Now()
+				entry.DeletedAt = &now
+				d.secretsStore.Secrets[store.SecretKey(req.Path)] = entry
+			}
 		}
-
-		if storeUpdated {
-			_ = store.SaveStore(d.profile, d.secretsStore, d.masterKey)
+		if err := store.SaveStore(d.profile, d.secretsStore, d.masterKey); err != nil {
+			d.sendError(c, fmt.Sprintf("failed to persist store: %v", err))
+			return
 		}
+		d.lastUsed = time.Now()
+		d.logAudit(AuditEventDelete, req.Path, peerPID, true, "")
+		d.sendResponse(c, IPCResponse{Success: true})
 
-		d.lastUsed = now
-		d.sendResponse(c, IPCResponse{
-			Success: true,
-			Secrets: filteredGroup,
-		})
-
-
-	case "set":
+	case IPCActionRestoreDeleted:
 		if d.masterKey == nil {
 			d.sendError(c, "Session locked. Please unlock first.")
 			return
 		}
+		d.ensureStoreInitialized()
+		entry, ok := d.secretsStore.Secrets[store.SecretKey(req.Path)]
+		if !ok || entry.DeletedAt == nil {
+			d.sendError(c, fmt.Sprintf("no soft-deleted secret found at path %q", req.Path))
+			return
+		}
+		entry.DeletedAt = nil
+		d.secretsStore.Secrets[store.SecretKey(req.Path)] = entry
+		if err := store.SaveStore(d.profile, d.secretsStore, d.masterKey); err != nil {
+			d.sendError(c, fmt.Sprintf("failed to persist store: %v", err))
+			return
+		}
+		d.lastUsed = time.Now()
+		d.sendResponse(c, IPCResponse{Success: true})
 
-		if d.secretsStore == nil {
-			d.secretsStore = &store.EncryptedStore{Secrets: make(map[string]store.SecretEntry)}
+	case IPCActionBackup:
+		if d.masterKey == nil {
+			d.sendError(c, "Session locked. Please unlock first.")
+			return
+		}
+		all := d.resolveAllSecrets(req.ExtendsProfile, false)
+		d.lastUsed = time.Now()
+		d.sendResponse(c, IPCResponse{
+			Success: true,
+			Secrets: all,
+		})
+
+	case IPCActionRestore:
+		if d.masterKey == nil {
+			d.sendError(c, "Session locked. Please unlock first.")
+			return
 		}
 		if d.secretsStore.Secrets == nil {
-			d.secretsStore.Secrets = make(map[string]store.SecretEntry)
+			d.secretsStore.Secrets = make(map[store.SecretKey]store.SecretEntry)
 		}
-
-		entry, exists := d.secretsStore.Secrets[req.Path]
-		if exists {
-			// Push current active state to version history before mutating
-			oldVer := entry.Version
-			if oldVer <= 0 {
-				oldVer = 1
-			}
-			verSnapshot := store.SecretVersion{
-				Version:      oldVer,
-				Value:        entry.Value,
-				Comment:      entry.Comment,
-				Metadata:     entry.Metadata,
-				LastModified: entry.LastModified,
-			}
-			entry.History = append(entry.History, verSnapshot)
-			if len(entry.History) > 10 {
-				entry.History = entry.History[len(entry.History)-10:]
-			}
-			entry.Version = oldVer + 1
-			entry.DeletedAt = nil
-
-			// Update values selectively if this is a partial update
-			if req.Value != "" {
-				entry.Value = req.Value
-			}
-			if req.Comment != "" {
-				entry.Comment = req.Comment
-			}
-			if len(req.Metadata) > 0 {
-				if entry.Metadata == nil {
-					entry.Metadata = make(map[string]string)
-				}
-				for mk, mv := range req.Metadata {
-					entry.Metadata[mk] = mv
-				}
-			}
-			entry.LastModified = time.Now()
-		} else {
-			entry = store.SecretEntry{
-				Value:        req.Value,
-				Comment:      req.Comment,
-				Metadata:     req.Metadata,
-				Created:      time.Now(),
-				LastModified: time.Now(),
-				Version:      1,
-			}
-		}
-
-		// Parse expiration if provided
-		if req.Expires != "" {
-			if t, err := time.Parse(time.RFC3339, req.Expires); err == nil {
-				entry.Expires = t
-			} else {
-				d.sendError(c, fmt.Sprintf("invalid expiration date format: %v", err))
-				return
-			}
-		}
-
-		d.secretsStore.Secrets[req.Path] = entry
-
-		if err := store.SaveStore(d.profile, d.secretsStore, d.masterKey); err != nil {
-			d.sendError(c, fmt.Sprintf("failed to persist store: %v", err))
-			return
-		}
-		d.lastUsed = time.Now()
-		d.sendResponse(c, IPCResponse{Success: true})
-
-	case "rename":
-		if d.masterKey == nil {
-			d.sendError(c, "Session locked. Please unlock first.")
-			return
-		}
-		oldPath := req.Path
-		newPath := req.NewPath
-		if newPath == "" {
-			newPath = req.Value
-		}
-		if req.IsPrefix {
-			count, err := d.secretsStore.RenamePrefix(oldPath, newPath)
-			if err != nil {
-				d.sendError(c, fmt.Sprintf("failed to rename prefix: %v", err))
-				return
-			}
-			if err := store.SaveStore(d.profile, d.secretsStore, d.masterKey); err != nil {
-				d.sendError(c, fmt.Sprintf("failed to persist store: %v", err))
-				return
-			}
-			d.lastUsed = time.Now()
-			d.sendResponse(c, IPCResponse{
-				Success: true,
-				Value:   fmt.Sprintf("Renamed %d secrets under prefix %q to %q", count, oldPath, newPath),
-			})
-		} else {
-			err := d.secretsStore.RenameSecret(oldPath, newPath)
-			if err != nil {
-				d.sendError(c, fmt.Sprintf("failed to rename secret: %v", err))
-				return
-			}
-			if err := store.SaveStore(d.profile, d.secretsStore, d.masterKey); err != nil {
-				d.sendError(c, fmt.Sprintf("failed to persist store: %v", err))
-				return
-			}
-			d.lastUsed = time.Now()
-			d.sendResponse(c, IPCResponse{
-				Success: true,
-				Value:   fmt.Sprintf("Renamed secret %q to %q", oldPath, newPath),
-			})
-		}
-
-	case "copy":
-		if d.masterKey == nil {
-			d.sendError(c, "Session locked. Please unlock first.")
-			return
-		}
-		srcPath := req.Path
-		dstPath := req.NewPath
-		if req.IsPrefix {
-			count, err := d.secretsStore.CopyPrefix(srcPath, dstPath)
-			if err != nil {
-				d.sendError(c, fmt.Sprintf("failed to copy prefix: %v", err))
-				return
-			}
-			if err := store.SaveStore(d.profile, d.secretsStore, d.masterKey); err != nil {
-				d.sendError(c, fmt.Sprintf("failed to persist store: %v", err))
-				return
-			}
-			d.lastUsed = time.Now()
-			d.sendResponse(c, IPCResponse{
-				Success: true,
-				Value:   fmt.Sprintf("Copied %d secrets under prefix %q to %q", count, srcPath, dstPath),
-			})
-		} else {
-			err := d.secretsStore.CopySecret(srcPath, dstPath)
-			if err != nil {
-				d.sendError(c, fmt.Sprintf("failed to copy secret: %v", err))
-				return
-			}
-			if err := store.SaveStore(d.profile, d.secretsStore, d.masterKey); err != nil {
-				d.sendError(c, fmt.Sprintf("failed to persist store: %v", err))
-				return
-			}
-			d.lastUsed = time.Now()
-			d.sendResponse(c, IPCResponse{
-				Success: true,
-				Value:   fmt.Sprintf("Copied secret %q to %q", srcPath, dstPath),
-			})
-		}
-
-	case "clear":
-		d.wipeMemory()
-		d.sendResponse(c, IPCResponse{Success: true})
-
-	case "backup":
-		if d.masterKey == nil {
-			d.sendError(c, "Session locked. Please unlock first.")
-			return
-		}
-		if !d.checkMemoryGuardrail() {
-			d.sendError(c, "RESOURCE_EXHAUSTED: Memory saturation threshold exceeded. Please use scoped prefix filtering.")
-			return
-		}
-		// Return all secrets for the backup/export
-		d.sendResponse(c, IPCResponse{Success: true, Secrets: d.resolveAllSecrets(req.ExtendsProfile)})
-
-	case "restore":
-		if d.masterKey == nil {
-			d.sendError(c, "Session locked. Please unlock first.")
-			return
-		}
-		if req.Secrets == nil {
-			d.sendError(c, "no secrets provided to restore")
-			return
-		}
-		// Merge secrets
-		for k, entryVal := range req.Secrets {
-			d.secretsStore.Secrets[k] = entryVal
+		for k, v := range req.Secrets {
+			d.secretsStore.Secrets[store.SecretKey(k)] = v
 		}
 		if err := store.SaveStore(d.profile, d.secretsStore, d.masterKey); err != nil {
 			d.sendError(c, fmt.Sprintf("failed to persist store: %v", err))
@@ -865,146 +672,203 @@ func (d *Daemon) handleConnection(c net.Conn) {
 		d.lastUsed = time.Now()
 		d.sendResponse(c, IPCResponse{Success: true})
 
-	case "list":
+	case IPCActionList:
 		if d.masterKey == nil {
 			d.sendError(c, "Session locked. Please unlock first.")
 			return
 		}
-		var paths []string
-		var group map[string]store.SecretEntry
-		if req.ShowTrash {
-			secCount := len(d.secretsStore.Secrets)
-			paths = make([]string, 0, secCount)
-			group = make(map[string]store.SecretEntry, secCount)
-			for k, entry := range d.secretsStore.Secrets {
+		all := d.resolveAllSecrets(req.ExtendsProfile, req.ShowTrash)
+		var list []string
+		now := time.Now()
+		for k, entry := range all {
+			if req.ShowTrash {
 				if entry.DeletedAt != nil {
-					if req.Path == "" || strings.HasPrefix(k, req.Path) {
-						paths = append(paths, k)
-						group[k] = entry
+					list = append(list, k)
+				}
+				continue
+			}
+			if entry.DeletedAt != nil {
+				continue
+			}
+			if !entry.Expires.IsZero() && now.After(entry.Expires) {
+				if !req.ShowExpired {
+					continue
+				}
+			}
+			list = append(list, k)
+		}
+		sort.Strings(list)
+		d.lastUsed = time.Now()
+		d.sendResponse(c, IPCResponse{
+			Success: true,
+			Value:   strings.Join(list, "\n"),
+		})
+
+	case IPCActionGetGroup:
+		if d.masterKey == nil {
+			d.sendError(c, "Session locked. Please unlock first.")
+			return
+		}
+		all := d.resolveAllSecrets(req.ExtendsProfile, false)
+		res := make(map[string]store.SecretEntry)
+		prefix := req.Path
+		if prefix != "" && !strings.HasSuffix(prefix, "/") {
+			prefix += "/"
+		}
+		now := time.Now()
+		for k, entry := range all {
+			if strings.HasPrefix(k, prefix) {
+				if !entry.Expires.IsZero() && now.After(entry.Expires) {
+					if !req.ShowExpired {
+						continue
 					}
 				}
-			}
-		} else {
-			allSecrets := d.resolveAllSecrets(req.ExtendsProfile)
-			paths = make([]string, 0, len(allSecrets))
-			group = make(map[string]store.SecretEntry, len(allSecrets))
-			for k, entry := range allSecrets {
-				if req.Path == "" || strings.HasPrefix(k, req.Path) {
-					paths = append(paths, k)
-					group[k] = entry
-				}
+				res[k] = entry
 			}
 		}
-		sort.Strings(paths)
 		d.lastUsed = time.Now()
 		d.sendResponse(c, IPCResponse{
 			Success: true,
-			Value:   strings.Join(paths, "\n"),
-			Secrets: group,
+			Secrets: res,
 		})
 
-	case "delete":
+	case IPCActionRename:
 		if d.masterKey == nil {
 			d.sendError(c, "Session locked. Please unlock first.")
 			return
 		}
-		if req.IsPrefix {
-			var count int
-			var err error
-			if req.Permanent {
-				count, err = d.secretsStore.HardDeletePrefix(req.Path)
-			} else {
-				count, err = d.secretsStore.SoftDeletePrefix(req.Path)
-			}
-			if err != nil {
-				d.sendError(c, fmt.Sprintf("failed to delete prefix: %v", err))
-				return
-			}
-			if err := store.SaveStore(d.profile, d.secretsStore, d.masterKey); err != nil {
-				d.sendError(c, fmt.Sprintf("failed to persist store: %v", err))
-				return
-			}
-			d.lastUsed = time.Now()
-			msg := fmt.Sprintf("Soft-deleted %d secrets under prefix %q (use 'sec ls --trash' to view)", count, req.Path)
-			if req.Permanent {
-				msg = fmt.Sprintf("Permanently deleted %d secrets under prefix %q", count, req.Path)
-			}
-			d.sendResponse(c, IPCResponse{
-				Success: true,
-				Value:   msg,
-			})
-		} else {
-			var err error
-			if req.Permanent {
-				err = d.secretsStore.HardDeleteSecret(req.Path)
-			} else {
-				err = d.secretsStore.SoftDeleteSecret(req.Path)
-			}
-			if err != nil {
-				d.sendError(c, fmt.Sprintf("failed to delete secret: %v", err))
-				return
-			}
-			if err := store.SaveStore(d.profile, d.secretsStore, d.masterKey); err != nil {
-				d.sendError(c, fmt.Sprintf("failed to persist store: %v", err))
-				return
-			}
-			d.lastUsed = time.Now()
-			msg := fmt.Sprintf("Soft-deleted secret %q (use 'sec restore-deleted %s' to undo)", req.Path, req.Path)
-			if req.Permanent {
-				msg = fmt.Sprintf("Permanently deleted secret %q", req.Path)
-			}
-			d.sendResponse(c, IPCResponse{
-				Success: true,
-				Value:   msg,
-			})
+		d.ensureStoreInitialized()
+		if req.NewPath == "" {
+			d.sendError(c, "new_path is required for rename action")
+			return
 		}
 
-	case "restore_deleted":
-		if d.masterKey == nil {
-			d.sendError(c, "Session locked. Please unlock first.")
-			return
+		if req.IsPrefix {
+			oldPrefix := req.Path
+			if !strings.HasSuffix(oldPrefix, "/") {
+				oldPrefix += "/"
+			}
+			newPrefix := req.NewPath
+			if !strings.HasSuffix(newPrefix, "/") {
+				newPrefix += "/"
+			}
+
+			count := 0
+			for k, entry := range d.secretsStore.Secrets {
+				keyStr := string(k)
+				if strings.HasPrefix(keyStr, oldPrefix) {
+					newKeyStr := newPrefix + strings.TrimPrefix(keyStr, oldPrefix)
+					delete(d.secretsStore.Secrets, k)
+					entry.LastModified = time.Now()
+					d.secretsStore.Secrets[store.SecretKey(newKeyStr)] = entry
+					count++
+				}
+			}
+			if count == 0 {
+				d.sendError(c, fmt.Sprintf("no secrets found under prefix %q", oldPrefix))
+				return
+			}
+		} else {
+			entry, ok := d.secretsStore.Secrets[store.SecretKey(req.Path)]
+			if !ok {
+				d.sendError(c, fmt.Sprintf("secret %q not found", req.Path))
+				return
+			}
+			delete(d.secretsStore.Secrets, store.SecretKey(req.Path))
+			entry.LastModified = time.Now()
+			d.secretsStore.Secrets[store.SecretKey(req.NewPath)] = entry
 		}
-		if err := d.secretsStore.RestoreDeletedSecret(req.Path); err != nil {
-			d.sendError(c, fmt.Sprintf("failed to restore deleted secret: %v", err))
-			return
-		}
+
 		if err := store.SaveStore(d.profile, d.secretsStore, d.masterKey); err != nil {
 			d.sendError(c, fmt.Sprintf("failed to persist store: %v", err))
 			return
 		}
 		d.lastUsed = time.Now()
-		d.sendResponse(c, IPCResponse{
-			Success: true,
-			Value:   fmt.Sprintf("Restored soft-deleted secret %q", req.Path),
-		})
+		d.sendResponse(c, IPCResponse{Success: true})
 
-	case "history":
+	case IPCActionCopy:
 		if d.masterKey == nil {
 			d.sendError(c, "Session locked. Please unlock first.")
 			return
 		}
-		entry, exists := d.secretsStore.Secrets[req.Path]
+		d.ensureStoreInitialized()
+		if req.NewPath == "" {
+			d.sendError(c, "new_path is required for copy action")
+			return
+		}
+
+		if req.IsPrefix {
+			oldPrefix := req.Path
+			if !strings.HasSuffix(oldPrefix, "/") {
+				oldPrefix += "/"
+			}
+			newPrefix := req.NewPath
+			if !strings.HasSuffix(newPrefix, "/") {
+				newPrefix += "/"
+			}
+
+			all := d.resolveAllSecrets(req.ExtendsProfile, false)
+			count := 0
+			for k, entry := range all {
+				if strings.HasPrefix(k, oldPrefix) {
+					newKeyStr := newPrefix + strings.TrimPrefix(k, oldPrefix)
+					entry.Created = time.Now()
+					entry.LastModified = time.Now()
+					d.secretsStore.Secrets[store.SecretKey(newKeyStr)] = entry
+					count++
+				}
+			}
+			if count == 0 {
+				d.sendError(c, fmt.Sprintf("no secrets found under prefix %q", oldPrefix))
+				return
+			}
+		} else {
+			entry, exists := d.resolveSecret(req.Path, req.ExtendsProfile)
+			if !exists {
+				d.sendError(c, fmt.Sprintf("secret %q not found", req.Path))
+				return
+			}
+			entry.Created = time.Now()
+			entry.LastModified = time.Now()
+			d.secretsStore.Secrets[store.SecretKey(req.NewPath)] = entry
+		}
+
+		if err := store.SaveStore(d.profile, d.secretsStore, d.masterKey); err != nil {
+			d.sendError(c, fmt.Sprintf("failed to persist store: %v", err))
+			return
+		}
+		d.lastUsed = time.Now()
+		d.sendResponse(c, IPCResponse{Success: true})
+
+	case IPCActionClear:
+		d.wipeMemory()
+		d.logAudit(AuditEventClear, d.profile, peerPID, true, "")
+		d.sendResponse(c, IPCResponse{Success: true})
+
+	case IPCActionHistory:
+		if d.masterKey == nil {
+			d.sendError(c, "Session locked. Please unlock first.")
+			return
+		}
+		entry, exists := d.resolveSecret(req.Path, req.ExtendsProfile)
 		if !exists {
 			d.sendError(c, fmt.Sprintf("secret %q not found", req.Path))
 			return
 		}
-		currVer := entry.Version
-		if currVer <= 0 {
-			currVer = 1
-		}
 		d.lastUsed = time.Now()
 		d.sendResponse(c, IPCResponse{
 			Success:     true,
-			ItemVersion: currVer,
 			History:     entry.History,
+			ItemVersion: entry.Version,
 		})
 
-	case "rollback":
+	case IPCActionRollback:
 		if d.masterKey == nil {
 			d.sendError(c, "Session locked. Please unlock first.")
 			return
 		}
-		entry, exists := d.secretsStore.Secrets[req.Path]
+		d.ensureStoreInitialized()
+		entry, exists := d.resolveSecret(req.Path, req.ExtendsProfile)
 		if !exists {
 			d.sendError(c, fmt.Sprintf("secret %q not found", req.Path))
 			return
@@ -1022,7 +886,6 @@ func (d *Daemon) handleConnection(c net.Conn) {
 			return
 		}
 
-		// Push current state into history before rolling back
 		oldVer := entry.Version
 		if oldVer <= 0 {
 			oldVer = 1
@@ -1046,7 +909,7 @@ func (d *Daemon) handleConnection(c net.Conn) {
 		entry.LastModified = time.Now()
 		entry.DeletedAt = nil
 
-		d.secretsStore.Secrets[req.Path] = entry
+		d.secretsStore.Secrets[store.SecretKey(req.Path)] = entry
 		if err := store.SaveStore(d.profile, d.secretsStore, d.masterKey); err != nil {
 			d.sendError(c, fmt.Sprintf("failed to persist store: %v", err))
 			return
@@ -1057,7 +920,7 @@ func (d *Daemon) handleConnection(c net.Conn) {
 			Value:   fmt.Sprintf("Rolled back secret %q to version %d (new active version: v%d)", req.Path, targetVer, entry.Version),
 		})
 
-	case "status":
+	case IPCActionStatus:
 		d.lastUsed = time.Now()
 		totalSecrets := 0
 		expiredSecrets := 0
@@ -1076,26 +939,26 @@ func (d *Daemon) handleConnection(c net.Conn) {
 			fileSize = fi.Size()
 		}
 
-		info := map[string]interface{}{
-			"profile":          d.profile,
-			"version":          d.version,
-			"socket_path":      d.socketPath,
-			"store_path":       storePath,
-			"store_size_bytes": fileSize,
-			"is_unlocked":      d.masterKey != nil,
-			"total_secrets":    totalSecrets,
-			"expired_secrets":  expiredSecrets,
-			"session_start":    d.sessionStart.Format(time.RFC3339),
-			"last_used":        d.lastUsed.Format(time.RFC3339),
-			"session_ttl":      d.sessionTTL.String(),
-			"grace_ttl":        d.graceTTL.String(),
+		info := &DaemonStatusInfo{
+			Profile:        d.profile,
+			Version:        d.version,
+			SocketPath:     d.socketPath,
+			StorePath:      storePath,
+			StoreSizeBytes: fileSize,
+			IsUnlocked:     d.masterKey != nil,
+			TotalSecrets:   totalSecrets,
+			ExpiredSecrets: expiredSecrets,
+			SessionStart:   d.sessionStart.Format(time.RFC3339),
+			LastUsed:       d.lastUsed.Format(time.RFC3339),
+			SessionTTL:     d.sessionTTL.String(),
+			GraceTTL:       d.graceTTL.String(),
 		}
 		d.sendResponse(c, IPCResponse{
 			Success:    true,
 			StatusInfo: info,
 		})
 
-	case "audit":
+	case IPCActionAudit:
 		cfgDir, err := config.GetConfigDir()
 		if err != nil {
 			d.sendError(c, fmt.Sprintf("failed to resolve config dir: %v", err))
@@ -1126,24 +989,129 @@ func (d *Daemon) handleConnection(c net.Conn) {
 			Value:   strings.Join(lines, "\n"),
 		})
 
+	case IPCActionLease:
+		resp, err := d.handleLease(req)
+		if err != nil {
+			d.sendError(c, err.Error())
+			return
+		}
+		d.sendResponse(c, resp)
+
 	default:
 		d.sendError(c, "unknown action")
 	}
 }
 
-func (d *Daemon) logAudit(action, path string, peerPID int, success bool, errStr string) {
+type OperationLogEntry struct {
+	Timestamp       string `json:"timestamp"`
+	Actor           string `json:"actor"`
+	Action          string `json:"action"`
+	Profile         string `json:"profile"`
+	MasterKeySHA256 string `json:"master_key_sha256"`
+	Details         string `json:"details"`
+	Success         bool   `json:"success"`
+	Error           string `json:"error,omitempty"`
+}
+
+func LogOperation(actor, action, profile, masterKeyFP, details string, success bool, errStr string) {
+	cfgDir, err := config.GetConfigDir()
+	if err != nil {
+		return
+	}
+	logPath := filepath.Join(cfgDir, "operations.log")
+	if actor == "" {
+		actor = "terminal"
+	}
+	if profile == "" {
+		profile = "default"
+	}
+
+	entry := OperationLogEntry{
+		Timestamp:       time.Now().Format(time.RFC3339),
+		Actor:           actor,
+		Action:          action,
+		Profile:         profile,
+		MasterKeySHA256: masterKeyFP,
+		Details:         details,
+		Success:         success,
+		Error:           errStr,
+	}
+
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return
+	}
+	// #nosec G304 G703
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err == nil {
+		_, _ = f.Write(append(data, '\n'))
+		_ = f.Close()
+	}
+}
+
+func getProcessName(pid int) string {
+	if pid <= 0 {
+		return ""
+	}
+	// #nosec G204
+	out, err := exec.Command("ps", "-p", fmt.Sprintf("%d", pid), "-o", "comm=").Output()
+	if err != nil {
+		return fmt.Sprintf("PID %d", pid)
+	}
+	name := strings.TrimSpace(string(out))
+	if name == "" {
+		return fmt.Sprintf("PID %d", pid)
+	}
+	return filepath.Base(name)
+}
+
+func (d *Daemon) logAudit(action AuditEventAction, path string, peerPID int, success bool, errStr string) {
 	cfgDir, err := config.GetConfigDir()
 	if err != nil {
 		return
 	}
 	logPath := filepath.Join(cfgDir, "audit.log")
+
+	storePath := ""
+	if p, err := store.GetStorePath(d.profile); err == nil {
+		storePath = p
+	}
+
+	fp := ""
+	if len(d.masterKey) > 0 {
+		fp = crypto.MasterKeyFingerprint(d.masterKey)
+	}
+
+	valLen := 0
+	ver := 0
+	if d.secretsStore != nil && d.secretsStore.Secrets != nil && path != "" {
+		if s, ok := d.secretsStore.Secrets[store.SecretKey(path)]; ok {
+			valLen = len(s.Value)
+			ver = s.Version
+		}
+	}
+
+	procName := getProcessName(peerPID)
+
+	prof := d.profile
+	if prof == "" {
+		prof = "default"
+	}
+
 	entry := AuditLogEntry{
-		Timestamp: time.Now().Format(time.RFC3339),
-		Action:    action,
-		Path:      path,
-		PeerPID:   peerPID,
-		Success:   success,
-		Error:     errStr,
+		Timestamp:       time.Now().Format(time.RFC3339),
+		Action:          action,
+		Profile:         prof,
+		StoreFilePath:   storePath,
+		Path:            path,
+		MasterKeySHA256: fp,
+		PeerPID:         peerPID,
+		ProcessName:     procName,
+		ClientMode:      "daemon",
+		ValueLength:     valLen,
+		SecretVersion:   ver,
+		Success:         success,
+		Error:           errStr,
 	}
 	data, err := json.Marshal(entry)
 	if err != nil {
@@ -1161,22 +1129,26 @@ func (d *Daemon) sendResponse(c net.Conn, resp IPCResponse) {
 	_ = json.NewEncoder(c).Encode(resp)
 }
 
-func (d *Daemon) sendError(c net.Conn, msg string) {
-	_ = json.NewEncoder(c).Encode(IPCResponse{
-		Success: false,
-		Error:   msg,
-	})
+func (d *Daemon) ensureStoreInitialized() {
+	if d.secretsStore == nil {
+		d.secretsStore = &store.EncryptedStore{Secrets: make(map[store.SecretKey]store.SecretEntry)}
+	}
+	if d.secretsStore.Secrets == nil {
+		d.secretsStore.Secrets = make(map[store.SecretKey]store.SecretEntry)
+	}
 }
 
 func (d *Daemon) resolveSecret(path string, extendsProfile string) (store.SecretEntry, bool) {
-	entry, exists := d.secretsStore.Secrets[path]
-	if exists && entry.DeletedAt == nil {
-		return entry, true
+	if d.secretsStore != nil && d.secretsStore.Secrets != nil {
+		entry, exists := d.secretsStore.Secrets[store.SecretKey(path)]
+		if exists && entry.DeletedAt == nil {
+			return entry, true
+		}
 	}
 	if extendsProfile != "" && extendsProfile != d.profile {
 		parentStore, err := store.LoadStore(extendsProfile, d.masterKey)
-		if err == nil && parentStore != nil {
-			entry, exists := parentStore.Secrets[path]
+		if err == nil && parentStore != nil && parentStore.Secrets != nil {
+			entry, exists := parentStore.Secrets[store.SecretKey(path)]
 			if exists && entry.DeletedAt == nil {
 				return entry, true
 			}
@@ -1185,7 +1157,7 @@ func (d *Daemon) resolveSecret(path string, extendsProfile string) (store.Secret
 	return store.SecretEntry{}, false
 }
 
-func (d *Daemon) resolveAllSecrets(extendsProfile string) map[string]store.SecretEntry {
+func (d *Daemon) resolveAllSecrets(extendsProfile string, includeTrash bool) map[string]store.SecretEntry {
 	allocCap := 0
 	if d.secretsStore != nil && d.secretsStore.Secrets != nil {
 		allocCap += len(d.secretsStore.Secrets)
@@ -1193,17 +1165,19 @@ func (d *Daemon) resolveAllSecrets(extendsProfile string) map[string]store.Secre
 	res := make(map[string]store.SecretEntry, allocCap)
 	if extendsProfile != "" && extendsProfile != d.profile {
 		parentStore, err := store.LoadStore(extendsProfile, d.masterKey)
-		if err == nil && parentStore != nil {
+		if err == nil && parentStore != nil && parentStore.Secrets != nil {
 			for k, v := range parentStore.Secrets {
-				if v.DeletedAt == nil {
-					res[k] = v
+				if includeTrash || v.DeletedAt == nil {
+					res[string(k)] = v
 				}
 			}
 		}
 	}
-	for k, v := range d.secretsStore.Secrets {
-		if v.DeletedAt == nil {
-			res[k] = v
+	if d.secretsStore != nil && d.secretsStore.Secrets != nil {
+		for k, v := range d.secretsStore.Secrets {
+			if includeTrash || v.DeletedAt == nil {
+				res[string(k)] = v
+			}
 		}
 	}
 	return res

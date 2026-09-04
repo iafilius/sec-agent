@@ -1,12 +1,12 @@
 ---
 name: sec-agent-integration
 description: Use the sec-agent CLI utility to start background daemons, store secrets, run applications in isolated environments, migrate dotenv files, install AI skills, inspect snapshots, and manage backups.
-version: v2.4.3
+version: v2.6.0
 ---
 
-# sec-agent Secrets Management Integration (v2.4.3)
+# sec-agent Secrets Management Integration (v2.6.0)
 
-This skill enables AI coding agents and autonomous assistants to use the `sec-agent` CLI tool (v1.9.4+) to securely retrieve credentials, run application build/test/terraform pipelines in isolated process environments, migrate dotenv configuration files, install integration skills across IDEs, inspect automatic snapshots, and manage KeePassXC `.kdbx` backups on macOS.
+This skill enables AI coding agents and autonomous assistants to use the `sec-agent` CLI tool (v1.9.4+) to securely retrieve credentials, run application build/test/terraform pipelines in isolated process environments, migrate dotenv configuration files, install integration skills across IDEs, inspect point-in-time snapshots (`sec snapshot`), and manage KeePassXC `.kdbx` backups on macOS.
 
 ---
 
@@ -35,7 +35,7 @@ When running `sec-agent` on a fresh workstation or uninitialized environment:
   Please initialize your vault environment by running:
       sec-agent init
   ```
-* **Guided & Non-Interactive Onboarding**: Run `sec-agent init` (or `sec-agent setup`). Pass `--non-interactive` (or `-y` / `--yes`) in non-interactive CI/CD setups to initialize configuration directories (`~/.config/sec-agent/` and `~/.config/sec-agent/backups/`) silently without terminal prompt menus.
+* **Guided & Non-Interactive Onboarding**: Run `sec-agent init` (or `sec-agent setup`). Pass `--non-interactive` (or `-y` / `--yes`) in non-interactive CI/CD setups to initialize configuration directories (`~/.config/sec-agent/` and `~/.config/sec-agent/snapshots/`) silently without terminal prompt menus.
 
 ### 1.3. Diagnostics & Fast-Path Status Verification
 ```bash
@@ -47,6 +47,9 @@ sec-agent version [--json]
 
 # View single-pane-of-glass status across all profiles
 sec-agent status --all
+
+# Run deep pre-flight vault envelope, keychain key, and system diagnostics
+sec-agent doctor
 ```
 
 * **Daemon "Active" / "Running"**: The session is unlocked and secrets are queryable.
@@ -89,23 +92,29 @@ When `sec-agent` is updated (e.g. via `brew upgrade sec-agent`), the next CLI ex
 
 ---
 
-## 3. Disaster Recovery & Snapshot Restoration (`sec-agent backup list`)
+## 3. Point-in-Time Vault Snapshots & Disaster Recovery (`sec-agent snapshot`)
 
-### 3.1. Vault Backup Inspection & Snapshot Restoration
-`sec-agent` creates automatic atomic `.enc` snapshots in `~/.config/sec-agent/backups/<profile>/` before every database mutation, alongside manual KeePassXC `.kdbx` exports.
+### 3.1. Vault Snapshot Inspection & Restoration
+`sec-agent` maintains indexed `.enc` snapshots in `~/.config/sec-agent/snapshots/<profile>/` with master key SHA-256 fingerprinting (`sha256:16hex`) and secret count metadata.
 
 ```bash
-# Inspect all automatic write snapshots and local KeePassXC backups
-sec-agent backup list
+# List all point-in-time snapshots with key matching & secret counts
+sec-agent snapshot list (alias: sec snapshots)
 
-# Restore from an automatic write snapshot (.enc) or KeePassXC export (.kdbx)
-sec-agent restore <file-path> [--merge | --overwrite]
+# Create a manual point-in-time snapshot
+sec-agent snapshot create [--comment "note"]
+
+# Restore an internal point-in-time snapshot (creates pre-restore safety copy automatically)
+sec-agent snapshot restore <SNAPSHOT_ID> [--force]
+
+# Import external portable KeePassXC archives (.kdbx, .json, .csv)
+sec-agent backup import <file.kdbx> [--merge | --overwrite]
 ```
 
 ### 3.2. 4-Step Disaster Recovery Protocol
 When vault corruption or session state issues occur, follow this 4-step recovery process:
-1. **Inspect Available Snapshots**: Run `sec-agent backup list`.
-2. **Restore Database Payload**: Run `sec-agent restore ~/.config/sec-agent/backups/secrets_<timestamp>.enc --overwrite`.
+1. **Inspect Available Snapshots**: Run `sec-agent snapshot list`.
+2. **Restore Target Snapshot**: Run `sec-agent snapshot restore <SNAPSHOT_ID> --force`.
 3. **Reset Daemon Socket State**: Run `sec-agent restart`.
 4. **Re-authenticate Shell Session**: Run `eval $(sec-agent open)`.
 
@@ -181,13 +190,38 @@ sec-agent lease revoke $lease_token
 ```
 Delegate temporary credential access to subagents with **zero credential lingering**.
 
-### 5.7. Real-Time Secret Redaction (`sec-agent run`)
+### 5.7. Real-Time Secret Redaction & Inline `sec://` Placeholders (`sec-agent run`)
 ```bash
 sec-agent run -- make testacc
 sec-agent run --allow-keys VCO_URL,VCO_TOKEN -- make test-unit
+
+# Inline URI replacement: In-memory argument replacement for legacy tools requiring password flags (-p)
+sec-agent run -- ./legacy_tool -p "sec://db/password"
 ```
 
-### 5.8. Ephemeral SSH Agent & Passphrase Injection (`sec-agent run --ssh-key`)
+### 5.8. Streamlined Remote SSH Automation (`sec-agent ssh`)
+```bash
+# Direct SSH connection with automated in-memory ephemeral agent
+sec-agent ssh root@192.168.31.1 -- "uci show"
+
+# Named target resolution via .secrc ("ssh_targets")
+sec-agent ssh router -- "uci show"
+```
+
+### 5.9. Companion Metadata Environment Variables
+Stored secret metadata (e.g. `subnet=192.168.31.0/24`, `gateway=192.168.31.1`) is automatically exported as companion environment variables (`<KEY>_<META_KEY>`) during `sec run`:
+- `ROUTER_ADMIN="<secret>"`
+- `ROUTER_ADMIN_SUBNET="192.168.31.0/24"`
+- `ROUTER_ADMIN_GATEWAY="192.168.31.1"`
+
+### 5.10. Remote Configuration Drift Verification (`sec-agent check --remote`)
+```bash
+# Compare live remote OpenWrt UCI settings or environment variables against vault keys (zero plaintext leak)
+sec-agent check --remote root@192.168.31.1 --uci wireless.wifinet_dev_5g.key=wifi/passphrase
+sec-agent check --remote deploy@api.prod --env API_TOKEN=prod/api_token
+```
+
+### 5.11. Ephemeral SSH Agent & Passphrase Injection (`sec-agent run --ssh-key`)
 ```bash
 # Launch ephemeral in-memory SSH agent with vault passphrase for SSH/Rsync/Git automation
 sec-agent run --ssh-key ~/.ssh/id_ed25519_ax3600 \
@@ -195,14 +229,14 @@ sec-agent run --ssh-key ~/.ssh/id_ed25519_ax3600 \
               -- ssh root@192.168.31.1 "uci show"
 ```
 
-### 5.9. Stdin Stream Injection & Redaction (`sec-agent stream`)
+### 5.12. Stdin Stream Injection & Redaction (`sec-agent stream`)
 ```bash
 # Evaluate {{key_path}} placeholders in-memory without process table (ps aux) exposure
 sec-agent stream --template "uci set network.wg0.private_key='{{router-ax3600-prod/nordvpn/private_key}}'" \
   | ssh root@192.168.31.1 "cat | sh"
 ```
 
-### 5.10. Multi-Profile Inheritance (`extends` in `.secrc`)
+### 5.13. Multi-Profile Inheritance (`extends` in `.secrc`)
 ```json
 {
   "profile": "router-ax3600-prod",
@@ -211,7 +245,7 @@ sec-agent stream --template "uci set network.wg0.private_key='{{router-ax3600-pr
 ```
 Child profiles recursively fallback to parent profile stores for missing keys.
 
-### 5.11. Dynamic Flag Aliases (`flag_aliases` in `.secrc`)
+### 5.14. Dynamic Flag Aliases (`flag_aliases` in `.secrc`)
 ```json
 {
   "flag_aliases": {
@@ -221,7 +255,7 @@ Child profiles recursively fallback to parent profile stores for missing keys.
 ```
 Automatically injects credentials as command-line flags into subprocess arguments.
 
-### 5.12. Network Host Reachability Guard (`sec-agent check --ping-host`)
+### 5.15. Network Host Reachability Guard (`sec-agent check --ping-host`)
 ```bash
 # Pre-flight TCP connectivity verification (<50ms)
 sec-agent check --ping-host 192.168.31.1:22
@@ -309,4 +343,24 @@ When initializing secret management for a new workspace or migrating an existing
 6. **In-Memory Hot-Reload (`sec restart --hot-reload`)**: During CLI upgrades, execute `sec restart --hot-reload` to hot-reload the daemon process image in memory via kernel pipe handoff without clearing active session state or requiring Touch ID re-authentication.
 7. **Workspace `.secrc` Auto-Open & Native Cross-Profile Copy**: `eval $(sec open)` auto-detects workspace `.secrc` / `.secenv` targets to unlock `default` and workspace target profiles in 1 Touch ID tap. Use `sec copy <src> <dst> --from-profile <p1> --to-profile <p2>` to safely copy credentials across vault profiles in memory.
 
+---
+
+## 7. Insecure Password Flag Prevention & AI Coding Guidelines (v2.6.0)
+
+### 7.1. Zero Plaintext Password Arguments Policy
+AI coding agents and autonomous assistants **MUST NEVER** generate, suggest, or execute CLI commands or scripts containing plaintext credentials in command-line arguments (e.g. `-p <password>`, `-p=<password>`, `--password <password>`, `--token=<secret>`).
+
+* **Process Table Exposure**: Command-line arguments are visible system-wide to all local processes via `ps aux`, `top`, and `/proc/<pid>/cmdline`.
+* **History Leaks**: Plaintext credentials are saved to shell history (`.zsh_history`, `.bash_history`) and agent logs.
+
+### 7.2. Recommended Secure Patterns for AI Assistants
+1. **Process Isolation (`sec-agent run`)**: Wrap execution with `sec-agent run -- <cmd>` to inject credentials into process environment directly from vault memory.
+2. **Environment Variable Fallback**: When authoring or refactoring scripts, configure them to read credentials from environment variables (e.g., `PASSWORD="${PASSWORD:-$1}"` or `os.Getenv("PASSWORD")`).
+3. **Stdin / Stream Injection (`sec-agent stream`)**: Pipe secrets via stdin or `sec-agent stream --template "..."` rather than command arguments.
+
+### 7.3. Automated Script Auditing (`sec-agent check --scripts`)
+```bash
+# Scan workspace or specific script for plaintext credential flags
+sec-agent check --scripts [path]
+```
 

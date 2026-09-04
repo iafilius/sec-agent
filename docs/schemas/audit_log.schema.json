@@ -1,0 +1,76 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "sec-agent Audit Log Entry Schema",
+  "description": "JSON Schema for sec-agent security flight log audit records (audit.log)",
+  "type": "object",
+  "required": [
+    "timestamp",
+    "action",
+    "success"
+  ],
+  "properties": {
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO-8601 UTC timestamp of audit event"
+    },
+    "action": {
+      "type": "string",
+      "enum": ["OPEN", "GET", "SET", "DELETE", "CLEAR", "AUDIT", "REEXEC"],
+      "description": "Security action performed"
+    },
+    "profile": {
+      "type": "string",
+      "description": "Target secret profile (e.g. default, dev, prod)"
+    },
+    "store_file_path": {
+      "type": "string",
+      "description": "Explicit physical database filename on disk (e.g. ~/.config/sec-agent/secrets.enc)"
+    },
+    "path": {
+      "type": "string",
+      "description": "Target secret key path (e.g. db/prod/password)"
+    },
+    "master_key_sha256": {
+      "type": "string",
+      "description": "First 16 hex characters of SHA-256(masterKey) fingerprint"
+    },
+    "peer_pid": {
+      "type": "integer",
+      "description": "Process ID of calling process"
+    },
+    "process_name": {
+      "type": "string",
+      "description": "Executable process binary name of calling process (e.g. sec-agent, zsh)"
+    },
+    "actor": {
+      "type": "string",
+      "description": "OS user or process actor string"
+    },
+    "client_mode": {
+      "type": "string",
+      "enum": ["daemon", "cli", "gui"],
+      "description": "Access channel"
+    },
+    "value_length": {
+      "type": "integer",
+      "description": "Secret value length in bytes (NEVER plaintext value)"
+    },
+    "secret_version": {
+      "type": "integer",
+      "description": "Secret version integer"
+    },
+    "success": {
+      "type": "boolean",
+      "description": "Operation success boolean"
+    },
+    "error": {
+      "type": "string",
+      "description": "Error message string if operation failed"
+    },
+    "details": {
+      "type": "string",
+      "description": "Safe metadata summary note"
+    }
+  }
+}

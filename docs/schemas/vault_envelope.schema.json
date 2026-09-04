@@ -1,0 +1,52 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "sec-agent v2.0 Vault Envelope Schema",
+  "description": "On-disk JSON envelope structure for encrypted v2.0 Dual-Slot profile databases",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "upgraded_at",
+    "payload"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "enum": ["2.0"],
+      "description": "Vault envelope version string"
+    },
+    "upgraded_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC3339 UTC timestamp when vault envelope was created/upgraded"
+    },
+    "master_key_sha256": {
+      "type": "string",
+      "description": "First 16 hex characters of SHA-256(masterKey) fingerprint"
+    },
+    "slot1": {
+      "type": "object",
+      "description": "LUKS-style Slot 1 BIP39/Argon2id recovery slot header",
+      "required": [
+        "argon2_salt",
+        "wrapped_key"
+      ],
+      "properties": {
+        "argon2_salt": {
+          "type": "string",
+          "contentEncoding": "base64",
+          "description": "Base64-encoded 16-byte random salt used during Argon2id key derivation"
+        },
+        "wrapped_key": {
+          "type": "string",
+          "contentEncoding": "base64",
+          "description": "Base64-encoded 12-byte nonce prepended to AES-256-GCM encrypted master key ciphertext"
+        }
+      }
+    },
+    "payload": {
+      "type": "string",
+      "contentEncoding": "base64",
+      "description": "Base64-encoded 12-byte nonce prepended to AES-256-GCM encrypted EncryptedStore JSON payload"
+    }
+  }
+}

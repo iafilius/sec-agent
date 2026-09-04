@@ -2,6 +2,7 @@ package keychain
 
 import (
 	"bytes"
+	"os"
 	"testing"
 )
 
@@ -36,16 +37,18 @@ func TestKeychainLifecycle(t *testing.T) {
 		t.Errorf("Expected to find account %q in list, but got: %v", account, accounts)
 	}
 
-	// 4. Retrieve the secret
-	// NOTE: This will trigger a physical Touch ID prompt.
-	t.Log("Note: This test may trigger a physical Touch ID/password prompt. Please accept or cancel.")
-	retrieved, err := Get(service, account)
-	if err != nil {
-		// We expect either success or user cancellation / auth failure
-		t.Logf("Get secret returned error (this is normal if canceled): %v", err)
+	// 4. Retrieve the secret (Physical Touch ID prompt gated for headless test runs)
+	if testing.Short() || os.Getenv("ENABLE_INTERACTIVE_KEYCHAIN_TEST") != "1" {
+		t.Log("Skipping interactive Touch ID Keychain Get test during automated runs (enable via ENABLE_INTERACTIVE_KEYCHAIN_TEST=1)")
 	} else {
-		if !bytes.Equal(retrieved, secret) {
-			t.Errorf("Expected retrieved secret to be %q, but got %q", string(secret), string(retrieved))
+		t.Log("Note: This test will trigger a physical Touch ID/password prompt. Please accept or cancel.")
+		retrieved, err := Get(service, account)
+		if err != nil {
+			t.Logf("Get secret returned error (this is normal if canceled): %v", err)
+		} else {
+			if !bytes.Equal(retrieved, secret) {
+				t.Errorf("Expected retrieved secret to be %q, but got %q", string(secret), string(retrieved))
+			}
 		}
 	}
 

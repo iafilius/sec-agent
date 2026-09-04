@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 )
 
 // IsConfigDirInitialized returns true if ~/.config/sec-agent/ or legacy ~/.config/sec/ exists.
@@ -105,6 +106,21 @@ This directory (~/.config/sec-agent/) was automatically created by **sec-agent**
 	return os.WriteFile(readmePath, []byte(content), 0600)
 }
 
+func validateProfileString(profile string) error {
+	if strings.TrimSpace(profile) == "" {
+		return fmt.Errorf("profile name cannot be empty")
+	}
+	if strings.Contains(profile, "/") || strings.Contains(profile, "\\") || strings.Contains(profile, "..") {
+		return fmt.Errorf("invalid profile path %q: profile name cannot contain path separators or relative components ('..')", profile)
+	}
+	for _, r := range profile {
+		if unicode.IsControl(r) || unicode.IsSpace(r) {
+			return fmt.Errorf("invalid profile path %q: profile name cannot contain whitespace or control characters", profile)
+		}
+	}
+	return nil
+}
+
 // GetSocketPath returns the path to the Unix domain socket for the daemon.
 func GetSocketPath(profile string) (string, error) {
 	dir, err := GetConfigDir()
@@ -113,6 +129,9 @@ func GetSocketPath(profile string) (string, error) {
 	}
 	if profile == "" || profile == "default" {
 		return filepath.Join(dir, "sec-agent.sock"), nil
+	}
+	if err := validateProfileString(profile); err != nil {
+		return "", err
 	}
 	return filepath.Join(dir, fmt.Sprintf("sec-agent_%s.sock", profile)), nil
 }
@@ -125,6 +144,9 @@ func GetPIDFilePath(profile string) (string, error) {
 	}
 	if profile == "" || profile == "default" {
 		return filepath.Join(dir, "sec-agent.pid"), nil
+	}
+	if err := validateProfileString(profile); err != nil {
+		return "", err
 	}
 	return filepath.Join(dir, fmt.Sprintf("sec-agent_%s.pid", profile)), nil
 }

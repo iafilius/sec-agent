@@ -65,7 +65,7 @@ func TestLocalDotenvMigrationAndExport(t *testing.T) {
 	defer os.Remove("sec_migration_test_bin2")
 
 	// Spin up test daemon
-	d, err := daemon.NewDaemon(profile, 30*time.Second, "v1.0.0")
+	d, err := daemon.NewDaemon(profile, 30*time.Second, Version)
 	if err != nil {
 		t.Fatalf("failed to create daemon: %v", err)
 	}
@@ -229,7 +229,7 @@ EMPTY_VAL=
 	if !strings.Contains(verStr, "sec-agent CLI:") {
 		t.Errorf("expected version output to contain 'sec-agent CLI:', got:\n%s", verStr)
 	}
-	if !strings.Contains(verStr, "sec-agent Daemon:   v1.0.0") {
-		t.Errorf("expected version output to contain daemon version v1.0.0, got:\n%s", verStr)
+	if !strings.Contains(verStr, "sec-agent Daemon:   "+Version) {
+		t.Errorf("expected version output to contain daemon version %s, got:\n%s", Version, verStr)
 	}
 }

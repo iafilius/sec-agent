@@ -1,0 +1,65 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "sec-agent Snapshot Metadata",
+  "type": "object",
+  "required": [
+    "id",
+    "profile",
+    "created_at",
+    "trigger_reason",
+    "actor",
+    "master_key_sha256",
+    "schema_version",
+    "secret_count",
+    "file_path",
+    "key_match"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Unique snapshot identifier (e.g. snap-20260810-180656-11)"
+    },
+    "profile": {
+      "type": "string",
+      "description": "Profile vault name (e.g. default, dev, prod)"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC timestamp when the snapshot was created"
+    },
+    "trigger_reason": {
+      "type": "string",
+      "description": "Reason for creation (e.g. manual, auto-save, pre-migration, pre-restore-safety)"
+    },
+    "actor": {
+      "type": "string",
+      "description": "Origin of the operation (e.g. terminal, ai-agent, web-ui, system)"
+    },
+    "master_key_sha256": {
+      "type": "string",
+      "description": "First 16 hex characters of SHA-256(masterKey)"
+    },
+    "schema_version": {
+      "type": "string",
+      "enum": ["1.0", "2.0"],
+      "description": "Vault envelope schema version"
+    },
+    "secret_count": {
+      "type": "integer",
+      "description": "Total active secrets in snapshot (-1 if locked/key mismatch)"
+    },
+    "file_path": {
+      "type": "string",
+      "description": "Absolute filesystem path to the encrypted snapshot .enc file"
+    },
+    "comment": {
+      "type": "string",
+      "description": "User note or description"
+    },
+    "key_match": {
+      "type": "boolean",
+      "description": "True if snapshot masterKey SHA256 matches active Touch ID master key"
+    }
+  }
+}

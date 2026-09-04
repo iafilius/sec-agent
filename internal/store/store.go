@@ -38,7 +38,7 @@ type SecretEntry struct {
 
 // EncryptedStore represents the local store.
 type EncryptedStore struct {
-	Secrets map[string]SecretEntry `json:"secrets"`
+	Secrets map[SecretKey]SecretEntry `json:"secrets"`
 }
 
 // UnmarshalJSON implements custom unmarshaling to migrate legacy stores cleanly.
@@ -59,15 +59,91 @@ func (es *EncryptedStore) UnmarshalJSON(data []byte) error {
 		return fmt.Errorf("failed to unmarshal store JSON: %w", err)
 	}
 
-	es.Secrets = make(map[string]SecretEntry)
+	es.Secrets = make(map[SecretKey]SecretEntry)
 	for k, v := range legacy.Secrets {
-		es.Secrets[k] = SecretEntry{
+		es.Secrets[SecretKey(k)] = SecretEntry{
 			Value:        v,
 			Created:      time.Now(),
 			LastModified: time.Now(),
 		}
 	}
 	return nil
+}
+
+// DeduplicateProfileSecrets copies matching secret keys from srcProfile to dstProfile,
+// and deletes them from srcProfile. Returns list of moved key paths.
+func DeduplicateProfileSecrets(srcProfile, dstProfile string, prefixes []string, srcMasterKey, dstMasterKey []byte) ([]string, error) {
+	srcStore, err := LoadStore(srcProfile, srcMasterKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load source profile %q: %w", srcProfile, err)
+	}
+
+	dstStore, err := LoadStore(dstProfile, dstMasterKey)
+	if err != nil {
+		// Attempt auto-repair from latest valid snapshot matching srcMasterKey or dstMasterKey
+		snaps, sErr := ListSnapshots(dstProfile, srcMasterKey)
+		if sErr == nil {
+			for _, snap := range snaps {
+				if snap.KeyMatch {
+					dstPath, pErr := GetStorePath(dstProfile)
+					if pErr == nil {
+						// #nosec G304 G703
+						if data, rErr := os.ReadFile(snap.FilePath); rErr == nil {
+							if writeErr := os.WriteFile(dstPath, data, 0600); writeErr == nil {
+								if retriedStore, retryErr := LoadStore(dstProfile, srcMasterKey); retryErr == nil {
+									dstStore = retriedStore
+									dstMasterKey = srcMasterKey
+									err = nil
+									break
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to load target profile %q: %w", dstProfile, err)
+	}
+
+	movedKeys := make([]string, 0)
+	keysToDelete := make([]SecretKey, 0)
+
+	for k, entry := range srcStore.Secrets {
+		kStr := string(k)
+		matchesPrefix := false
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(kStr, prefix) {
+				matchesPrefix = true
+				break
+			}
+		}
+
+		if matchesPrefix {
+			dstEntry, exists := dstStore.Secrets[k]
+			if !exists || entry.LastModified.After(dstEntry.LastModified) {
+				dstStore.Secrets[k] = entry
+			}
+			keysToDelete = append(keysToDelete, k)
+			movedKeys = append(movedKeys, kStr)
+		}
+	}
+
+	if len(movedKeys) > 0 {
+		for _, k := range keysToDelete {
+			delete(srcStore.Secrets, k)
+		}
+		if err := SaveStore(srcProfile, srcStore, srcMasterKey); err != nil {
+			return nil, fmt.Errorf("failed to update source profile %q: %w", srcProfile, err)
+		}
+		if err := SaveStore(dstProfile, dstStore, dstMasterKey); err != nil {
+			return nil, fmt.Errorf("failed to update destination profile %q: %w", dstProfile, err)
+		}
+	}
+
+	sort.Strings(movedKeys)
+	return movedKeys, nil
 }
 
 // GetStorePath returns the path to ~/.config/sec/secrets.enc.
@@ -78,6 +154,9 @@ func GetStorePath(profile string) (string, error) {
 	}
 	if profile == "" || profile == "default" {
 		return filepath.Join(dir, "secrets.enc"), nil
+	}
+	if err := ProfileName(profile).Validate(); err != nil {
+		return "", fmt.Errorf("invalid profile path %q: %w", profile, err)
 	}
 	return filepath.Join(dir, fmt.Sprintf("secrets_%s.enc", profile)), nil
 }
@@ -95,7 +174,7 @@ func LoadStore(profile string, masterKey []byte) (*EncryptedStore, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return &EncryptedStore{Secrets: make(map[string]SecretEntry)}, nil
+			return &EncryptedStore{Secrets: make(map[SecretKey]SecretEntry)}, nil
 		}
 		return nil, fmt.Errorf("failed to read store file: %w", err)
 	}
@@ -115,7 +194,7 @@ func LoadStore(profile string, masterKey []byte) (*EncryptedStore, error) {
 			if profTag == "" {
 				profTag = "default"
 			}
-			return nil, fmt.Errorf("master key mismatch (Touch ID biometric set changed or key invalidated). If this is a v2.0 vault, run 'sec session recover --profile %s' to restore access with your 24-word seed. If this is a test store, re-initialize with 'rm ~/.config/sec-agent/secrets_%s.enc && sec init --profile %s': %w", profTag, profTag, profTag, err)
+			return nil, fmt.Errorf("%w: master key mismatch (Touch ID biometric set changed or key invalidated). If this is a v2.0 vault, run 'sec session recover --profile %s' to restore access with your 24-word seed. If this is a test store, re-initialize with 'rm ~/.config/sec-agent/secrets_%s.enc && sec init --profile %s': %v", ErrMasterKeyMismatch, profTag, profTag, profTag, err)
 		}
 		return nil, fmt.Errorf("failed to decrypt store (incorrect or expired key?): %w", err)
 	}
@@ -126,7 +205,7 @@ func LoadStore(profile string, masterKey []byte) (*EncryptedStore, error) {
 	}
 
 	if store.Secrets == nil {
-		store.Secrets = make(map[string]SecretEntry)
+		store.Secrets = make(map[SecretKey]SecretEntry)
 	}
 
 	for k, entry := range store.Secrets {
@@ -147,7 +226,6 @@ func LoadStore(profile string, masterKey []byte) (*EncryptedStore, error) {
 	return &store, nil
 }
 
-
 // SaveStore encrypts and writes the store to disk using the master key.
 // It uses temporary-file writing and atomic renames to prevent corruption
 // on disk full, read-only disks, or power outages.
@@ -158,7 +236,7 @@ func SaveStore(profile string, store *EncryptedStore, masterKey []byte) error {
 	}
 
 	if store.Secrets == nil {
-		store.Secrets = make(map[string]SecretEntry)
+		store.Secrets = make(map[SecretKey]SecretEntry)
 	}
 
 	plaintext, err := json.Marshal(store)
@@ -171,77 +249,21 @@ func SaveStore(profile string, store *EncryptedStore, masterKey []byte) error {
 		return fmt.Errorf("failed to encrypt store: %w", err)
 	}
 
+	env := &VaultEnvelope{
+		SchemaVersion:   SchemaV2,
+		UpgradedAt:      time.Now().UTC(),
+		MasterKeySHA256: crypto.MasterKeyFingerprint(masterKey),
+		Payload:         ciphertext,
+	}
+
 	if IsV2Vault(path) {
-		env, err := ReadVaultEnvelope(path)
-		if err == nil && env != nil {
-			env.Payload = ciphertext
-			return WriteVaultEnvelope(path, env)
+		if existingEnv, err := ReadVaultEnvelope(path); err == nil && existingEnv != nil {
+			env.UpgradedAt = existingEnv.UpgradedAt
+			env.Slot1 = existingEnv.Slot1
 		}
 	}
 
-	dir := filepath.Dir(path)
-	// Create temp file in same directory to guarantee atomic rename
-	tmpFile, err := os.CreateTemp(dir, "secrets.enc.*.tmp")
-	if err != nil {
-		return fmt.Errorf("failed to create temporary store file: %w", err)
-	}
-	tmpPath := tmpFile.Name()
-	defer func() {
-		_ = tmpFile.Close()
-		_ = os.Remove(tmpPath)
-	}()
-
-	// Restrict permissions to owner-only
-	if err := tmpFile.Chmod(0600); err != nil {
-		return fmt.Errorf("failed to set permissions on temp file: %w", err)
-	}
-
-	if _, err := tmpFile.Write(ciphertext); err != nil {
-		return fmt.Errorf("failed to write encrypted payload to temp file: %w", err)
-	}
-
-	// Force storage device sync (fsync)
-	if err := tmpFile.Sync(); err != nil {
-		return fmt.Errorf("failed to sync temp file to disk: %w", err)
-	}
-
-	if err := tmpFile.Close(); err != nil {
-		return fmt.Errorf("failed to close temp file: %w", err)
-	}
-
-	// Create backup copy of existing store if it exists
-	if _, err := os.Stat(path); err == nil {
-		backupDir := filepath.Join(dir, "backups", profile)
-		if err := os.MkdirAll(backupDir, 0700); err != nil {
-			return fmt.Errorf("failed to create backups directory: %w", err)
-		}
-		backupPath := filepath.Join(backupDir, fmt.Sprintf("secrets.enc.%d", time.Now().UnixNano()))
-
-		// Read existing data
-		// #nosec G304 G703
-		existingData, readErr := os.ReadFile(path)
-		if readErr == nil {
-			// Write backup copy
-			// #nosec G304 G703
-			_ = os.WriteFile(backupPath, existingData, 0600)
-			pruneBackups(backupDir, 10)
-		}
-	}
-
-	// Atomically replace target database file
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("failed to atomically replace store file: %w", err)
-	}
-
-	// Sync parent directory metadata to guarantee persistence on POSIX
-	// #nosec G304 G703
-	dirFile, err := os.Open(dir)
-	if err == nil {
-		_ = dirFile.Sync()
-		_ = dirFile.Close()
-	}
-
-	return nil
+	return WriteVaultEnvelope(path, env)
 }
 
 func pruneBackups(backupDir string, maxBackups int) {
@@ -299,11 +321,41 @@ func InitializeMasterKey(profile string, keychainGetter func() ([]byte, error), 
 	}
 
 	// Create an empty store on disk immediately so it's initialized
-	if err := SaveStore(profile, &EncryptedStore{Secrets: make(map[string]SecretEntry)}, newKey); err != nil {
+	if err := SaveStore(profile, &EncryptedStore{Secrets: make(map[SecretKey]SecretEntry)}, newKey); err != nil {
 		return nil, err
 	}
 
 	return newKey, nil
+}
+
+// GetGroup returns a map of all secrets whose paths match the specified prefix.
+// If prefix is empty, it returns all secrets in the store.
+// GetSecretKey retrieves a secret entry by SecretKey primitive.
+func (es *EncryptedStore) GetSecretKey(key SecretKey) (SecretEntry, bool) {
+	if es == nil || es.Secrets == nil {
+		return SecretEntry{}, false
+	}
+	entry, exists := es.Secrets[key]
+	return entry, exists
+}
+
+// SetSecretKey sets a secret entry by SecretKey primitive.
+func (es *EncryptedStore) SetSecretKey(key SecretKey, entry SecretEntry) {
+	if es == nil {
+		return
+	}
+	if es.Secrets == nil {
+		es.Secrets = make(map[SecretKey]SecretEntry)
+	}
+	es.Secrets[key] = entry
+}
+
+// DeleteSecretKey hard-deletes a secret entry by SecretKey primitive.
+func (es *EncryptedStore) DeleteSecretKey(key SecretKey) {
+	if es == nil || es.Secrets == nil {
+		return
+	}
+	delete(es.Secrets, key)
 }
 
 // GetGroup returns a map of all secrets whose paths match the specified prefix.
@@ -315,8 +367,8 @@ func (es *EncryptedStore) GetGroup(prefix string) map[string]SecretEntry {
 	}
 	cleanPrefix := strings.TrimSpace(prefix)
 	for k, v := range es.Secrets {
-		if cleanPrefix == "" || strings.HasPrefix(k, cleanPrefix) {
-			result[k] = v
+		if cleanPrefix == "" || strings.HasPrefix(string(k), cleanPrefix) {
+			result[string(k)] = v
 		}
 	}
 	return result
@@ -325,20 +377,20 @@ func (es *EncryptedStore) GetGroup(prefix string) map[string]SecretEntry {
 // RenameSecret renames a secret key path in the store.
 func (es *EncryptedStore) RenameSecret(oldPath, newPath string) error {
 	if es == nil || es.Secrets == nil {
-		return fmt.Errorf("store is uninitialized")
+		return fmt.Errorf("%w", ErrStoreUninitialized)
 	}
 	oldPath = strings.TrimSpace(oldPath)
 	newPath = strings.TrimSpace(newPath)
 	if oldPath == "" || newPath == "" {
-		return fmt.Errorf("old and new paths cannot be empty")
+		return fmt.Errorf("%w: old and new paths cannot be empty", ErrPathEmpty)
 	}
-	entry, exists := es.Secrets[oldPath]
+	entry, exists := es.Secrets[SecretKey(oldPath)]
 	if !exists {
-		return fmt.Errorf("secret %q not found", oldPath)
+		return fmt.Errorf("%w: secret %q not found", ErrSecretNotFound, oldPath)
 	}
 	entry.LastModified = time.Now()
-	es.Secrets[newPath] = entry
-	delete(es.Secrets, oldPath)
+	es.Secrets[SecretKey(newPath)] = entry
+	delete(es.Secrets, SecretKey(oldPath))
 	return nil
 }
 
@@ -355,16 +407,16 @@ func (es *EncryptedStore) RenamePrefix(oldPrefix, newPrefix string) (int, error)
 	}
 
 	count := 0
-	toRename := make(map[string]SecretEntry)
+	toRename := make(map[SecretKey]SecretEntry)
 	for k, v := range es.Secrets {
-		if strings.HasPrefix(k, oldPrefix) {
+		if strings.HasPrefix(string(k), oldPrefix) {
 			toRename[k] = v
 		}
 	}
 
 	for k, v := range toRename {
-		rel := strings.TrimPrefix(k, oldPrefix)
-		newKey := newPrefix + rel
+		rel := strings.TrimPrefix(string(k), oldPrefix)
+		newKey := SecretKey(newPrefix + rel)
 		v.LastModified = time.Now()
 		es.Secrets[newKey] = v
 		delete(es.Secrets, k)
@@ -382,36 +434,38 @@ func (es *EncryptedStore) DeleteSecret(path string) error {
 // SoftDeleteSecret marks a secret path as deleted without removing it.
 func (es *EncryptedStore) SoftDeleteSecret(path string) error {
 	if es == nil || es.Secrets == nil {
-		return fmt.Errorf("store is uninitialized")
+		return fmt.Errorf("%w", ErrStoreUninitialized)
 	}
 	path = strings.TrimSpace(path)
 	if path == "" {
-		return fmt.Errorf("secret path cannot be empty")
+		return fmt.Errorf("%w: secret path cannot be empty", ErrPathEmpty)
 	}
-	entry, exists := es.Secrets[path]
+	sk := SecretKey(path)
+	entry, exists := es.Secrets[sk]
 	if !exists {
-		return fmt.Errorf("secret %q not found", path)
+		return fmt.Errorf("%w: secret %q not found", ErrSecretNotFound, path)
 	}
 	now := time.Now()
 	entry.DeletedAt = &now
 	entry.LastModified = now
-	es.Secrets[path] = entry
+	es.Secrets[sk] = entry
 	return nil
 }
 
 // HardDeleteSecret permanently removes a secret path from the store.
 func (es *EncryptedStore) HardDeleteSecret(path string) error {
 	if es == nil || es.Secrets == nil {
-		return fmt.Errorf("store is uninitialized")
+		return fmt.Errorf("%w", ErrStoreUninitialized)
 	}
 	path = strings.TrimSpace(path)
 	if path == "" {
-		return fmt.Errorf("secret path cannot be empty")
+		return fmt.Errorf("%w: secret path cannot be empty", ErrPathEmpty)
 	}
-	if _, exists := es.Secrets[path]; !exists {
-		return fmt.Errorf("secret %q not found", path)
+	sk := SecretKey(path)
+	if _, exists := es.Secrets[sk]; !exists {
+		return fmt.Errorf("%w: secret %q not found", ErrSecretNotFound, path)
 	}
-	delete(es.Secrets, path)
+	delete(es.Secrets, sk)
 	return nil
 }
 
@@ -424,7 +478,8 @@ func (es *EncryptedStore) RestoreDeletedSecret(path string) error {
 	if path == "" {
 		return fmt.Errorf("secret path cannot be empty")
 	}
-	entry, exists := es.Secrets[path]
+	sk := SecretKey(path)
+	entry, exists := es.Secrets[sk]
 	if !exists {
 		return fmt.Errorf("secret %q not found", path)
 	}
@@ -433,7 +488,7 @@ func (es *EncryptedStore) RestoreDeletedSecret(path string) error {
 	}
 	entry.DeletedAt = nil
 	entry.LastModified = time.Now()
-	es.Secrets[path] = entry
+	es.Secrets[sk] = entry
 	return nil
 }
 
@@ -455,7 +510,7 @@ func (es *EncryptedStore) SoftDeletePrefix(prefix string) (int, error) {
 	count := 0
 	now := time.Now()
 	for k, v := range es.Secrets {
-		if strings.HasPrefix(k, prefix) && v.DeletedAt == nil {
+		if strings.HasPrefix(string(k), prefix) && v.DeletedAt == nil {
 			v.DeletedAt = &now
 			v.LastModified = now
 			es.Secrets[k] = v
@@ -477,7 +532,7 @@ func (es *EncryptedStore) HardDeletePrefix(prefix string) (int, error) {
 
 	count := 0
 	for k := range es.Secrets {
-		if strings.HasPrefix(k, prefix) {
+		if strings.HasPrefix(string(k), prefix) {
 			delete(es.Secrets, k)
 			count++
 		}
@@ -495,12 +550,13 @@ func (es *EncryptedStore) CopySecret(srcPath, dstPath string) error {
 	if srcPath == "" || dstPath == "" {
 		return fmt.Errorf("source and destination paths cannot be empty")
 	}
-	entry, exists := es.Secrets[srcPath]
+	srcKey := SecretKey(srcPath)
+	entry, exists := es.Secrets[srcKey]
 	if !exists {
 		return fmt.Errorf("secret %q not found", srcPath)
 	}
 	entry.LastModified = time.Now()
-	es.Secrets[dstPath] = entry
+	es.Secrets[SecretKey(dstPath)] = entry
 	return nil
 }
 
@@ -517,16 +573,16 @@ func (es *EncryptedStore) CopyPrefix(srcPrefix, dstPrefix string) (int, error) {
 	}
 
 	count := 0
-	toCopy := make(map[string]SecretEntry)
+	toCopy := make(map[SecretKey]SecretEntry)
 	for k, v := range es.Secrets {
-		if strings.HasPrefix(k, srcPrefix) {
+		if strings.HasPrefix(string(k), srcPrefix) {
 			toCopy[k] = v
 		}
 	}
 
 	for k, v := range toCopy {
-		rel := strings.TrimPrefix(k, srcPrefix)
-		newKey := dstPrefix + rel
+		rel := strings.TrimPrefix(string(k), srcPrefix)
+		newKey := SecretKey(dstPrefix + rel)
 		v.LastModified = time.Now()
 		es.Secrets[newKey] = v
 		count++

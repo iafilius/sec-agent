@@ -15,11 +15,10 @@ sec-agent v2.0+ vaults have **two access slots** protecting the master key:
 
 In addition, two backup layers protect your data:
 
-1. **Automatic Atomic Snapshots** (`~/.config/sec-agent/backups/`):
-   Before every write, sec-agent fsync's an encrypted snapshot. Last 10 retained automatically.
-2. **Manual KDBX Exports** (`.kdbx`):
-   Portable encrypted KeePassXC files created via `sec backup <file.kdbx>`.
-   Default password: your 24-word BIP39 mnemonic (Argon2id-derived from your seed + vault salt).
+1. **Point-in-Time Vault Snapshots** (`~/.config/sec-agent/snapshots/<profile>/`):
+   Before write mutations and restores, sec-agent fsync's an encrypted `.enc` snapshot alongside an indexed `.meta.json` sidecar file containing SHA-256 master key fingerprints, secret counts, and actor metadata.
+2. **Manual Portable Exports** (`.kdbx`, `.json`, `.csv`):
+   Portable encrypted archives created via `sec backup export <file.kdbx>`.
 
 ---
 
@@ -48,23 +47,54 @@ What happens:
 
 ---
 
-## 🔍 Step 1: Listing Available Vault Snapshots & Backups
+## 🔄 Snapshot Restoration & Schema Verification
 
 ```bash
-sec backup list
+# List indexed point-in-time snapshots with key fingerprint matching
+sec snapshot list (alias: sec snapshots)
+
+# Create a manual point-in-time snapshot
+sec snapshot create [--comment "note"]
+
+# Restore an internal snapshot (creates pre-restore safety snapshot automatically)
+sec snapshot restore <SNAPSHOT_ID> [--force]
+
+# Import external KeePassXC archives
+sec backup import my_vault_backup.kdbx --merge
 ```
 
-*Example Output*:
-```text
-=== 📁 sec-agent Vault Snapshots & Backups ===
-Search Path: ~/.config/sec-agent/backups
+### Snapshot Metadata Sidecar Schema (`<snap_id>.meta.json`)
+Point-in-time snapshots use JSON Schema [snapshot_meta.schema.json](file:///Users/arjan/personal/secure_secrets/docs/schemas/snapshot_meta.schema.json):
 
-Automatic Write Snapshots (.enc):
-  • secrets_20260725_100000.enc  (4908 bytes, 2026-07-25 10:00:00)
-  • secrets_20260724_204900.enc  (3391 bytes, 2026-07-24 20:49:00)
+```json
+{
+  "id": "snap-20260810-180656-11",
+  "profile": "default",
+  "created_at": "2026-08-10T18:06:56.11Z",
+  "trigger_reason": "manual",
+  "actor": "terminal",
+  "master_key_sha256": "d17ec93086938fd8",
+  "schema_version": "2.0",
+  "secret_count": 17,
+  "file_path": "~/.config/sec-agent/snapshots/default/snap-20260810-180656-11.enc",
+  "comment": "Test manual snapshot",
+  "key_match": true
+}
+```
 
-Local KeePassXC Backup Files (.kdbx):
-  • vault_backup.kdbx  (5120 bytes, 2026-07-24 18:00:00)
+### Operations Flight Data Recorder Schema (`operations.log`)
+All administrative operations log structured entries adhering to JSON Schema [operations_log.schema.json](file:///Users/arjan/personal/secure_secrets/docs/schemas/operations_log.schema.json):
+
+```json
+{
+  "timestamp": "2026-08-10T18:06:56Z",
+  "actor": "terminal",
+  "action": "SNAPSHOT_CREATE",
+  "profile": "default",
+  "master_key_sha256": "d17ec93086938fd8",
+  "details": "Created snapshot snap-20260810-180656-11",
+  "success": true
+}
 ```
 
 ---

@@ -1,139 +1,26 @@
 package main
 
 import (
-	"crypto/rand"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"runtime"
 	"secure_secrets/internal/biometrics"
-	"secure_secrets/internal/config"
 	"secure_secrets/internal/daemon"
 	"secure_secrets/internal/keychain"
 	"secure_secrets/internal/store"
-	"sort"
-	"strings"
-	"sync"
 	"syscall"
 	"time"
 )
 
-var guiVersion = Version
-var activeGUIToken string
-var guiTokenConsumed bool
-var tokenMutex sync.Mutex
-
-var activeTabID string
-var lastTabHeartbeat time.Time
-var tabMutex sync.Mutex
-
-var (
-	guiTokens      = make(map[string]string)
-	guiTokensMutex sync.Mutex
-)
-
-func getGUIToken(profile string) string {
-	guiTokensMutex.Lock()
-	defer guiTokensMutex.Unlock()
-	return guiTokens[profile]
-}
-
-func setGUIToken(profile, token string) {
-	guiTokensMutex.Lock()
-	defer guiTokensMutex.Unlock()
-	guiTokens[profile] = token
-}
-
-type DatabaseInfo struct {
-	Profile  string `json:"profile"`
-	Filename string `json:"filename"`
-	Path     string `json:"path"`
-	Size     string `json:"size"`
-	Modified string `json:"modified"`
-}
-
-func generateGUIToken() string {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return fmt.Sprintf("fallback_%d", time.Now().UnixNano())
-	}
-	return hex.EncodeToString(b)
-}
-
-func discoverDatabases() ([]DatabaseInfo, error) {
-	dir, err := config.GetConfigDir()
-	if err != nil {
-		return nil, err
-	}
-
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, err
-	}
-
-	var list []DatabaseInfo
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		if strings.HasPrefix(name, "secrets") && strings.HasSuffix(name, ".enc") {
-			profile := "default"
-			if name != "secrets.enc" {
-				profile = strings.TrimPrefix(name, "secrets_")
-				profile = strings.TrimSuffix(profile, ".enc")
-			}
-
-			fullPath := filepath.Join(dir, name)
-			info, err := entry.Info()
-			sizeStr := "0 B"
-			modStr := ""
-			if err == nil {
-				sizeStr = formatBytes(info.Size())
-				modStr = info.ModTime().Format("2006-01-02 15:04:05")
-			}
-
-			list = append(list, DatabaseInfo{
-				Profile:  profile,
-				Filename: name,
-				Path:     fullPath,
-				Size:     sizeStr,
-				Modified: modStr,
-			})
-		}
-	}
-
-	sort.Slice(list, func(i, j int) bool {
-		return list[i].Profile < list[j].Profile
-	})
-
-	return list, nil
-}
-
-func formatBytes(b int64) string {
-	const unit = 1024
-	if b < unit {
-		return fmt.Sprintf("%d B", b)
-	}
-	div, exp := int64(unit), 0
-	for n := b / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
-}
-
 func ensureUnlocked(profile string) (*daemon.IPCResponse, error) {
-	tok := getGUIToken(profile)
+	tok := getGUIToken(store.ProfileName(profile))
 	if tok == "" {
 		tok = os.Getenv("SEC_SESSION_TOKEN")
 	}
-	resp, err := queryDaemon(profile, daemon.IPCRequest{Action: "backup", Token: tok})
+	resp, err := queryDaemon(profile, daemon.IPCRequest{Action: daemon.IPCActionBackup, Token: tok})
 	if err == nil && resp != nil && resp.Success {
 		return resp, nil
 	}
@@ -156,7 +43,7 @@ func ensureUnlocked(profile string) (*daemon.IPCResponse, error) {
 	}
 
 	resp, err = queryDaemon(profile, daemon.IPCRequest{
-		Action: "open",
+		Action: daemon.IPCActionOpen,
 		Key:    masterKey,
 		TTL:    "8h",
 	})
@@ -169,7 +56,7 @@ func ensureUnlocked(profile string) (*daemon.IPCResponse, error) {
 	}
 
 	if resp.Token != "" {
-		setGUIToken(profile, resp.Token)
+		setGUIToken(store.ProfileName(profile), resp.Token)
 	}
 
 	return resp, nil
@@ -186,91 +73,6 @@ func openBrowser(url string) {
 		cmd = exec.Command("xdg-open", url)
 	}
 	_ = cmd.Start()
-}
-
-func securityMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		host := r.Host
-		if host != "127.0.0.1:9876" && host != "localhost:9876" && !strings.HasPrefix(host, "127.0.0.1:") && !strings.HasPrefix(host, "localhost:") {
-			http.Error(w, "403 Forbidden: Invalid Host Header", http.StatusForbidden)
-			return
-		}
-
-		origin := r.Header.Get("Origin")
-		if origin != "" && !strings.HasPrefix(origin, "http://127.0.0.1:") && !strings.HasPrefix(origin, "http://localhost:") {
-			http.Error(w, "403 Forbidden: Cross-Origin Requests Blocked", http.StatusForbidden)
-			return
-		}
-		secFetchSite := r.Header.Get("Sec-Fetch-Site")
-		if secFetchSite != "" && secFetchSite != "same-origin" && secFetchSite != "none" {
-			http.Error(w, "403 Forbidden: Cross-Site Request Blocked", http.StatusForbidden)
-			return
-		}
-
-		if strings.HasPrefix(r.URL.Path, "/api/") {
-			clientToken := r.Header.Get("X-GUI-Token")
-			if clientToken == "" {
-				if cookie, err := r.Cookie("sec_gui_auth"); err == nil {
-					clientToken = cookie.Value
-				}
-			}
-			if clientToken == "" || clientToken != activeGUIToken {
-				http.Error(w, "403 Forbidden: Invalid or missing GUI launch token", http.StatusForbidden)
-				return
-			}
-
-			clientTabID := r.Header.Get("X-Tab-ID")
-			if clientTabID != "" {
-				tabMutex.Lock()
-				now := time.Now()
-				if activeTabID != "" && now.Sub(lastTabHeartbeat) > 6*time.Second {
-					activeTabID = ""
-				}
-				if activeTabID == "" {
-					activeTabID = clientTabID
-					lastTabHeartbeat = now
-				} else if activeTabID != clientTabID {
-					tabMutex.Unlock()
-					http.Error(w, "403 Forbidden: Multi-tab access blocked. Vault Inspector is active in another browser tab.", http.StatusForbidden)
-					return
-				} else {
-					lastTabHeartbeat = now
-				}
-				tabMutex.Unlock()
-			}
-		}
-
-		if r.URL.Path == "/" {
-			qToken := r.URL.Query().Get("gui_token")
-			if qToken != "" {
-				tokenMutex.Lock()
-				if guiTokenConsumed || qToken != activeGUIToken {
-					tokenMutex.Unlock()
-					http.Error(w, "403 Forbidden: Single-use GUI launch token has already been consumed or is invalid. Launch sec-agent gui again to open a new session.", http.StatusForbidden)
-					return
-				}
-				guiTokenConsumed = true
-				tokenMutex.Unlock()
-
-				// #nosec G124
-				http.SetCookie(w, &http.Cookie{
-					Name:     "sec_gui_auth",
-					Value:    activeGUIToken,
-					Path:     "/",
-					HttpOnly: true,
-					SameSite: http.SameSiteStrictMode,
-				})
-			} else {
-				cookie, err := r.Cookie("sec_gui_auth")
-				if err != nil || cookie.Value != activeGUIToken {
-					http.Error(w, "403 Forbidden: Access denied. Please launch sec-agent gui to open an authenticated session.", http.StatusForbidden)
-					return
-				}
-			}
-		}
-
-		next.ServeHTTP(w, r)
-	})
 }
 
 func killExistingGUIServer(port int) {
@@ -294,166 +96,17 @@ func runGUIServer(activeProfile string, port int) {
 
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/api/heartbeat", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-	})
-
-	mux.HandleFunc("/api/databases", func(w http.ResponseWriter, r *http.Request) {
-		dbs, err := discoverDatabases()
-		if err != nil {
-			http.Error(w, err.Error(), 500)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(dbs)
-	})
-
+	mux.HandleFunc("/api/heartbeat", handleApiHeartbeat)
+	mux.HandleFunc("/api/databases", handleApiDatabases)
 	mux.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
-		p := r.URL.Query().Get("profile")
-		if p == "" {
-			p = activeProfile
-		}
-		tok := getGUIToken(p)
-		resp, err := queryDaemon(p, daemon.IPCRequest{Action: "backup", Token: tok})
-		unlocked := (err == nil && resp != nil && resp.Success)
-
-		storePath, _ := store.GetStorePath(p)
-		dbFile := filepath.Base(storePath)
-		sizeStr := "Unknown"
-		modStr := "Unknown"
-		// #nosec G703
-		if fi, err := os.Stat(storePath); err == nil {
-			sizeStr = formatBytes(fi.Size())
-			modStr = fi.ModTime().Format("2006-01-02 15:04:05")
-		}
-
-		dbs, _ := discoverDatabases()
-
-		tierStr := getProfileEnvTier(p)
-		if tierStr == "" {
-			tierStr = "dev"
-		}
-
-		isV2 := store.IsV2Vault(storePath)
-		schemaStr := "v1.0 Legacy"
-		if isV2 {
-			schemaStr = "v2.0 Dual-Slot (Hardened)"
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"profile":             p,
-			"unlocked":            unlocked,
-			"version":             guiVersion,
-			"database_file":       dbFile,
-			"database_path":       storePath,
-			"database_size":       sizeStr,
-			"database_modified":   modStr,
-			"profile_tier":        strings.ToUpper(tierStr),
-			"is_v2":               isV2,
-			"vault_schema":        schemaStr,
-			"available_databases": dbs,
-			"error":               fmt.Sprintf("%v", err),
-		})
+		handleApiStatus(activeProfile, w, r)
 	})
-
 	mux.HandleFunc("/api/unlock", func(w http.ResponseWriter, r *http.Request) {
-		p := r.URL.Query().Get("profile")
-		if p == "" {
-			p = activeProfile
-		}
-		resp, err := ensureUnlocked(p)
-		unlocked := (err == nil && resp != nil && resp.Success)
-		errMsg := ""
-		if err != nil {
-			errMsg = err.Error()
-		} else if resp != nil && !resp.Success {
-			errMsg = resp.Error
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"profile":  p,
-			"unlocked": unlocked,
-			"error":    errMsg,
-		})
+		handleApiUnlock(activeProfile, w, r)
 	})
-
-	mux.HandleFunc("/api/shutdown", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{"status": "server shutting down"})
-		go func() {
-			time.Sleep(200 * time.Millisecond)
-			os.Exit(0)
-		}()
-	})
-
+	mux.HandleFunc("/api/shutdown", handleApiShutdown)
 	mux.HandleFunc("/api/secrets", func(w http.ResponseWriter, r *http.Request) {
-		p := r.URL.Query().Get("profile")
-		if p == "" {
-			p = activeProfile
-		}
-		tok := getGUIToken(p)
-		resp, err := queryDaemon(p, daemon.IPCRequest{Action: "backup", Token: tok})
-		if err != nil || resp == nil || !resp.Success {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusUnauthorized)
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": "Session locked"})
-			return
-		}
-
-		type SecretItem struct {
-			Key          string `json:"key"`
-			Value        string `json:"value"`
-			Comment      string `json:"comment,omitempty"`
-			Created      string `json:"created"`
-			LastModified string `json:"last_modified"`
-			LastAccessed string `json:"last_accessed"`
-			AccessCount  uint64 `json:"access_count"`
-			Version      int    `json:"version"`
-			IsStale      bool   `json:"is_stale"`
-		}
-
-		now := time.Now()
-		var list []SecretItem
-		for k, v := range resp.Secrets {
-			if strings.HasPrefix(k, "__") {
-				continue
-			}
-			lastAcc := "Never"
-			stale := false
-			if !v.LastAccessed.IsZero() {
-				lastAcc = v.LastAccessed.Format("2006-01-02 15:04:05")
-				if now.Sub(v.LastAccessed) > 30*24*time.Hour {
-					stale = true
-				}
-			} else {
-				stale = true
-			}
-
-			list = append(list, SecretItem{
-				Key:          k,
-				Value:        v.Value,
-				Comment:      v.Comment,
-				Created:      v.Created.Format("2006-01-02 15:04:05"),
-				LastModified: v.LastModified.Format("2006-01-02 15:04:05"),
-				LastAccessed: lastAcc,
-				AccessCount:  v.AccessCount,
-				Version:      v.Version,
-				IsStale:      stale,
-			})
-		}
-
-		sort.Slice(list, func(i, j int) bool {
-			return list[i].Key < list[j].Key
-		})
-
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"profile": p,
-			"count":   len(list),
-			"secrets": list,
-		})
+		handleApiSecrets(activeProfile, w, r)
 	})
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -914,7 +567,7 @@ const guiHTMLContent = `<!DOCTYPE html>
   <header>
     <div class="logo">
       <span>🔒 sec-agent</span>
-      <span class="badge badge-ver" id="guiVersionBadge">v2.1.1</span>
+      <span class="badge badge-ver" id="guiVersionBadge">v2.6.0</span>
       <span style="color: var(--text-muted); font-size: 0.9rem; font-weight: 400;">Vault Inspector</span>
     </div>
 
@@ -1406,5 +1059,4 @@ const guiHTMLContent = `<!DOCTYPE html>
     loadStatus();
   </script>
 </body>
-</html>
-`
+</html>`

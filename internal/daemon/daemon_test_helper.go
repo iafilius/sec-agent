@@ -14,10 +14,15 @@ func (d *Daemon) SetMasterKeyForTest(key []byte) {
 func (d *Daemon) SetSecretsForTest(secrets map[string]store.SecretEntry) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.secretsStore == nil {
-		d.secretsStore = &store.EncryptedStore{Secrets: make(map[string]store.SecretEntry)}
+	typedSecrets := make(map[store.SecretKey]store.SecretEntry, len(secrets))
+	for k, v := range secrets {
+		typedSecrets[store.SecretKey(k)] = v
 	}
-	d.secretsStore.Secrets = secrets
+	if d.secretsStore == nil {
+		d.secretsStore = &store.EncryptedStore{Secrets: typedSecrets}
+	} else {
+		d.secretsStore.Secrets = typedSecrets
+	}
 }
 
 // SetSessionTokenForTest injects a test session token.

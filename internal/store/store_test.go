@@ -32,7 +32,7 @@ func TestStoreMigration(t *testing.T) {
 
 func TestSoftDeleteAndRestore(t *testing.T) {
 	es := &EncryptedStore{
-		Secrets: map[string]SecretEntry{
+		Secrets: map[SecretKey]SecretEntry{
 			"prod/db/pass": {Value: "db-pass-v1"},
 			"prod/api/key": {Value: "api-key-v1"},
 		},
@@ -67,17 +67,17 @@ func BenchmarkStorePreallocation(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		es := &EncryptedStore{
-			Secrets: make(map[string]SecretEntry, 10000),
+			Secrets: make(map[SecretKey]SecretEntry, 10000),
 		}
 		for j := 0; j < 10000; j++ {
-			es.Secrets["key/path/"+string(rune(j))] = SecretEntry{Value: "secret_value"}
+			es.Secrets[SecretKey("key/path/"+string(rune(j)))] = SecretEntry{Value: "secret_value"}
 		}
 	}
 }
 
 func TestAccessTrackingAndProfileExport(t *testing.T) {
 	es := &EncryptedStore{
-		Secrets: make(map[string]SecretEntry),
+		Secrets: make(map[SecretKey]SecretEntry),
 	}
 	now := time.Now()
 	es.Secrets["prod/api/key"] = SecretEntry{

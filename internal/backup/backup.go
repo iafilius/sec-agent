@@ -13,8 +13,28 @@ import (
 	"github.com/tobischo/gokeepasslib/v3/wrappers"
 )
 
+// BackupFormat represents a supported backup/export file format.
+type BackupFormat string
+
+const (
+	FormatKdbx   BackupFormat = "kdbx"
+	FormatDotenv BackupFormat = "dotenv"
+	FormatJSON   BackupFormat = "json"
+	FormatEnv    BackupFormat = "env"
+)
+
+// Validate checks whether the backup format is supported.
+func (f BackupFormat) Validate() error {
+	switch f {
+	case FormatKdbx, FormatDotenv, FormatJSON, FormatEnv:
+		return nil
+	default:
+		return fmt.Errorf("unsupported backup format: %q", f)
+	}
+}
+
 // ExportToKdbx exports a map of secrets (including comments and metadata) to a new KeePassXC KDBX file.
-func ExportToKdbx(filePath string, password string, secrets map[string]store.SecretEntry) error {
+func ExportToKdbx(filePath string, password string, secrets map[store.SecretKey]store.SecretEntry) error {
 	dir := filepath.Dir(filePath)
 	// Create temp file in same directory
 	// #nosec G304 G703
@@ -47,7 +67,7 @@ func ExportToKdbx(filePath string, password string, secrets map[string]store.Sec
 		entry.Values = append(entry.Values, gokeepasslib.ValueData{
 			Key: "Title",
 			Value: gokeepasslib.V{
-				Content: k,
+				Content: string(k),
 			},
 		})
 
@@ -146,7 +166,7 @@ func ExportToKdbx(filePath string, password string, secrets map[string]store.Sec
 }
 
 // ImportFromKdbx decodes and extracts secrets from a KeePassXC KDBX file.
-func ImportFromKdbx(filePath string, password string) (map[string]store.SecretEntry, error) {
+func ImportFromKdbx(filePath string, password string) (map[store.SecretKey]store.SecretEntry, error) {
 	// #nosec G304
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -157,7 +177,7 @@ func ImportFromKdbx(filePath string, password string) (map[string]store.SecretEn
 }
 
 // ImportFromKdbxReader decodes and extracts secrets from an io.Reader (file or stdin stream).
-func ImportFromKdbxReader(r io.Reader, password string) (map[string]store.SecretEntry, error) {
+func ImportFromKdbxReader(r io.Reader, password string) (map[store.SecretKey]store.SecretEntry, error) {
 	db := gokeepasslib.NewDatabase()
 	db.Credentials = gokeepasslib.NewPasswordCredentials(password)
 
@@ -170,7 +190,7 @@ func ImportFromKdbxReader(r io.Reader, password string) (map[string]store.Secret
 		return nil, fmt.Errorf("failed to unlock protected entries: %w", err)
 	}
 
-	secrets := make(map[string]store.SecretEntry)
+	secrets := make(map[store.SecretKey]store.SecretEntry)
 
 	var findEntries func(gokeepasslib.Group) []gokeepasslib.Entry
 	findEntries = func(group gokeepasslib.Group) []gokeepasslib.Entry {
@@ -232,7 +252,7 @@ func ImportFromKdbxReader(r io.Reader, password string) (map[string]store.Secret
 				expires = entry.Times.ExpiryTime.Time
 			}
 
-			secrets[title] = store.SecretEntry{
+			secrets[store.SecretKey(title)] = store.SecretEntry{
 				Value:        passwordVal,
 				Comment:      comment,
 				Metadata:     metadata,

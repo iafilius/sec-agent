@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"secure_secrets/internal/crypto"
+	"strings"
 	"testing"
 	"time"
 )
@@ -194,7 +195,7 @@ func TestSaveStorePreservesV2Envelope(t *testing.T) {
 
 	// 2. Call SaveStore on the v2.0 profile
 	store := &EncryptedStore{
-		Secrets: map[string]SecretEntry{
+		Secrets: map[SecretKey]SecretEntry{
 			"NEW_KEY": {Value: "NEW_VAL"},
 		},
 	}
@@ -223,5 +224,77 @@ func TestSaveStorePreservesV2Envelope(t *testing.T) {
 	}
 	if string(unwrappedKey) != string(masterKey) {
 		t.Error("unwrapped master key mismatch after SaveStore!")
+	}
+}
+
+func TestVaultEnvelopeMasterKeySHA256OnDisk(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	profile := "default"
+	vaultPath, err := GetStorePath(profile)
+	if err != nil {
+		t.Fatalf("GetStorePath() error = %v", err)
+	}
+	_ = os.MkdirAll(filepath.Dir(vaultPath), 0700)
+
+	masterKey, err := crypto.GenerateRandomKey()
+	if err != nil {
+		t.Fatalf("GenerateRandomKey() error = %v", err)
+	}
+
+	expectedFP := crypto.MasterKeyFingerprint(masterKey)
+
+	// Create v2.0 vault envelope
+	mnemonic, err := crypto.GenerateMnemonic()
+	if err != nil {
+		t.Fatalf("GenerateMnemonic() error = %v", err)
+	}
+	slot1, err := WrapMasterKey(mnemonic, masterKey)
+	if err != nil {
+		t.Fatalf("WrapMasterKey() error = %v", err)
+	}
+
+	env := &VaultEnvelope{
+		SchemaVersion:   SchemaV2,
+		UpgradedAt:      time.Now().UTC(),
+		MasterKeySHA256: expectedFP,
+		Slot1:           slot1,
+		Payload:         []byte("ciphertext"),
+	}
+
+	if err := WriteVaultEnvelope(vaultPath, env); err != nil {
+		t.Fatalf("WriteVaultEnvelope() error = %v", err)
+	}
+
+	// Verify on-disk file contains "master_key_sha256" in raw JSON
+	rawBytes, err := os.ReadFile(vaultPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+
+	if !strings.Contains(string(rawBytes), `"master_key_sha256"`) {
+		t.Fatalf("expected raw JSON on disk to contain 'master_key_sha256', got: %s", string(rawBytes))
+	}
+	if !strings.Contains(string(rawBytes), expectedFP) {
+		t.Fatalf("expected raw JSON on disk to contain fingerprint %s, got: %s", expectedFP, string(rawBytes))
+	}
+
+	// Verify SaveStore preserves and updates MasterKeySHA256
+	store := &EncryptedStore{
+		Secrets: map[SecretKey]SecretEntry{
+			"test/key": {Value: "val"},
+		},
+	}
+	if err := SaveStore(profile, store, masterKey); err != nil {
+		t.Fatalf("SaveStore() error = %v", err)
+	}
+
+	readEnv, err := ReadVaultEnvelope(vaultPath)
+	if err != nil {
+		t.Fatalf("ReadVaultEnvelope() error = %v", err)
+	}
+	if readEnv.MasterKeySHA256 != expectedFP {
+		t.Errorf("expected MasterKeySHA256 %s, got %s", expectedFP, readEnv.MasterKeySHA256)
 	}
 }

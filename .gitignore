@@ -1,21 +1,26 @@
-# Build binaries
+# Build binaries & packages
 /sec
+/sec-agent
+/dist/
 sec_test_bin
 sec_migration_test_bin
 sec_migration_test_bin2
+.logs/
 
 # Sockets and environment databases
 *.sock
 *.enc
 *.kdbx
 
-# IDEs
+# IDEs & System
 .idea/
 .vscode/
 *.code-workspace
 .DS_Store
+.arjan/
 
-# Private corporate pitch / internal notes
+# Internal private documentation
 docs/internal/
-docs/corporate_pitch_communications.md
-*.private.md
+
+.logs/resumer-debug.log
+.logs/resumer-history.md

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"secure_secrets/internal/config"
 	"secure_secrets/internal/crypto"
+	"strings"
 	"time"
 )
 
@@ -101,6 +102,8 @@ type VaultEnvelope struct {
 	SchemaVersion string `json:"schema_version"`
 	// UpgradedAt is the UTC timestamp when the vault was migrated to v2.0.
 	UpgradedAt time.Time `json:"upgraded_at"`
+	// MasterKeySHA256 is the first 16 hex characters of SHA-256(masterKey)
+	MasterKeySHA256 string `json:"master_key_sha256,omitempty"`
 	// Slot1 is the BIP39/Argon2id recovery slot.
 	// Slot0 (Touch ID) master key is kept in the macOS Keychain only (not on disk).
 	Slot1 *Slot1Header `json:"slot1,omitempty"`
@@ -142,6 +145,14 @@ func ReadVaultEnvelope(path string) (*VaultEnvelope, error) {
 // WriteVaultEnvelope atomically writes a v2.0 VaultEnvelope to disk.
 // Uses the same temp-file + fsync + rename pattern as SaveStore for power-loss safety.
 func WriteVaultEnvelope(path string, env *VaultEnvelope) error {
+	// Safeguard: Ensure env.Payload is not double-wrapped JSON text
+	if env != nil && len(env.Payload) > 0 && env.Payload[0] == '{' {
+		var innerEnv VaultEnvelope
+		if jsonErr := json.Unmarshal(env.Payload, &innerEnv); jsonErr == nil && len(innerEnv.Payload) > 0 {
+			env.Payload = innerEnv.Payload
+		}
+	}
+
 	data, err := json.Marshal(env)
 	if err != nil {
 		return fmt.Errorf("failed to marshal vault envelope: %w", err)
@@ -171,16 +182,38 @@ func WriteVaultEnvelope(path string, env *VaultEnvelope) error {
 		return fmt.Errorf("failed to close temp vault file: %w", err)
 	}
 
-	// Backup existing vault before overwriting
+	// Backup existing vault to snapshots before overwriting
 	if _, statErr := os.Stat(path); statErr == nil {
-		backupDir, err := getBackupDir("default")
+		prof := "default"
+		base := filepath.Base(path)
+		if strings.HasPrefix(base, "secrets_") && strings.HasSuffix(base, ".enc") {
+			prof = strings.TrimSuffix(strings.TrimPrefix(base, "secrets_"), ".enc")
+		}
+		snapDir, err := GetSnapshotDir(prof)
 		if err == nil {
-			_ = os.MkdirAll(backupDir, 0700)
-			backupPath := filepath.Join(backupDir, fmt.Sprintf("secrets.enc.%d", time.Now().UnixNano()))
+			_ = os.MkdirAll(snapDir, 0700)
+			now := time.Now()
+			snapID := fmt.Sprintf("snap-%s-%d", now.Format("20060102-150405"), now.Nanosecond()/1e6)
+			snapEncPath := filepath.Join(snapDir, fmt.Sprintf("%s.enc", snapID))
+			snapMetaPath := filepath.Join(snapDir, fmt.Sprintf("%s.meta.json", snapID))
+
 			// #nosec G304 G703
 			existing, readErr := os.ReadFile(path)
 			if readErr == nil {
-				_ = os.WriteFile(backupPath, existing, 0600) // #nosec G703
+				_ = os.WriteFile(snapEncPath, existing, 0600) // #nosec G703
+				meta := SnapshotMeta{
+					ID:            snapID,
+					Profile:       prof,
+					CreatedAt:     now,
+					TriggerReason: "auto-presave",
+					Actor:         "system",
+					SchemaVersion: "2.0",
+					SecretCount:   -1,
+					FilePath:      snapEncPath,
+					Comment:       "Automatic pre-save vault snapshot",
+				}
+				metaBytes, _ := json.MarshalIndent(meta, "", "  ")
+				_ = os.WriteFile(snapMetaPath, metaBytes, 0600)
 			}
 		}
 	}
@@ -197,18 +230,6 @@ func WriteVaultEnvelope(path string, env *VaultEnvelope) error {
 	}
 
 	return nil
-}
-
-// getBackupDir returns the backups directory for the given profile.
-func getBackupDir(profile string) (string, error) {
-	dir, err := config.GetConfigDir()
-	if err != nil {
-		return "", err
-	}
-	if profile == "" {
-		profile = "default"
-	}
-	return filepath.Join(dir, "backups", profile), nil
 }
 
 // WrapMasterKey encrypts masterKey using an AES-256-GCM key derived from

@@ -176,7 +176,7 @@ func TestDaemonConcurrency(t *testing.T) {
 	}
 
 	for k, expectedVal := range writtenKeys {
-		entry, exists := diskStore.Secrets[k]
+		entry, exists := diskStore.Secrets[store.SecretKey(k)]
 		if !exists {
 			t.Errorf("expected key %q to exist on disk store, but it was missing", k)
 			continue
@@ -264,7 +264,7 @@ func TestDaemonConcurrencySameKey(t *testing.T) {
 	}
 
 	// Value must be one of the written values
-	finalVal := diskStore.Secrets[path].Value
+	finalVal := diskStore.Secrets[store.SecretKey(path)].Value
 	valid := false
 	for i := 0; i < numGoroutines; i++ {
 		if finalVal == fmt.Sprintf("secret-val-%d", i) {
