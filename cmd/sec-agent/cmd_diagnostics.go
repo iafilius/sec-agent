@@ -349,6 +349,18 @@ func handleStatus(profile string, args []string) {
 	fmt.Printf("Socket Path:          %s\n", info.SocketPath)
 	fmt.Printf("Database Path:        %s\n", info.StorePath)
 	fmt.Printf("Database Size:        %d bytes\n", info.StoreSizeBytes)
+	if manifest, mErr := loadSkillManifest(); mErr == nil && manifest != nil && len(manifest.Skills) > 0 {
+		syncStatus := "synced"
+		for _, s := range manifest.Skills {
+			if s.Version != Version {
+				syncStatus = "updates available"
+				break
+			}
+		}
+		fmt.Printf("AI Skills:            %d active (%s, %s)\n", len(manifest.Skills), Version, syncStatus)
+	} else {
+		fmt.Println("AI Skills:            none active")
+	}
 
 	if isLegacy {
 		fmt.Println("\n\033[33m⚠️  SECURITY WARNING — LEGACY VAULT SCHEMA (v1.0 DETECTED):\033[0m")

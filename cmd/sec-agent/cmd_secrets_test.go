@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -331,5 +332,104 @@ func TestUniversalDedupeCommand(t *testing.T) {
 	}
 	if entry, exists := reloadedDst.Secrets["aws/access_key"]; !exists || entry.Value != "AKIA123" {
 		t.Errorf("expected aws/access_key in dstStore with value AKIA123")
+	}
+}
+
+func TestRelabelCommandAndExportIntegration(t *testing.T) {
+	profile := "relabel-cli-test"
+	sockPath, _ := config.GetSocketPath(profile)
+	dbPath, _ := store.GetStorePath(profile)
+	os.Remove(sockPath)
+	os.Remove(dbPath)
+	defer os.Remove(sockPath)
+	defer os.Remove(dbPath)
+
+	d, err := daemon.NewDaemon(profile, 30*time.Second, Version)
+	if err != nil {
+		t.Fatalf("failed to create test daemon: %v", err)
+	}
+	token := "relabel-cli-token"
+	d.SetSessionTokenForTest(token)
+	masterKey := []byte("01234567890123456789012345678901")
+	d.SetMasterKeyForTest(masterKey)
+	d.SetSecretsForTest(map[string]store.SecretEntry{
+		"velocloud/token": {
+			Value:        "token-987654321",
+			Created:      time.Now(),
+			LastModified: time.Now(),
+		},
+	})
+	go func() { _ = d.Start() }()
+	defer d.Stop()
+
+	for i := 0; i < 20; i++ {
+		if _, err := os.Stat(sockPath); err == nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// 1. Relabel with alias and comment
+	handleRelabel(profile, "velocloud/token", []string{
+		"--env-alias", "VCO_API_TOKEN",
+		"--comment", "VCO Production Token",
+	})
+
+	// 2. Query daemon backup to inspect updated entry
+	c, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatalf("dial failed: %v", err)
+	}
+	_ = json.NewEncoder(c).Encode(daemon.IPCRequest{
+		Action: "backup",
+		Token:  token,
+	})
+	var bkResp daemon.IPCResponse
+	_ = json.NewDecoder(c).Decode(&bkResp)
+	c.Close()
+
+	if !bkResp.Success {
+		t.Fatalf("backup query failed: %s", bkResp.Error)
+	}
+
+	entry, ok := bkResp.Secrets["velocloud/token"]
+	if !ok {
+		t.Fatalf("secret missing from response")
+	}
+	if entry.Value != "token-987654321" {
+		t.Errorf("secret value altered during relabel: got %q", entry.Value)
+	}
+	if entry.Comment != "VCO Production Token" {
+		t.Errorf("comment mismatch: got %q, want 'VCO Production Token'", entry.Comment)
+	}
+	if entry.Metadata["env_alias"] != "VCO_API_TOKEN" {
+		t.Errorf("env_alias mismatch: got %q, want 'VCO_API_TOKEN'", entry.Metadata["env_alias"])
+	}
+
+	// 3. Verify export mapping resolves to VCO_API_TOKEN
+	exportKey := pathToEnvKeyWithEntry("velocloud/token", entry)
+	if exportKey != "VCO_API_TOKEN" {
+		t.Errorf("pathToEnvKeyWithEntry returned %q, want 'VCO_API_TOKEN'", exportKey)
+	}
+
+	// 4. Test --clear-alias
+	handleRelabel(profile, "velocloud/token", []string{"--clear-alias"})
+
+	c, _ = net.Dial("unix", sockPath)
+	_ = json.NewEncoder(c).Encode(daemon.IPCRequest{
+		Action: "backup",
+		Token:  token,
+	})
+	var bkResp2 daemon.IPCResponse
+	_ = json.NewDecoder(c).Decode(&bkResp2)
+	c.Close()
+
+	entry2 := bkResp2.Secrets["velocloud/token"]
+	if _, exists := entry2.Metadata["env_alias"]; exists {
+		t.Errorf("env_alias was not cleared")
+	}
+	exportKey2 := pathToEnvKeyWithEntry("velocloud/token", entry2)
+	if exportKey2 != "VELOCLOUD_TOKEN" {
+		t.Errorf("cleared alias should default to VELOCLOUD_TOKEN, got %q", exportKey2)
 	}
 }

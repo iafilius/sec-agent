@@ -222,6 +222,9 @@ func TestMainIntegration(t *testing.T) {
 	if err != nil || !strings.Contains(string(statusOut), "UNLOCKED") {
 		t.Fatalf("sec status failed: %v, output: %s", err, string(statusOut))
 	}
+	if !strings.Contains(string(statusOut), "AI Skills:") {
+		t.Errorf("expected 'AI Skills:' line in sec status output, got: %s", string(statusOut))
+	}
 
 	// 6i. Test 'sec audit' log retrieval
 	auditCmd := exec.Command("./sec_test_bin", "audit", "--profile", profile)

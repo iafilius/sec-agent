@@ -1,10 +1,10 @@
 ---
 name: sec-agent-integration
 description: Use the sec-agent CLI utility to start background daemons, store secrets, run applications in isolated environments, migrate dotenv files, install AI skills, inspect snapshots, and manage backups.
-version: v2.6.0
+version: v2.8.0
 ---
 
-# sec-agent Secrets Management Integration (v2.6.0)
+# sec-agent Secrets Management Integration (v2.8.0)
 
 This skill enables AI coding agents and autonomous assistants to use the `sec-agent` CLI tool (v1.9.4+) to securely retrieve credentials, run application build/test/terraform pipelines in isolated process environments, migrate dotenv configuration files, install integration skills across IDEs, inspect point-in-time snapshots (`sec snapshot`), and manage KeePassXC `.kdbx` backups on macOS.
 
@@ -12,19 +12,20 @@ This skill enables AI coding agents and autonomous assistants to use the `sec-ag
 
 ## 1. Quick Diagnostics, Guided Setup & Upfront Session Bootstrapping
 
-### 1.1. Upfront Session Bootstrapping Protocol for AI Assistants (Turn 1 Execution)
-**MANDATORY FOR AI CODING AGENTS & AUTONOMOUS ASSISTANTS**:
-When an AI agent starts any task or session that involves executing commands, running tests/pipelines, or fetching workspace secrets:
+### 1.1. Upfront Session Bootstrapping Protocol for AI Assistants
+When operating in a workspace that uses `sec-agent` (indicated by a `.secrc` file in the directory tree or tasks explicitly requiring environment secrets/credentials):
 
-1. **Turn-1 Session Pre-Flight Check**: Immediately execute `sec status --quick` (<5ms execution).
+1. **Conditional Turn-1 Pre-Flight Check**:
+   * If a `.secrc` file is detected or the user's task requires accessing secured secrets, run `sec status --quick` (<5ms execution) during turn 1 to check the daemon session state.
+   * If the workspace does not use `.secrc` and the task does not involve secrets, do not run pre-flight checks or request authentication.
 2. **Session Memory & Daemon Retention**:
-   * `sec-agent` runs an enclave-bound background daemon that **retains unlocked session secrets in RAM** (default 8-hour TTL).
-   * **Touch ID / Fingerprint authorization is required only ONCE per session.** Once unlocked, all subsequent subagent tool calls, child processes, and background commands inherit access frictionlessly without further prompts.
-3. **Turn-1 Authorization Prompting (Preventing Mid-Run Interruption)**:
-   * **If Daemon is ACTIVE / RUNNING**: Proceed 100% frictionlessly throughout the entire task trajectory!
-   * **If Daemon is SESSION LOCKED / NOT RUNNING**: Prompt the user **IMMEDIATELY at Turn 1** before doing extensive research, code editing, or planning:
+   * `sec-agent` runs an enclave-bound background daemon that retains unlocked session secrets in RAM (default 8-hour TTL).
+   * Touch ID / Biometric authorization is required only once per session. Once unlocked, all subsequent subagent tool calls, child processes, and background commands inherit access frictionlessly without further prompts.
+3. **Session Unlock Guidance (Preventing Mid-Run Interruption)**:
+   * **Daemon Active / Running**: Proceed frictionlessly throughout the task trajectory.
+   * **Daemon Locked / Not Running**: If the task requires secrets, prompt the user early to unlock:
      > 🔑 **`sec-agent` session is currently locked.**
-     > Please approve the Touch ID prompt (or run `eval $(sec open)` in your terminal) so I can retain session access for our entire execution run.
+     > Please approve the Touch ID prompt (or run `eval $(sec open)` in your terminal) so session access is available for the execution run.
 
 ### 1.2. Pre-flight Initialization Guard (`sec-agent init`)
 When running `sec-agent` on a fresh workstation or uninitialized environment:
@@ -35,7 +36,7 @@ When running `sec-agent` on a fresh workstation or uninitialized environment:
   Please initialize your vault environment by running:
       sec-agent init
   ```
-* **Guided & Non-Interactive Onboarding**: Run `sec-agent init` (or `sec-agent setup`). Pass `--non-interactive` (or `-y` / `--yes`) in non-interactive CI/CD setups to initialize configuration directories (`~/.config/sec-agent/` and `~/.config/sec-agent/snapshots/`) silently without terminal prompt menus.
+* **Guided & Non-Interactive Onboarding**: Run `sec-agent init` (or `sec-agent setup`). Pass `--vault` to interactively enroll Touch ID and generate a 24-word recovery seed immediately. Pass `--non-interactive` (or `-y` / `--yes`) in non-interactive CI/CD setups to initialize configuration directories (`~/.config/sec-agent/` and `~/.config/sec-agent/snapshots/`) silently without terminal prompt menus.
 
 ### 1.3. Diagnostics & Fast-Path Status Verification
 ```bash
@@ -168,19 +169,36 @@ echo "secret-value" | sec-agent set app-secrets/db-pass --stdin
 sec-agent set app-secrets/db-pass "secret-value" --env-alias DB_PASSWORD --comment "Production DB password"
 ```
 
-### 5.4. Querying & Renaming Secrets
+### 5.4. Relabeling & Metadata Updates Without Plaintext Exposure (`sec-agent relabel`)
+Update environment aliases, comments, expiration timestamps, or custom metadata tags on an existing secret without retyping or exposing the secret plaintext:
+
+```bash
+# Update environment alias (controls variable name during 'sec export' and 'sec run')
+sec-agent relabel myapp/token --env-alias MYAPP_API_TOKEN
+
+# Update comment and custom metadata tags
+sec-agent relabel myapp/token --comment "Production API Token" --meta owner=devops --meta tier=critical
+
+# Update expiration timestamp
+sec-agent relabel myapp/token --expires 2026-12-31T23:59:59Z
+
+# Clear environment alias (reverts export mapping to default path-derived variable name)
+sec-agent relabel myapp/token --clear-alias
+```
+
+### 5.5. Querying & Renaming Secrets
 ```bash
 sec-agent get my-project/terraform/acceptance/ --prefix [--json]
 sec-agent mv old-path/ new-path/ --prefix
 ```
 
-### 5.5. Environment Isolation & Safety Badges
+### 5.6. Environment Isolation & Safety Badges
 ```bash
 sec-agent profile set-env prod --profile my-project-prod
 sec-agent run --confirm-prod --profile my-project-prod -- terraform apply
 ```
 
-### 5.6. Time-Bound Secret Leases & Revocation (`sec-agent lease`)
+### 5.7. Time-Bound Secret Leases & Revocation (`sec-agent lease`)
 ```bash
 # Grant a 15-minute temporary lease token for an AI subagent
 lease_token=$(sec-agent lease my-project-dev/vco_token --ttl 15m)
@@ -190,7 +208,7 @@ sec-agent lease revoke $lease_token
 ```
 Delegate temporary credential access to subagents with **zero credential lingering**.
 
-### 5.7. Real-Time Secret Redaction (`sec-agent run`)
+### 5.8. Real-Time Secret Redaction (`sec-agent run`)
 ```bash
 sec-agent run -- make testacc
 sec-agent run --allow-keys VCO_URL,VCO_TOKEN -- make test-unit

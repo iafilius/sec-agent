@@ -620,6 +620,90 @@ func handleRename(profile string, oldPath, newPath string, args []string) {
 	fmt.Println(resp.Value)
 }
 
+func handleRelabel(profile string, path string, args []string) {
+	if path == "" {
+		fmt.Fprintln(os.Stderr, "Usage: sec relabel <path> [flags]")
+		os.Exit(1)
+	}
+
+	comment := ""
+	metadata := make(map[string]string)
+	expiresStr := ""
+	clearAlias := false
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--comment", "-c":
+			if i+1 < len(args) {
+				comment = args[i+1]
+				i++
+			} else {
+				fail("MISSING_ARGUMENT", fmt.Errorf("flag --comment requires a value"), fmt.Sprintf("Example: sec relabel %s -c \"Production DB\"", path))
+			}
+		case "--expires", "-e":
+			if i+1 < len(args) {
+				expiresStr = args[i+1]
+				i++
+			} else {
+				fail("MISSING_ARGUMENT", fmt.Errorf("flag --expires requires a value (e.g. 30d, 12h, YYYY-MM-DD, or 'clear')"), "")
+			}
+		case "--env-alias", "-a":
+			if i+1 < len(args) {
+				metadata["env_alias"] = args[i+1]
+				i++
+			} else {
+				fail("MISSING_ARGUMENT", fmt.Errorf("flag --env-alias requires a value (e.g. DB_PASSWORD)"), "")
+			}
+		case "--clear-alias":
+			clearAlias = true
+		case "--meta", "-m":
+			if i+1 < len(args) {
+				metaPair := args[i+1]
+				i++
+				parts := strings.SplitN(metaPair, "=", 2)
+				if len(parts) == 2 {
+					metadata[parts[0]] = parts[1]
+				} else {
+					fmt.Fprintf(os.Stderr, "Warning: invalid metadata format %q (expected key=value)\n", metaPair)
+				}
+			} else {
+				fail("MISSING_ARGUMENT", fmt.Errorf("flag --meta requires a key=value pair"), "")
+			}
+		}
+	}
+
+	expiresTimeStr := ""
+	if expiresStr != "" {
+		if expiresStr == "clear" || expiresStr == "0" {
+			expiresTimeStr = "clear"
+		} else {
+			t, err := parseExpiration(expiresStr)
+			if err != nil {
+				fail("INVALID_ARGUMENT", err, "Verify format for duration: 30d, 12h, or YYYY-MM-DD")
+			}
+			expiresTimeStr = t.Format(time.RFC3339)
+		}
+	}
+
+	resp, err := queryDaemon(profile, daemon.IPCRequest{
+		Action:     daemon.IPCActionRelabel,
+		Path:       path,
+		Comment:    comment,
+		Metadata:   metadata,
+		Expires:    expiresTimeStr,
+		ClearAlias: clearAlias,
+	})
+	if err != nil {
+		fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running. Please run 'sec open' to unlock the session."), "Run 'eval $(sec open)' to start/unlock the session.")
+	}
+	if !resp.Success {
+		code, rem := mapDaemonError(resp.Error)
+		fail(code, fmt.Errorf("%s", resp.Error), rem)
+	}
+
+	fmt.Println(resp.Value)
+}
+
 func handleList(profile string, args []string) {
 	prefix := ""
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {

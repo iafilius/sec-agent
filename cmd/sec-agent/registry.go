@@ -43,7 +43,8 @@ func initRegistry() {
 			Aliases:     []string{"setup"},
 			Category:    "Session & Setup",
 			Description: "Initialize vault configuration & install AI skills",
-			Usage:       "sec init [--skill <target>] [--scope <global|workspace>]",
+			Usage:       "sec init [--vault] [--skill <target>] [--scope <global|workspace>]",
+			Flags:       []string{"--vault", "--skill", "--scope", "--non-interactive"},
 			Handler:     handleInit,
 		},
 		{
@@ -115,6 +116,22 @@ func initRegistry() {
 					os.Exit(1)
 				}
 				handleRename(profile, args[0], args[1], args[2:])
+			},
+		},
+		{
+			Name:        "relabel",
+			Aliases:     []string{"edit-meta"},
+			Category:    "Core Secrets",
+			Description: "Update comment, environment alias, or tags on an existing secret",
+			Usage:       "sec relabel <path> [--comment <text>] [--env-alias <alias>] [--expires <ttl>] [--meta <k=v>] [--clear-alias]",
+			ExpectsKeys: true,
+			Flags:       []string{"--comment", "-c", "--env-alias", "-a", "--expires", "-e", "--meta", "-m", "--clear-alias"},
+			Handler: func(profile string, args []string) {
+				if len(args) < 1 {
+					fmt.Fprintln(os.Stderr, "Usage: sec relabel <path> [flags]")
+					os.Exit(1)
+				}
+				handleRelabel(profile, args[0], args[1:])
 			},
 		},
 		{

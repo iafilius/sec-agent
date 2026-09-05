@@ -105,13 +105,39 @@ func resolveSkillPath(target, scope string) (string, error) {
 	}
 }
 
-func writeSkillToFile(targetPath string) error {
+const copilotInstructionsTemplate = `# sec-agent — Secret Management Quick Reference
+
+This workspace integrates with ` + "`sec-agent`" + ` for zero-plaintext secret management.
+
+## Core Rules for AI Assistants
+1. **Zero Plaintext Exposure**: Never print, log, or commit secret values to files, history, or chat output.
+2. **Conditional Pre-flight**: If ` + "`.secrc`" + ` exists in this repository or the task requires credentials, run ` + "`sec status --quick`" + ` (<5ms) to verify daemon session state. If locked and secrets are required, prompt the user:
+   > 🔑 ` + "`sec-agent`" + ` session is locked. Run ` + "`eval $(sec open)`" + ` or approve Touch ID to retain session access.
+3. **Isolated Process Execution**: Run pipelines and scripts using ` + "`sec run -- <cmd>`" + ` to inject secrets directly into memory without touching disk or shell history.
+
+## Essential Commands
+| Command | Purpose |
+| :--- | :--- |
+| ` + "`sec status --quick`" + ` | Ultra-fast check (<5ms) of daemon session state |
+| ` + "`sec run -- <cmd>`" + ` | Execute command with secrets injected into process memory |
+| ` + "`sec open`" + ` | Unlock vault session via Touch ID (single auth covers full session) |
+| ` + "`sec get <key>`" + ` | Retrieve secret (masked in non-interactive/redacted contexts) |
+| ` + "`sec set <key>`" + ` | Store secret via secure hidden terminal prompt |
+| ` + "`sec relabel <key> -a <VAR>`" + ` | Update env alias or metadata without retyping secret |
+| ` + "`sec-agent skill show`" + ` | View complete, comprehensive AI integration manual |
+`
+
+func writeSkillToFile(target, targetPath string) error {
 	dir := filepath.Dir(targetPath)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
+	content := embeddedSkillBytes
+	if target == "copilot" {
+		content = []byte(copilotInstructionsTemplate)
+	}
 	// #nosec G304 G703
-	return os.WriteFile(targetPath, embeddedSkillBytes, 0600)
+	return os.WriteFile(targetPath, content, 0600)
 }
 
 func handleSkillInstallTarget(target, scope string) bool {
@@ -120,7 +146,7 @@ func handleSkillInstallTarget(target, scope string) bool {
 		fmt.Fprintf(os.Stderr, "Skill error: %v\n", err)
 		return false
 	}
-	if err := writeSkillToFile(targetPath); err != nil {
+	if err := writeSkillToFile(target, targetPath); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to write skill file to %s: %v\n", targetPath, err)
 		return false
 	}
@@ -167,7 +193,7 @@ func syncInstalledSkillsIfOutdated() {
 	for i, entry := range manifest.Skills {
 		targetPath, err := resolveSkillPath(entry.Target, entry.Scope)
 		if err == nil {
-			if writeErr := writeSkillToFile(targetPath); writeErr == nil {
+			if writeErr := writeSkillToFile(entry.Target, targetPath); writeErr == nil {
 				manifest.Skills[i].Version = Version
 				manifest.Skills[i].Path = targetPath
 				updatedCount++
@@ -259,12 +285,31 @@ func handleInit(profile string, args []string) {
 
 	syncInstalledSkillsIfOutdated()
 
+	// Inspect active vault store schema
+	dbPath, _ := store.GetStorePath(profile)
+	if dbInfo, statErr := os.Stat(dbPath); statErr == nil && dbInfo.Size() > 0 {
+		if store.IsV2Vault(dbPath) {
+			fmt.Println("[✓] Vault Schema: v2.0 Dual-Slot Envelope (Admin Defense & Recovery Seed Active)")
+		} else {
+			fmt.Println("\n\033[33m⚠️  SECURITY WARNING — LEGACY VAULT SCHEMA (v1.0 DETECTED):\033[0m")
+			fmt.Printf("   • Your vault file at %s is using legacy v1.0 single-slot encryption.\n", dbPath)
+			fmt.Println("   • It does NOT protect against corporate device admins or rogue fingerprint additions.")
+			fmt.Println("   • Run 'sec-agent migrate-v2' to generate a 24-word recovery seed and upgrade to Dual-Slot Admin Defense!")
+			fmt.Println()
+		}
+	} else {
+		fmt.Printf("[ℹ] Vault Store: No vault file found for profile %q (will be created automatically on first secret addition, or run 'sec-agent init --vault')\n", profile)
+	}
+
 	nonInteractive := false
+	initVault := false
 	skillTarget := ""
 	skillScope := "global"
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--non-interactive" || args[i] == "-y" || args[i] == "--yes" {
 			nonInteractive = true
+		} else if args[i] == "--vault" {
+			initVault = true
 		} else if args[i] == "--skill" && i+1 < len(args) {
 			skillTarget = args[i+1]
 			i++
@@ -272,6 +317,23 @@ func handleInit(profile string, args []string) {
 			skillScope = args[i+1]
 			i++
 		}
+	}
+
+	if initVault {
+		if _, statErr := os.Stat(dbPath); os.IsNotExist(statErr) {
+			getter, setter := keychain.GetKeychainAccessPair(profile)
+			masterKey, mkErr := store.InitializeMasterKey(profile, getter, setter)
+			if mkErr != nil {
+				fmt.Fprintf(os.Stderr, "❌ Failed to initialize master key in Keychain: %v\n", mkErr)
+				os.Exit(1)
+			}
+			emptyStore := &store.EncryptedStore{Secrets: make(map[store.SecretKey]store.SecretEntry)}
+			if saveErr := store.SaveStore(profile, emptyStore, masterKey); saveErr != nil {
+				fmt.Fprintf(os.Stderr, "❌ Failed to save initial vault: %v\n", saveErr)
+				os.Exit(1)
+			}
+		}
+		handleMigrateV2(profile, []string{"--reroll"})
 	}
 
 	if skillTarget != "" {
@@ -390,7 +452,7 @@ func handleSkill(profile string, args []string) {
 		for i, entry := range manifest.Skills {
 			targetPath, err := resolveSkillPath(entry.Target, entry.Scope)
 			if err == nil {
-				if writeErr := writeSkillToFile(targetPath); writeErr == nil {
+				if writeErr := writeSkillToFile(entry.Target, targetPath); writeErr == nil {
 					manifest.Skills[i].Version = Version
 					manifest.Skills[i].Path = targetPath
 					updated++

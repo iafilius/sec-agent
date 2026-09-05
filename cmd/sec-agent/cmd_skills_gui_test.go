@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -235,5 +236,112 @@ func TestNonTTYGUIAutoOpenHandling(t *testing.T) {
 
 	if os.Getenv("SEC_SESSION_TOKEN") == "" {
 		t.Errorf("expected handleOpenGUI to set SEC_SESSION_TOKEN, got empty")
+	}
+}
+
+func TestCopilotSkillCompactFormat(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("failed to chdir to tmpDir: %v", err)
+	}
+	defer func() { _ = os.Chdir(origWd) }()
+
+	t.Setenv("HOME", tmpDir)
+
+	ok := handleSkillInstallTarget("copilot", "workspace")
+	if !ok {
+		t.Fatalf("handleSkillInstallTarget failed for copilot")
+	}
+
+	copilotFile := filepath.Join(tmpDir, ".github", "copilot-instructions.md")
+	data, err := os.ReadFile(copilotFile)
+	if err != nil {
+		t.Fatalf("failed to read copilot instructions: %v", err)
+	}
+
+	content := string(data)
+	lines := strings.Split(content, "\n")
+	if len(lines) > 50 {
+		t.Errorf("copilot instructions too long: got %d lines, want <= 50", len(lines))
+	}
+	if !strings.Contains(content, "sec-agent — Secret Management Quick Reference") {
+		t.Errorf("copilot instructions missing expected header")
+	}
+	if !strings.Contains(content, "sec run") || !strings.Contains(content, "sec open") {
+		t.Errorf("copilot instructions missing essential command patterns")
+	}
+}
+
+func TestInitLegacyVaultSchemaDetection(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	origWd, _ := os.Getwd()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("failed to chdir to tmpDir: %v", err)
+	}
+	defer func() { _ = os.Chdir(origWd) }()
+
+	cfgDir := filepath.Join(tmpDir, ".config", "sec-agent")
+	_ = os.MkdirAll(cfgDir, 0700)
+	dbPath := filepath.Join(cfgDir, "secrets.enc")
+
+	// 1. Case: No vault store exists
+	{
+		r, w, _ := os.Pipe()
+		oldStdout := os.Stdout
+		os.Stdout = w
+		handleInit("default", []string{"--non-interactive"})
+		_ = w.Close()
+		os.Stdout = oldStdout
+		var buf bytes.Buffer
+		_, _ = buf.ReadFrom(r)
+		out := buf.String()
+		if !strings.Contains(out, "No vault file found") {
+			t.Errorf("expected notice when no vault exists, got: %s", out)
+		}
+	}
+
+	// 2. Case: Legacy v1.0 vault file present (raw binary, not JSON '{')
+	if err := os.WriteFile(dbPath, []byte("legacy-v1-ciphertext-content"), 0600); err != nil {
+		t.Fatalf("failed to write legacy vault: %v", err)
+	}
+
+	{
+		r, w, _ := os.Pipe()
+		oldStdout := os.Stdout
+		os.Stdout = w
+		handleInit("default", []string{"--non-interactive"})
+		_ = w.Close()
+		os.Stdout = oldStdout
+		var buf bytes.Buffer
+		_, _ = buf.ReadFrom(r)
+		out := buf.String()
+		if !strings.Contains(out, "LEGACY VAULT SCHEMA") {
+			t.Errorf("expected legacy warning banner, got: %s", out)
+		}
+		if !strings.Contains(out, "sec-agent migrate-v2") {
+			t.Errorf("expected recommendation to run sec-agent migrate-v2, got: %s", out)
+		}
+	}
+
+	// 3. Case: v2.0 vault envelope present (starts with '{')
+	if err := os.WriteFile(dbPath, []byte("{\"schema_version\":\"2.0\"}"), 0600); err != nil {
+		t.Fatalf("failed to write v2 vault: %v", err)
+	}
+
+	{
+		r, w, _ := os.Pipe()
+		oldStdout := os.Stdout
+		os.Stdout = w
+		handleInit("default", []string{"--non-interactive"})
+		_ = w.Close()
+		os.Stdout = oldStdout
+		var buf bytes.Buffer
+		_, _ = buf.ReadFrom(r)
+		out := buf.String()
+		if !strings.Contains(out, "v2.0 Dual-Slot Envelope") {
+			t.Errorf("expected v2 envelope confirmation, got: %s", out)
+		}
 	}
 }

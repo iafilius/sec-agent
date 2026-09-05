@@ -42,6 +42,7 @@ const (
 	IPCActionRollback       IPCAction = "rollback"
 	IPCActionReexec         IPCAction = "reexec"
 	IPCActionLease          IPCAction = "lease"
+	IPCActionRelabel        IPCAction = "relabel"
 )
 
 // String returns the string representation of IPCAction.
@@ -70,6 +71,7 @@ type IPCRequest struct {
 	TargetVersion  int                          `json:"target_version,omitempty"`
 	ShowTrash      bool                         `json:"show_trash,omitempty"`
 	Permanent      bool                         `json:"permanent,omitempty"`
+	ClearAlias     bool                         `json:"clear_alias,omitempty"`
 }
 
 // Validate checks whether the IPCRequest action is supported.
@@ -78,7 +80,7 @@ func (req *IPCRequest) Validate() error {
 	case IPCActionOpen, IPCActionPing, IPCActionGet, IPCActionSet, IPCActionDelete,
 		IPCActionRestore, IPCActionBackup, IPCActionRestoreDeleted, IPCActionAudit,
 		IPCActionList, IPCActionGetGroup, IPCActionRename, IPCActionCopy,
-		IPCActionClear, IPCActionStatus, IPCActionHistory, IPCActionRollback, IPCActionReexec, IPCActionLease:
+		IPCActionClear, IPCActionStatus, IPCActionHistory, IPCActionRollback, IPCActionReexec, IPCActionLease, IPCActionRelabel:
 		return nil
 	default:
 		return fmt.Errorf("unknown or unsupported IPC action: %q", req.Action)
@@ -101,19 +103,20 @@ type DaemonStatePayload struct {
 type AuditEventAction string
 
 const (
-	AuditEventOpen   AuditEventAction = "OPEN"
-	AuditEventGet    AuditEventAction = "GET"
-	AuditEventSet    AuditEventAction = "SET"
-	AuditEventDelete AuditEventAction = "DELETE"
-	AuditEventClear  AuditEventAction = "CLEAR"
-	AuditEventAudit  AuditEventAction = "AUDIT"
-	AuditEventReexec AuditEventAction = "REEXEC"
+	AuditEventOpen    AuditEventAction = "OPEN"
+	AuditEventGet     AuditEventAction = "GET"
+	AuditEventSet     AuditEventAction = "SET"
+	AuditEventDelete  AuditEventAction = "DELETE"
+	AuditEventClear   AuditEventAction = "CLEAR"
+	AuditEventAudit   AuditEventAction = "AUDIT"
+	AuditEventReexec  AuditEventAction = "REEXEC"
+	AuditEventRelabel AuditEventAction = "RELABEL"
 )
 
 // Validate checks whether the audit action is valid.
 func (a AuditEventAction) Validate() error {
 	switch a {
-	case AuditEventOpen, AuditEventGet, AuditEventSet, AuditEventDelete, AuditEventClear, AuditEventAudit, AuditEventReexec:
+	case AuditEventOpen, AuditEventGet, AuditEventSet, AuditEventDelete, AuditEventClear, AuditEventAudit, AuditEventReexec, AuditEventRelabel:
 		return nil
 	default:
 		return fmt.Errorf("unsupported audit event action: %q", a)
@@ -569,6 +572,66 @@ func (d *Daemon) processRequest(c net.Conn, req IPCRequest, peerPID int) {
 		d.lastUsed = time.Now()
 		d.logAudit(AuditEventSet, req.Path, peerPID, true, "")
 		d.sendResponse(c, IPCResponse{Success: true})
+
+	case IPCActionRelabel:
+		if d.masterKey == nil {
+			d.sendError(c, "Session locked. Please unlock first.")
+			return
+		}
+		d.ensureStoreInitialized()
+
+		entry, ok := d.secretsStore.Secrets[store.SecretKey(req.Path)]
+		if !ok || entry.DeletedAt != nil {
+			d.sendErrorCode(c, fmt.Sprintf("secret %q not found", req.Path), store.ErrCodeSecretNotFound)
+			return
+		}
+
+		if req.Comment != "" {
+			entry.Comment = req.Comment
+		}
+
+		if req.Expires != "" {
+			if req.Expires == "clear" || req.Expires == "0" {
+				entry.Expires = time.Time{}
+			} else {
+				parsedTime, err := time.Parse(time.RFC3339, req.Expires)
+				if err != nil {
+					d.sendError(c, fmt.Sprintf("invalid expiration format (expected RFC3339): %v", err))
+					return
+				}
+				entry.Expires = parsedTime
+			}
+		}
+
+		if entry.Metadata == nil {
+			entry.Metadata = make(map[string]string)
+		}
+
+		if req.ClearAlias {
+			delete(entry.Metadata, "env_alias")
+		}
+
+		for k, v := range req.Metadata {
+			if v == "" {
+				delete(entry.Metadata, k)
+			} else {
+				entry.Metadata[k] = v
+			}
+		}
+
+		entry.LastModified = time.Now()
+		d.secretsStore.Secrets[store.SecretKey(req.Path)] = entry
+
+		if err := store.SaveStore(d.profile, d.secretsStore, d.masterKey); err != nil {
+			d.sendError(c, fmt.Sprintf("failed to persist store: %v", err))
+			return
+		}
+		d.lastUsed = time.Now()
+		d.logAudit(AuditEventRelabel, req.Path, peerPID, true, "")
+		d.sendResponse(c, IPCResponse{
+			Success: true,
+			Value:   fmt.Sprintf("Successfully relabeled secret %q", req.Path),
+		})
 
 	case IPCActionDelete:
 		if d.masterKey == nil {

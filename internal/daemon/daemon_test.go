@@ -276,3 +276,144 @@ func TestDaemonConcurrencySameKey(t *testing.T) {
 		t.Errorf("final database value %q is invalid or corrupted", finalVal)
 	}
 }
+
+func TestDaemonRelabel(t *testing.T) {
+	profile := "relabel-test"
+	ttl := 10 * time.Second
+
+	sockPath, _ := config.GetSocketPath(profile)
+	dbPath, _ := store.GetStorePath(profile)
+	os.Remove(sockPath)
+	os.Remove(dbPath)
+	defer os.Remove(sockPath)
+	defer os.Remove(dbPath)
+
+	d, err := NewDaemon(profile, ttl, "v1.0.0")
+	if err != nil {
+		t.Fatalf("failed to create daemon: %v", err)
+	}
+	go func() { _ = d.Start() }()
+	defer d.Stop()
+
+	for i := 0; i < 20; i++ {
+		if _, err := os.Stat(sockPath); err == nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	masterKey, err := crypto.GenerateRandomKey()
+	if err != nil {
+		t.Fatalf("failed to generate random key: %v", err)
+	}
+
+	// 1. Open session
+	conn, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatalf("dial failed: %v", err)
+	}
+	_ = json.NewEncoder(conn).Encode(IPCRequest{Action: "open", Key: masterKey})
+	var openResp IPCResponse
+	_ = json.NewDecoder(conn).Decode(&openResp)
+	conn.Close()
+	if !openResp.Success {
+		t.Fatalf("open failed: %s", openResp.Error)
+	}
+	token := openResp.Token
+
+	// 2. Set initial secret
+	conn, _ = net.Dial("unix", sockPath)
+	_ = json.NewEncoder(conn).Encode(IPCRequest{
+		Action:  "set",
+		Path:    "velocloud/token",
+		Value:   "super-secret-token",
+		Comment: "Initial Comment",
+		Token:   token,
+	})
+	var setResp IPCResponse
+	_ = json.NewDecoder(conn).Decode(&setResp)
+	conn.Close()
+	if !setResp.Success {
+		t.Fatalf("set failed: %s", setResp.Error)
+	}
+
+	// 3. Relabel secret (add env_alias, update comment, add metadata tag)
+	conn, _ = net.Dial("unix", sockPath)
+	_ = json.NewEncoder(conn).Encode(IPCRequest{
+		Action:   "relabel",
+		Path:     "velocloud/token",
+		Comment:  "Updated Comment",
+		Metadata: map[string]string{"env_alias": "VCO_API_TOKEN", "tier": "prod"},
+		Token:    token,
+	})
+	var relabelResp IPCResponse
+	_ = json.NewDecoder(conn).Decode(&relabelResp)
+	conn.Close()
+	if !relabelResp.Success {
+		t.Fatalf("relabel failed: %s", relabelResp.Error)
+	}
+
+	// 4. Verify disk persistence and value preservation
+	diskStore, err := store.LoadStore(profile, masterKey)
+	if err != nil {
+		t.Fatalf("failed to load store: %v", err)
+	}
+	entry, ok := diskStore.Secrets[store.SecretKey("velocloud/token")]
+	if !ok {
+		t.Fatalf("secret missing from store")
+	}
+	if entry.Value != "super-secret-token" {
+		t.Errorf("entry.Value altered during relabel: got %q, want 'super-secret-token'", entry.Value)
+	}
+	if entry.Comment != "Updated Comment" {
+		t.Errorf("entry.Comment mismatch: got %q, want 'Updated Comment'", entry.Comment)
+	}
+	if entry.Metadata["env_alias"] != "VCO_API_TOKEN" {
+		t.Errorf("entry.Metadata['env_alias'] mismatch: got %q, want 'VCO_API_TOKEN'", entry.Metadata["env_alias"])
+	}
+	if entry.Metadata["tier"] != "prod" {
+		t.Errorf("entry.Metadata['tier'] mismatch: got %q, want 'prod'", entry.Metadata["tier"])
+	}
+
+	// 5. Test ClearAlias
+	conn, _ = net.Dial("unix", sockPath)
+	_ = json.NewEncoder(conn).Encode(IPCRequest{
+		Action:     "relabel",
+		Path:       "velocloud/token",
+		ClearAlias: true,
+		Token:      token,
+	})
+	var clearResp IPCResponse
+	_ = json.NewDecoder(conn).Decode(&clearResp)
+	conn.Close()
+	if !clearResp.Success {
+		t.Fatalf("clear alias failed: %s", clearResp.Error)
+	}
+
+	diskStore2, _ := store.LoadStore(profile, masterKey)
+	entry2 := diskStore2.Secrets[store.SecretKey("velocloud/token")]
+	if _, exists := entry2.Metadata["env_alias"]; exists {
+		t.Errorf("env_alias should have been cleared")
+	}
+	if entry2.Metadata["tier"] != "prod" {
+		t.Errorf("tier metadata lost when clearing alias")
+	}
+	if entry2.Value != "super-secret-token" {
+		t.Errorf("secret value altered when clearing alias")
+	}
+
+	// 6. Relabel non-existent secret
+	conn, _ = net.Dial("unix", sockPath)
+	_ = json.NewEncoder(conn).Encode(IPCRequest{
+		Action:  "relabel",
+		Path:    "non/existent",
+		Comment: "foo",
+		Token:   token,
+	})
+	var errResp IPCResponse
+	_ = json.NewDecoder(conn).Decode(&errResp)
+	conn.Close()
+	if errResp.Success {
+		t.Errorf("expected error for non-existent secret, got success")
+	}
+}
