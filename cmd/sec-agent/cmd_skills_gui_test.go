@@ -345,3 +345,179 @@ func TestInitLegacyVaultSchemaDetection(t *testing.T) {
 		}
 	}
 }
+
+func TestSkillManifestLegacyMigration(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "sec-agent-skill-legacy-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	origConfig := os.Getenv("SEC_CONFIG_DIR")
+	os.Setenv("SEC_CONFIG_DIR", tmpDir)
+	defer func() {
+		if origConfig != "" {
+			os.Setenv("SEC_CONFIG_DIR", origConfig)
+		} else {
+			os.Unsetenv("SEC_CONFIG_DIR")
+		}
+	}()
+
+	// Write legacy skills.json
+	legacyJSON := `{
+  "version": "v2.4.4",
+  "skills": [
+    {
+      "target": "copilot",
+      "scope": "workspace",
+      "path": "/tmp/test-workspace/.github/copilot-instructions.md",
+      "version": "v2.4.3"
+    }
+  ]
+}`
+	legacyPath := filepath.Join(tmpDir, "skills.json")
+	if err := os.WriteFile(legacyPath, []byte(legacyJSON), 0600); err != nil {
+		t.Fatalf("failed to write legacy skills.json: %v", err)
+	}
+
+	// loadSkillManifest should find skills.json and auto-migrate to skills_manifest.json
+	manifest, err := loadSkillManifest()
+	if err != nil {
+		t.Fatalf("loadSkillManifest failed to load legacy manifest: %v", err)
+	}
+	if manifest == nil || len(manifest.Skills) != 1 {
+		t.Fatalf("expected 1 skill in migrated manifest, got: %v", manifest)
+	}
+	if manifest.Skills[0].Target != "copilot" {
+		t.Errorf("expected copilot skill target, got %s", manifest.Skills[0].Target)
+	}
+
+	// Verify skills_manifest.json was written
+	migratedPath := filepath.Join(tmpDir, "skills_manifest.json")
+	if _, err := os.Stat(migratedPath); err != nil {
+		t.Errorf("expected skills_manifest.json to be created after legacy migration, got err: %v", err)
+	}
+}
+
+func TestSkillUpdatePreservesEntryPath(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "sec-agent-skill-path-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	origConfig := os.Getenv("SEC_CONFIG_DIR")
+	os.Setenv("SEC_CONFIG_DIR", tmpDir)
+	defer func() {
+		if origConfig != "" {
+			os.Setenv("SEC_CONFIG_DIR", origConfig)
+		} else {
+			os.Unsetenv("SEC_CONFIG_DIR")
+		}
+	}()
+
+	// Create workspace dir with .github folder
+	wsDir := filepath.Join(tmpDir, "workspace-repo")
+	dotGithub := filepath.Join(wsDir, ".github")
+	if err := os.MkdirAll(dotGithub, 0700); err != nil {
+		t.Fatalf("failed to create workspace .github: %v", err)
+	}
+	targetFile := filepath.Join(dotGithub, "copilot-instructions.md")
+	if err := os.WriteFile(targetFile, []byte("old-v2.4.3-content"), 0600); err != nil {
+		t.Fatalf("failed to write targetFile: %v", err)
+	}
+
+	// Write skills_manifest.json with exact entry.Path
+	manifest := &SkillManifest{
+		Version: "v2.4.4",
+		Skills: []InstalledSkillEntry{
+			{
+				Target:  "copilot",
+				Scope:   "workspace",
+				Path:    targetFile,
+				Version: "v2.4.3",
+			},
+		},
+	}
+	if err := saveSkillManifest(manifest); err != nil {
+		t.Fatalf("failed to save manifest: %v", err)
+	}
+
+	// Execute skill update from another directory (e.g. tmpDir root, NOT wsDir)
+	origWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(origWd) }()
+
+	handleSkill("default", []string{"update"})
+
+	// Verify targetFile was updated with v2.9.0 copilot quick reference
+	updatedContent, err := os.ReadFile(targetFile)
+	if err != nil {
+		t.Fatalf("failed to read updated file: %v", err)
+	}
+	if !strings.Contains(string(updatedContent), "sec-agent — Secret Management Quick Reference") {
+		t.Errorf("expected targetFile to be updated with new copilot instructions, got:\n%s", string(updatedContent))
+	}
+
+	// Verify no bogus ~/.github or ./github was created in tmpDir
+	bogusFile := filepath.Join(tmpDir, ".github", "copilot-instructions.md")
+	if _, err := os.Stat(bogusFile); err == nil {
+		t.Errorf("CRITICAL DRIFT FAILURE: bogus skill file was created at %s instead of respecting entry.Path!", bogusFile)
+	}
+}
+
+func TestStatusAndVersionSkillDriftAlerts(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "sec-agent-drift-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	origConfig := os.Getenv("SEC_CONFIG_DIR")
+	os.Setenv("SEC_CONFIG_DIR", tempDir)
+	defer func() {
+		if origConfig != "" {
+			os.Setenv("SEC_CONFIG_DIR", origConfig)
+		} else {
+			os.Unsetenv("SEC_CONFIG_DIR")
+		}
+	}()
+
+	manifest := &SkillManifest{
+		Version: "v2.4.4",
+		Skills: []InstalledSkillEntry{
+			{
+				Target:  "copilot",
+				Scope:   "workspace",
+				Path:    "/some/path",
+				Version: "v2.4.3",
+			},
+		},
+	}
+	if err := saveSkillManifest(manifest); err != nil {
+		t.Fatalf("failed to save manifest: %v", err)
+	}
+
+	// Build binary to run sec-agent version
+	binPath := "./sec_test_bin_drift"
+	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build binary: %v, output: %s", err, string(out))
+	}
+	defer os.Remove(binPath)
+
+	verCmd := exec.Command(binPath, "version")
+	verCmd.Env = append(os.Environ(), "SEC_CONFIG_DIR="+tempDir)
+	out, err := verCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("version command failed: %v, output: %s", err, string(out))
+	}
+	outStr := string(out)
+	if !strings.Contains(outStr, "AI SKILL DRIFT") {
+		t.Errorf("expected version output to contain 'AI SKILL DRIFT', got:\n%s", outStr)
+	}
+	if !strings.Contains(outStr, "run 'sec-agent skill update'") && !strings.Contains(outStr, "Run 'sec-agent skill update'") {
+		t.Errorf("expected remediation advice to run skill update, got:\n%s", outStr)
+	}
+}
+

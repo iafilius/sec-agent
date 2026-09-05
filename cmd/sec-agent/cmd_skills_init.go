@@ -35,6 +35,16 @@ func loadSkillManifest() (*SkillManifest, error) {
 	// #nosec G304 G703
 	data, err := os.ReadFile(manifestPath)
 	if err != nil {
+		// Fallback: check legacy skills.json and auto-migrate
+		legacyPath := filepath.Join(cfgDir, "skills.json")
+		// #nosec G304 G703
+		if legacyData, lErr := os.ReadFile(legacyPath); lErr == nil {
+			var m SkillManifest
+			if json.Unmarshal(legacyData, &m) == nil && len(m.Skills) > 0 {
+				_ = saveSkillManifest(&m)
+				return &m, nil
+			}
+		}
 		return nil, err
 	}
 	var m SkillManifest
@@ -191,13 +201,22 @@ func syncInstalledSkillsIfOutdated() {
 	}
 	updatedCount := 0
 	for i, entry := range manifest.Skills {
-		targetPath, err := resolveSkillPath(entry.Target, entry.Scope)
-		if err == nil {
-			if writeErr := writeSkillToFile(entry.Target, targetPath); writeErr == nil {
-				manifest.Skills[i].Version = Version
-				manifest.Skills[i].Path = targetPath
-				updatedCount++
+		targetPath := entry.Path
+		if targetPath == "" || !filepath.IsAbs(targetPath) {
+			p, err := resolveSkillPath(entry.Target, entry.Scope)
+			if err != nil {
+				continue
 			}
+			targetPath = p
+		}
+		dir := filepath.Dir(targetPath)
+		if _, statErr := os.Stat(dir); statErr != nil {
+			continue
+		}
+		if writeErr := writeSkillToFile(entry.Target, targetPath); writeErr == nil {
+			manifest.Skills[i].Version = Version
+			manifest.Skills[i].Path = targetPath
+			updatedCount++
 		}
 	}
 	if updatedCount > 0 {
@@ -450,14 +469,23 @@ func handleSkill(profile string, args []string) {
 		}
 		updated := 0
 		for i, entry := range manifest.Skills {
-			targetPath, err := resolveSkillPath(entry.Target, entry.Scope)
-			if err == nil {
-				if writeErr := writeSkillToFile(entry.Target, targetPath); writeErr == nil {
-					manifest.Skills[i].Version = Version
-					manifest.Skills[i].Path = targetPath
-					updated++
-					fmt.Printf("[✓] Updated %s (%s) -> %s\n", entry.Target, entry.Scope, targetPath)
+			targetPath := entry.Path
+			if targetPath == "" || !filepath.IsAbs(targetPath) {
+				p, err := resolveSkillPath(entry.Target, entry.Scope)
+				if err != nil {
+					continue
 				}
+				targetPath = p
+			}
+			dir := filepath.Dir(targetPath)
+			if _, statErr := os.Stat(dir); statErr != nil {
+				continue
+			}
+			if writeErr := writeSkillToFile(entry.Target, targetPath); writeErr == nil {
+				manifest.Skills[i].Version = Version
+				manifest.Skills[i].Path = targetPath
+				updated++
+				fmt.Printf("[✓] Updated %s (%s) -> %s\n", entry.Target, entry.Scope, targetPath)
 			}
 		}
 		manifest.Version = Version
@@ -617,20 +645,27 @@ type AgentFeedbackDTO struct {
 	if showExample {
 		fmt.Println(`=== sec-agent Feature Proposal & Feedback Example Template ===
 
-# Proposal: [Feature Name]
+# Feedback / Proposal: [Feature or Fix Name]
 **Target Repository:** secure_secrets
 **Target Component:** sec-agent CLI & Embedded AI Skill
 **Evaluation Date:** ` + time.Now().Format("2006-01-02") + `
+**Severity / Urgency:** 🔴 Critical | 🟠 High | 🟡 Medium | 🟢 Enhancement
 
-## 1. Executive Summary & Operational Motivation
-- **Problem Statement:** What friction or issue occurs in real-world usage?
-- **Why Now:** Why is this enhancement required (lost context, security, automation ease)?
+## 1. Executive Summary & Operational Context
+- **Workspace / Host Environment:** [e.g. macOS 15.6, VS Code / Terminal]
+- **Summary:** [1-2 sentence overview of observed behavior or need]
 
-## 2. Proposed Architectural Enhancements
-- Specific CLI subcommands, flags, or data structure changes.
+## 2. Diagnostics & Observations (For Bugs / Regressions)
+- **Command Run:** ` + "`sec-agent <command> [flags]`" + `
+- **Expected:** [Usage text, no side effects, or specific return state]
+- **Actual:** [Unexpected execution, error output, or silent skip]
+- **Impact / Security Rationale:** [Why this matters, e.g. token budget, security barrier, operator confusion]
+
+## 3. Proposed Enhancements / Desired Behavior
+- Specific CLI subcommand, flag, or architectural adjustments.
 - Example CLI commands and output formats.
 
-## 3. Real-World Usecases & Impact
+## 4. Real-World Usecases & Impact
 - Hardware/Network device management (routers, switches, firewalls).
 - AI agent workflow integration ease.`)
 		return

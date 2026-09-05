@@ -477,8 +477,8 @@ func initRegistry() {
 			Name:        "migrate-v2",
 			Category:    "Backup & Migration",
 			Description: "Upgrade vault(s) to v2.0 Dual-Slot with BIP39 recovery key",
-			Usage:       "sec migrate-v2 [--dry-run]",
-			Flags:       []string{"--dry-run"},
+			Usage:       "sec migrate-v2 [--dry-run] [--all-profiles]",
+			Flags:       []string{"--dry-run", "--all-profiles"},
 			Handler:     handleMigrateV2,
 		},
 		{

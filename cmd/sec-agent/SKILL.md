@@ -1,10 +1,10 @@
 ---
 name: sec-agent-integration
 description: Use the sec-agent CLI utility to start background daemons, store secrets, run applications in isolated environments, migrate dotenv files, install AI skills, inspect snapshots, and manage backups.
-version: v2.8.0
+version: v2.9.0
 ---
 
-# sec-agent Secrets Management Integration (v2.8.0)
+# sec-agent Secrets Management Integration (v2.9.0)
 
 This skill enables AI coding agents and autonomous assistants to use the `sec-agent` CLI tool (v1.9.4+) to securely retrieve credentials, run application build/test/terraform pipelines in isolated process environments, migrate dotenv configuration files, install integration skills across IDEs, inspect point-in-time snapshots (`sec snapshot`), and manage KeePassXC `.kdbx` backups on macOS.
 
@@ -344,6 +344,13 @@ When initializing secret management for a new workspace or migrating an existing
 1. **One-Click Shell Installer (`sec init-shell`)**: Run `sec-agent init-shell [zsh|bash]` to idempotently add `alias sec=sec-agent` and Zsh/Bash autocompletions to `~/.zshrc` or `~/.bashrc`.
 2. **Workspace Profile Binding Indicator**: `sec status` and `sec status --all` display explicit active workspace `.secrc` bindings (e.g. `📌 Active Workspace Profile: router-ax3600-prod (bound via .secrc in /path/to/dir)`).
 3. **Auto-Target Workspace Profile in `sec copy`**: Omit `--to-profile` when passing `--from-profile` to automatically target the active workspace profile bound by `.secrc`.
+
+### 5.23. CLI Safety, Profile Ergonomics & AI Skill Drift Detection (v2.9.0)
+1. **Universal Subcommand `--help`**: Any subcommand executed with `--help`, `-h`, or `help` (e.g. `sec-agent migrate-v2 --help`, `sec-agent rm --help`) exits 0 and prints usage without side effects or mutations.
+2. **Dynamic Shell Profile Binding**: Unlocking a named profile via `sec-agent --profile <name> open` outputs `export SEC_PROFILE="<name>"` alongside `SEC_SESSION_TOKEN` so subshells bind to the target profile immediately. Tip advice dynamically reflects `eval $(sec --profile <name> open)`.
+3. **Unified Profile Discovery**: `sec-agent status --all` inspects all physical vault stores (`secrets_*.enc`) via `store.ListVaultFiles()` regardless of configuration subdirectories.
+4. **Transparent Multi-Profile Migration**: `sec-agent migrate-v2` supports `--profile <name>` and `--all-profiles`, logs individual vault progress, and displays actionable Keychain access warnings.
+5. **AI Skill Drift Diagnostics**: `sec-agent status` and `sec-agent version` automatically warn when an installed AI assistant skill document trails the CLI version and recommend running `sec-agent skill update`.
 
 ---
 

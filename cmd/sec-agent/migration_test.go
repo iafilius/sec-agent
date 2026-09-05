@@ -233,3 +233,63 @@ EMPTY_VAL=
 		t.Errorf("expected version output to contain daemon version %s, got:\n%s", Version, verStr)
 	}
 }
+
+func TestMigrateV2AllProfilesFlagAndReporting(t *testing.T) {
+	// 1. Verify that registry.go includes --all-profiles for migrate-v2
+	spec, ok := findCommandSpec("migrate-v2")
+	if !ok {
+		t.Fatalf("migrate-v2 command spec not found in registry")
+	}
+
+	hasAllProfilesFlag := false
+	for _, f := range spec.Flags {
+		if f == "--all-profiles" {
+			hasAllProfilesFlag = true
+			break
+		}
+	}
+	if !hasAllProfilesFlag {
+		t.Errorf("expected migrate-v2 spec to include --all-profiles flag, got flags: %v", spec.Flags)
+	}
+
+	// 2. Test --dry-run with --all-profiles in temp config dir
+	tempDir, err := os.MkdirTemp("", "sec-migrate-all-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	origConfig := os.Getenv("SEC_CONFIG_DIR")
+	os.Setenv("SEC_CONFIG_DIR", tempDir)
+	defer func() {
+		if origConfig != "" {
+			os.Setenv("SEC_CONFIG_DIR", origConfig)
+		} else {
+			os.Unsetenv("SEC_CONFIG_DIR")
+		}
+	}()
+
+	// Create two dummy vault files: secrets.enc (default) and secrets_prod.enc (prod)
+	_ = os.WriteFile(filepath.Join(tempDir, "secrets.enc"), []byte("default-payload"), 0600)
+	_ = os.WriteFile(filepath.Join(tempDir, "secrets_prod.enc"), []byte("prod-payload"), 0600)
+
+	// Build binary to test CLI output
+	binPath := "./sec_test_bin_migrate"
+	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build binary: %v, output: %s", err, string(out))
+	}
+	defer os.Remove(binPath)
+
+	dryRunCmd := exec.Command(binPath, "migrate-v2", "--dry-run", "--all-profiles")
+	dryRunCmd.Env = append(os.Environ(), "SEC_CONFIG_DIR="+tempDir)
+	out, err := dryRunCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("migrate-v2 --dry-run --all-profiles failed: %v, output: %s", err, string(out))
+	}
+	outStr := string(out)
+	if !strings.Contains(outStr, "profile=default") || !strings.Contains(outStr, "profile=prod") {
+		t.Errorf("expected dry-run with --all-profiles to show both default and prod, got:\n%s", outStr)
+	}
+}
+

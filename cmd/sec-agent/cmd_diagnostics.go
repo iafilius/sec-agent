@@ -162,6 +162,15 @@ func handleStatusAll() {
 	profilesMap := make(map[string]bool)
 	profilesMap["default"] = true
 
+	// Discover profiles from vault files (.enc) via SSOT
+	if vaults, vErr := store.ListVaultFiles(); vErr == nil {
+		for _, v := range vaults {
+			if v.Profile != "" {
+				profilesMap[v.Profile] = true
+			}
+		}
+	}
+
 	profilesDir := filepath.Join(cfgDir, "profiles")
 	if entries, err := os.ReadDir(profilesDir); err == nil {
 		for _, e := range entries {
@@ -349,17 +358,26 @@ func handleStatus(profile string, args []string) {
 	fmt.Printf("Socket Path:          %s\n", info.SocketPath)
 	fmt.Printf("Database Path:        %s\n", info.StorePath)
 	fmt.Printf("Database Size:        %d bytes\n", info.StoreSizeBytes)
+	var staleSkills []InstalledSkillEntry
 	if manifest, mErr := loadSkillManifest(); mErr == nil && manifest != nil && len(manifest.Skills) > 0 {
 		syncStatus := "synced"
 		for _, s := range manifest.Skills {
 			if s.Version != Version {
 				syncStatus = "updates available"
-				break
+				staleSkills = append(staleSkills, s)
 			}
 		}
 		fmt.Printf("AI Skills:            %d active (%s, %s)\n", len(manifest.Skills), Version, syncStatus)
 	} else {
 		fmt.Println("AI Skills:            none active")
+	}
+
+	if len(staleSkills) > 0 {
+		fmt.Println("\n\033[33m⚠️  AI SKILL VERSION DRIFT DETECTED:\033[0m")
+		for _, s := range staleSkills {
+			fmt.Printf("   • %s (%s): installed doc (%s) trails CLI (%s)\n", s.Target, s.Scope, s.Version, Version)
+		}
+		fmt.Println("   ▶ Remediation: Run 'sec-agent skill update' to refresh your AI assistant instructions!")
 	}
 
 	if isLegacy {

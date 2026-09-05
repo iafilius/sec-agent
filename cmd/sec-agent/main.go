@@ -32,7 +32,7 @@ var embeddedSkillBytes []byte
 
 var jsonErrors bool
 var (
-	Version   = "v2.8.0"
+	Version   = "v2.9.0"
 	BuildDate = "unknown"
 )
 
@@ -159,6 +159,15 @@ func loadWorkspaceConfigVerbose() (*WorkspaceConfig, string, string) {
 }
 
 func isInteractiveTerminal() bool {
+	if os.Getenv("CI") != "" ||
+		os.Getenv("CONTINUOUS_INTEGRATION") != "" ||
+		os.Getenv("NONINTERACTIVE") == "1" ||
+		os.Getenv("DEBIAN_FRONTEND") == "noninteractive" ||
+		os.Getenv("VSCODE_AGENT_ENABLED") != "" ||
+		os.Getenv("COPILOT_AGENT") != "" ||
+		os.Getenv("AI_AGENT") != "" {
+		return false
+	}
 	return term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
 }
 
@@ -499,7 +508,12 @@ func handleOpen(profile string, args []string) {
 	}
 	fmt.Fprintln(os.Stderr, msg)
 	fmt.Fprintf(os.Stdout, "export SEC_SESSION_TOKEN=%q\n", lastToken)
-	fmt.Fprintln(os.Stderr, "Tip: Run 'eval $(sec open)' to automatically authorize this shell session.")
+	if profile != "default" && profile != "" {
+		fmt.Fprintf(os.Stdout, "export SEC_PROFILE=%q\n", profile)
+		fmt.Fprintf(os.Stderr, "Tip: Run 'eval $(sec --profile %s open)' to automatically authorize this profile in your shell session.\n", profile)
+	} else {
+		fmt.Fprintln(os.Stderr, "Tip: Run 'eval $(sec open)' to automatically authorize this shell session.")
+	}
 }
 
 func handleGen(profile string, path string, args []string) {
@@ -653,6 +667,16 @@ func handleVersion(profile string) {
 		fmt.Println("Or perform a full re-authentication restart:")
 		fmt.Println("  sec restart")
 	}
+
+	if manifest, mErr := loadSkillManifest(); mErr == nil && manifest != nil {
+		for _, s := range manifest.Skills {
+			if s.Version != Version {
+				fmt.Printf("\n⚠️  AI SKILL DRIFT: %s (%s) installed doc (%s) trails CLI (%s)\n", s.Target, s.Scope, s.Version, Version)
+				fmt.Println("Run 'sec-agent skill update' to refresh AI assistant instructions.")
+				break
+			}
+		}
+	}
 }
 
 func runDaemon(profile string) {
@@ -725,6 +749,28 @@ func parseExpiration(expStr string) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("unknown expiration format %q (use e.g. '30d', '12h', or 'YYYY-MM-DD')", expStr)
 }
 
+func printCommandHelp(spec CommandSpec) {
+	fmt.Printf("Command:     %s\n", spec.Name)
+	if len(spec.Aliases) > 0 {
+		fmt.Printf("Aliases:     %s\n", strings.Join(spec.Aliases, ", "))
+	}
+	if spec.Category != "" {
+		fmt.Printf("Category:    %s\n", spec.Category)
+	}
+	if spec.Description != "" {
+		fmt.Printf("Description: %s\n", spec.Description)
+	}
+	if spec.Usage != "" {
+		fmt.Printf("\nUsage:\n  %s\n", spec.Usage)
+	}
+	if len(spec.Flags) > 0 {
+		fmt.Printf("\nAvailable Flags:\n")
+		for _, f := range spec.Flags {
+			fmt.Printf("  %s\n", f)
+		}
+	}
+}
+
 func main() {
 	profile, cleanArgs := extractGlobalFlags()
 	os.Args = cleanArgs
@@ -732,6 +778,12 @@ func main() {
 	if len(os.Args) >= 2 {
 		cmd := os.Args[1]
 		if cmd == "help" || cmd == "--help" || cmd == "-h" {
+			if len(os.Args) >= 3 {
+				if subSpec, ok := findCommandSpec(os.Args[2]); ok {
+					printCommandHelp(subSpec)
+					os.Exit(0)
+				}
+			}
 			isJSONFormat := false
 			for i := 0; i < len(os.Args); i++ {
 				if os.Args[i] == "--format" && i+1 < len(os.Args) && os.Args[i+1] == "json" {
@@ -766,6 +818,15 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", cmdName)
 		printUsage()
 		os.Exit(1)
+	}
+
+	// Universal Subcommand Help Interceptor:
+	// Guarantees that passing --help, -h, or help to ANY subcommand is a pure read-only no-op.
+	for _, a := range os.Args[2:] {
+		if a == "--help" || a == "-h" || a == "help" {
+			printCommandHelp(spec)
+			os.Exit(0)
+		}
 	}
 
 	spec.Handler(profile, os.Args[2:])

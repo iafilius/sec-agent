@@ -1,10 +1,10 @@
 ---
 name: sec-agent-integration
 description: Use the sec-agent CLI utility to start background daemons, store secrets, run applications in isolated environments, migrate dotenv files, install AI skills, inspect snapshots, and manage backups.
-version: v2.8.0
+version: v2.9.0
 ---
 
-# sec-agent Secrets Management Integration (v2.8.0)
+# sec-agent Secrets Management Integration (v2.9.0)
 
 This skill enables AI coding agents and autonomous assistants to use the `sec-agent` CLI tool (v1.9.4+) to securely retrieve credentials, run application build/test/terraform pipelines in isolated process environments, migrate dotenv configuration files, install integration skills across IDEs, inspect point-in-time snapshots (`sec snapshot`), and manage KeePassXC `.kdbx` backups on macOS.
 
@@ -208,13 +208,38 @@ sec-agent lease revoke $lease_token
 ```
 Delegate temporary credential access to subagents with **zero credential lingering**.
 
-### 5.8. Real-Time Secret Redaction (`sec-agent run`)
+### 5.8. Real-Time Secret Redaction & Inline `sec://` Placeholders (`sec-agent run`)
 ```bash
 sec-agent run -- make testacc
 sec-agent run --allow-keys VCO_URL,VCO_TOKEN -- make test-unit
+
+# Inline URI replacement: In-memory argument replacement for legacy tools requiring password flags (-p)
+sec-agent run -- ./legacy_tool -p "sec://db/password"
 ```
 
-### 5.8. Ephemeral SSH Agent & Passphrase Injection (`sec-agent run --ssh-key`)
+### 5.9. Streamlined Remote SSH Automation (`sec-agent ssh`)
+```bash
+# Direct SSH connection with automated in-memory ephemeral agent
+sec-agent ssh root@192.168.31.1 -- "uci show"
+
+# Named target resolution via .secrc ("ssh_targets")
+sec-agent ssh router -- "uci show"
+```
+
+### 5.9. Companion Metadata Environment Variables
+Stored secret metadata (e.g. `subnet=192.168.31.0/24`, `gateway=192.168.31.1`) is automatically exported as companion environment variables (`<KEY>_<META_KEY>`) during `sec run`:
+- `ROUTER_ADMIN="<secret>"`
+- `ROUTER_ADMIN_SUBNET="192.168.31.0/24"`
+- `ROUTER_ADMIN_GATEWAY="192.168.31.1"`
+
+### 5.10. Remote Configuration Drift Verification (`sec-agent check --remote`)
+```bash
+# Compare live remote OpenWrt UCI settings or environment variables against vault keys (zero plaintext leak)
+sec-agent check --remote root@192.168.31.1 --uci wireless.wifinet_dev_5g.key=wifi/passphrase
+sec-agent check --remote deploy@api.prod --env API_TOKEN=prod/api_token
+```
+
+### 5.11. Ephemeral SSH Agent & Passphrase Injection (`sec-agent run --ssh-key`)
 ```bash
 # Launch ephemeral in-memory SSH agent with vault passphrase for SSH/Rsync/Git automation
 sec-agent run --ssh-key ~/.ssh/id_ed25519_ax3600 \
@@ -222,14 +247,14 @@ sec-agent run --ssh-key ~/.ssh/id_ed25519_ax3600 \
               -- ssh root@192.168.31.1 "uci show"
 ```
 
-### 5.9. Stdin Stream Injection & Redaction (`sec-agent stream`)
+### 5.12. Stdin Stream Injection & Redaction (`sec-agent stream`)
 ```bash
 # Evaluate {{key_path}} placeholders in-memory without process table (ps aux) exposure
 sec-agent stream --template "uci set network.wg0.private_key='{{router-ax3600-prod/nordvpn/private_key}}'" \
   | ssh root@192.168.31.1 "cat | sh"
 ```
 
-### 5.10. Multi-Profile Inheritance (`extends` in `.secrc`)
+### 5.13. Multi-Profile Inheritance (`extends` in `.secrc`)
 ```json
 {
   "profile": "router-ax3600-prod",
@@ -238,7 +263,7 @@ sec-agent stream --template "uci set network.wg0.private_key='{{router-ax3600-pr
 ```
 Child profiles recursively fallback to parent profile stores for missing keys.
 
-### 5.11. Dynamic Flag Aliases (`flag_aliases` in `.secrc`)
+### 5.14. Dynamic Flag Aliases (`flag_aliases` in `.secrc`)
 ```json
 {
   "flag_aliases": {
@@ -248,7 +273,7 @@ Child profiles recursively fallback to parent profile stores for missing keys.
 ```
 Automatically injects credentials as command-line flags into subprocess arguments.
 
-### 5.12. Network Host Reachability Guard (`sec-agent check --ping-host`)
+### 5.15. Network Host Reachability Guard (`sec-agent check --ping-host`)
 ```bash
 # Pre-flight TCP connectivity verification (<50ms)
 sec-agent check --ping-host 192.168.31.1:22
@@ -319,6 +344,13 @@ When initializing secret management for a new workspace or migrating an existing
 1. **One-Click Shell Installer (`sec init-shell`)**: Run `sec-agent init-shell [zsh|bash]` to idempotently add `alias sec=sec-agent` and Zsh/Bash autocompletions to `~/.zshrc` or `~/.bashrc`.
 2. **Workspace Profile Binding Indicator**: `sec status` and `sec status --all` display explicit active workspace `.secrc` bindings (e.g. `📌 Active Workspace Profile: router-ax3600-prod (bound via .secrc in /path/to/dir)`).
 3. **Auto-Target Workspace Profile in `sec copy`**: Omit `--to-profile` when passing `--from-profile` to automatically target the active workspace profile bound by `.secrc`.
+
+### 5.23. CLI Safety, Profile Ergonomics & AI Skill Drift Detection (v2.9.0)
+1. **Universal Subcommand `--help`**: Any subcommand executed with `--help`, `-h`, or `help` (e.g. `sec-agent migrate-v2 --help`, `sec-agent rm --help`) exits 0 and prints usage without side effects or mutations.
+2. **Dynamic Shell Profile Binding**: Unlocking a named profile via `sec-agent --profile <name> open` outputs `export SEC_PROFILE="<name>"` alongside `SEC_SESSION_TOKEN` so subshells bind to the target profile immediately. Tip advice dynamically reflects `eval $(sec --profile <name> open)`.
+3. **Unified Profile Discovery**: `sec-agent status --all` inspects all physical vault stores (`secrets_*.enc`) via `store.ListVaultFiles()` regardless of configuration subdirectories.
+4. **Transparent Multi-Profile Migration**: `sec-agent migrate-v2` supports `--profile <name>` and `--all-profiles`, logs individual vault progress, and displays actionable Keychain access warnings.
+5. **AI Skill Drift Diagnostics**: `sec-agent status` and `sec-agent version` automatically warn when an installed AI assistant skill document trails the CLI version and recommend running `sec-agent skill update`.
 
 ---
 

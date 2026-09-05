@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"secure_secrets/internal/backup"
+	"secure_secrets/internal/biometrics"
 	"secure_secrets/internal/config"
 	"secure_secrets/internal/crypto"
 	"secure_secrets/internal/daemon"
@@ -382,11 +383,21 @@ func readMnemonicFromTTY() string {
 func handleMigrateV2(profile string, args []string) {
 	dryRun := false
 	forceReroll := false
+	allProfiles := false
 	seedInput := ""
 	for i := 0; i < len(args); i++ {
 		a := args[i]
+		if a == "--help" || a == "-h" || a == "help" {
+			if spec, ok := findCommandSpec("migrate-v2"); ok {
+				printCommandHelp(spec)
+			}
+			return
+		}
 		if a == "--dry-run" {
 			dryRun = true
+		}
+		if a == "--all-profiles" || a == "--all" {
+			allProfiles = true
 		}
 		if a == "--force" || a == "--reroll" || a == "-f" {
 			forceReroll = true
@@ -406,7 +417,7 @@ func handleMigrateV2(profile string, args []string) {
 		}
 	}
 
-	if !isInteractiveTerminal() && seedInput == "" {
+	if !dryRun && !isInteractiveTerminal() && seedInput == "" {
 		fmt.Fprintln(os.Stderr, "🔒 SECURITY: migrate-v2 requires an interactive TTY.")
 		os.Exit(78)
 	}
@@ -423,6 +434,9 @@ func handleMigrateV2(profile string, args []string) {
 
 	var pending, alreadyV2 []store.VaultFileInfo
 	for _, v := range vaults {
+		if !allProfiles && profile != "default" && profile != "" && v.Profile != profile {
+			continue
+		}
 		if v.IsV2 && !forceReroll && seedInput == "" {
 			alreadyV2 = append(alreadyV2, v)
 		} else {
@@ -434,6 +448,9 @@ func handleMigrateV2(profile string, args []string) {
 		fmt.Println()
 		fmt.Printf("Found %d vault file(s) in config directory:\n\n", len(vaults))
 		for _, v := range vaults {
+			if !allProfiles && profile != "default" && profile != "" && v.Profile != profile {
+				continue
+			}
 			status := "⬜ v1.0 — would upgrade"
 			if v.IsV2 {
 				status = "✅ v2.0 — already upgraded"
@@ -450,6 +467,12 @@ func handleMigrateV2(profile string, args []string) {
 
 	mnemonic := seedInput
 	if mnemonic == "" {
+		if os.Getenv("SEC_TEST_MODE") != "1" {
+			if !biometrics.Authenticate("Authorize v2.0 Dual-Slot Vault Migration") {
+				fmt.Fprintln(os.Stderr, "❌ Touch ID biometric authorization required for vault migration.")
+				os.Exit(1)
+			}
+		}
 		m, err := crypto.GenerateMnemonic()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "❌ Failed to generate recovery mnemonic: %v\n", err)
@@ -506,11 +529,14 @@ func handleMigrateV2(profile string, args []string) {
 
 		masterKey, mkErr := keychain.Get(kcSvc, kcAcc)
 		if mkErr != nil || len(masterKey) == 0 {
+			fmt.Fprintf(os.Stderr, "  ⚠️  Cannot access Keychain master key for profile %q: %v\n", vaultInfo.Profile, mkErr)
+			fmt.Fprintf(os.Stderr, "     Run 'sec-agent --profile %s open' first, then re-run migration.\n", vaultInfo.Profile)
 			continue
 		}
 
 		slot1, wrapErr := store.WrapMasterKey(mnemonic, masterKey)
 		if wrapErr != nil {
+			fmt.Fprintf(os.Stderr, "  ❌ Failed to wrap master key for profile %q: %v\n", vaultInfo.Profile, wrapErr)
 			store.ZeroBytes(masterKey)
 			continue
 		}
@@ -519,6 +545,7 @@ func handleMigrateV2(profile string, args []string) {
 		if store.IsV2Vault(vaultInfo.Path) {
 			existingEnv, readErr := store.ReadVaultEnvelope(vaultInfo.Path)
 			if readErr != nil {
+				fmt.Fprintf(os.Stderr, "  ❌ Failed to read vault envelope for profile %q: %v\n", vaultInfo.Profile, readErr)
 				store.ZeroBytes(masterKey)
 				continue
 			}
@@ -526,6 +553,7 @@ func handleMigrateV2(profile string, args []string) {
 		} else {
 			data, readErr := os.ReadFile(vaultInfo.Path) // #nosec G304
 			if readErr != nil {
+				fmt.Fprintf(os.Stderr, "  ❌ Failed to read vault file for profile %q: %v\n", vaultInfo.Profile, readErr)
 				store.ZeroBytes(masterKey)
 				continue
 			}
@@ -547,6 +575,7 @@ func handleMigrateV2(profile string, args []string) {
 			Payload:       rawPayload,
 		}
 		if writeErr := store.WriteVaultEnvelope(vaultInfo.Path, env); writeErr != nil {
+			fmt.Fprintf(os.Stderr, "  ❌ Failed to write vault envelope for profile %q: %v\n", vaultInfo.Profile, writeErr)
 			store.ZeroBytes(masterKey)
 			continue
 		}
@@ -554,11 +583,16 @@ func handleMigrateV2(profile string, args []string) {
 		_ = keychain.Set(kcSvc, kcAcc, masterKey)
 		store.ZeroBytes(masterKey)
 		evictStaleDaemon(vaultInfo.Profile)
+		fmt.Printf("  ✅ Profile %-20s upgraded to v2.0 Dual-Slot format\n", vaultInfo.Profile)
 		succeeded++
 	}
 
 	_ = store.MigrateStageRemove()
-	fmt.Printf("\n✅ Successfully upgraded %d vault(s) to v2.0 Dual-Slot format.\n", succeeded)
+	if succeeded > 0 {
+		fmt.Printf("\n✅ Successfully upgraded %d vault(s) to v2.0 Dual-Slot format.\n", succeeded)
+	} else {
+		fmt.Fprintln(os.Stderr, "\n❌ No vaults were upgraded. Review the warnings above.")
+	}
 }
 
 func handleSessionRecover(profile string) {
