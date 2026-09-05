@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -397,6 +398,75 @@ func TestSkillManifestLegacyMigration(t *testing.T) {
 	if _, err := os.Stat(migratedPath); err != nil {
 		t.Errorf("expected skills_manifest.json to be created after legacy migration, got err: %v", err)
 	}
+
+	// In non-interactive test mode, legacy skills.json should be cleaned up automatically
+	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+		t.Errorf("expected legacy skills.json to be cleaned up after migration, but it still exists")
+	}
+}
+
+func TestCleanupObsoleteSkillsJson(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "sec-agent-cleanup-skills-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	origConfig := os.Getenv("SEC_CONFIG_DIR")
+	os.Setenv("SEC_CONFIG_DIR", tmpDir)
+	defer func() {
+		if origConfig != "" {
+			os.Setenv("SEC_CONFIG_DIR", origConfig)
+		} else {
+			os.Unsetenv("SEC_CONFIG_DIR")
+		}
+	}()
+
+	legacyPath := filepath.Join(tmpDir, "skills.json")
+	if err := os.WriteFile(legacyPath, []byte(`{"version":"v2.4.4","skills":[]}`), 0600); err != nil {
+		t.Fatalf("failed to write skills.json: %v", err)
+	}
+
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	handleCleanup("default", true)
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, r)
+	output := buf.String()
+
+	if !strings.Contains(output, "skills.json (obsolete legacy manifest)") {
+		t.Errorf("expected dry-run to identify skills.json, got: %s", output)
+	}
+
+	if _, err := os.Stat(legacyPath); err != nil {
+		t.Errorf("skills.json should not be deleted during dry-run: %v", err)
+	}
+
+	r2, w2, _ := os.Pipe()
+	os.Stdout = w2
+
+	handleCleanup("default", false)
+
+	w2.Close()
+	os.Stdout = oldStdout
+
+	var buf2 bytes.Buffer
+	_, _ = io.Copy(&buf2, r2)
+	output2 := buf2.String()
+
+	if !strings.Contains(output2, "[✓ REMOVED]") {
+		t.Errorf("expected actual cleanup to report removal, got: %s", output2)
+	}
+
+	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+		t.Errorf("skills.json should be deleted after cleanup, but still exists")
+	}
 }
 
 func TestSkillUpdatePreservesEntryPath(t *testing.T) {
@@ -450,7 +520,7 @@ func TestSkillUpdatePreservesEntryPath(t *testing.T) {
 
 	handleSkill("default", []string{"update"})
 
-	// Verify targetFile was updated with v2.9.0 copilot quick reference
+	// Verify targetFile was updated with v2.9.1 copilot quick reference
 	updatedContent, err := os.ReadFile(targetFile)
 	if err != nil {
 		t.Fatalf("failed to read updated file: %v", err)

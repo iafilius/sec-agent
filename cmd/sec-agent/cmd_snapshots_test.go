@@ -297,6 +297,7 @@ func TestSnapshotProfileVisibilityAndAutoRepair(t *testing.T) {
 
 	cfgDir := filepath.Join(tmpDir, ".config", "sec-agent")
 	_ = os.MkdirAll(cfgDir, 0700)
+	t.Setenv("SEC_CONFIG_DIR", cfgDir)
 
 	masterKey, err := crypto.GenerateRandomKey()
 	if err != nil {

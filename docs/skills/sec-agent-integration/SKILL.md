@@ -1,10 +1,10 @@
 ---
 name: sec-agent-integration
 description: Use the sec-agent CLI utility to start background daemons, store secrets, run applications in isolated environments, migrate dotenv files, install AI skills, inspect snapshots, and manage backups.
-version: v2.9.0
+version: v2.9.1
 ---
 
-# sec-agent Secrets Management Integration (v2.9.0)
+# sec-agent Secrets Management Integration (v2.9.1)
 
 This skill enables AI coding agents and autonomous assistants to use the `sec-agent` CLI tool (v1.9.4+) to securely retrieve credentials, run application build/test/terraform pipelines in isolated process environments, migrate dotenv configuration files, install integration skills across IDEs, inspect point-in-time snapshots (`sec snapshot`), and manage KeePassXC `.kdbx` backups on macOS.
 
@@ -61,14 +61,14 @@ sec-agent doctor
 
 ## 2. Multi-IDE Skill Installer & Manifest Auto-Sync (`sec-agent skill`)
 
-`sec-agent` embeds its canonical `SKILL.md` directly inside the Go binary via `//go:embed` and tracks installed skill target locations in `~/.config/sec-agent/skills.json`.
+`sec-agent` embeds its canonical `SKILL.md` directly inside the Go binary via `//go:embed` and tracks installed skill target locations in `~/.config/sec-agent/skills_manifest.json`.
 
 ### 2.1. Skill Subcommands & Multi-IDE Target Matrix
 ```bash
 # Install AI skill for a specific IDE target and scope
 sec-agent skill install --target <target> [--scope global|workspace]
 
-# View status of installed skills tracked in skills.json manifest
+# View status of installed skills tracked in skills_manifest.json
 sec-agent skill status
 
 # Update all manifest-tracked skills to current binary version
@@ -87,9 +87,9 @@ sec-agent skill update
 | `claude` | `workspace` | `.claude/skills/sec-agent/SKILL.md` |
 | `windsurf` | `workspace` | `.windsurfrules` |
 
-### 2.2. Automatic Upgrade Sync (`skills.json`)
-When `sec-agent` is updated (e.g. via `brew upgrade sec-agent`), the next CLI execution compares `skills.json` manifest version with binary `Version` and automatically updates installed skill files across all tracked IDE locations in-place, printing:
-`[sec-agent] Automatically upgraded AI agent skills (v1.9.1) across N location(s).`
+### 2.2. Automatic Upgrade Sync (`skills_manifest.json`)
+When `sec-agent` is updated (e.g. via `brew upgrade sec-agent`), the next CLI execution compares `skills_manifest.json` manifest version with binary `Version` and automatically updates installed skill files across all tracked IDE locations in-place, printing:
+`[sec-agent] Automatically upgraded AI agent skills (v2.9.0) across N location(s).`
 
 ---
 

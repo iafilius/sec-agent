@@ -26,6 +26,59 @@ type SkillManifest struct {
 	Skills  []InstalledSkillEntry `json:"skills"`
 }
 
+func retireLegacySkillsJson(cfgDir string, m *SkillManifest) {
+	legacyPath := filepath.Join(cfgDir, "skills.json")
+	// #nosec G304 G703
+	legacyData, err := os.ReadFile(legacyPath)
+	if err != nil {
+		return // File does not exist
+	}
+
+	// Ensure any skills in legacyData are merged into m
+	if m != nil {
+		var legacyM SkillManifest
+		if json.Unmarshal(legacyData, &legacyM) == nil && len(legacyM.Skills) > 0 {
+			changed := false
+			for _, legEntry := range legacyM.Skills {
+				found := false
+				for _, curEntry := range m.Skills {
+					if curEntry.Target == legEntry.Target && curEntry.Scope == legEntry.Scope {
+						found = true
+						break
+					}
+				}
+				if !found {
+					m.Skills = append(m.Skills, legEntry)
+					changed = true
+				}
+			}
+			if changed {
+				_ = saveSkillManifest(m)
+			}
+		}
+	}
+
+	if isInteractiveTerminal() {
+		fmt.Fprintf(os.Stderr, "\n[sec-agent] Notice: Found obsolete legacy manifest %s (superseded by skills_manifest.json).\n", legacyPath)
+		fmt.Fprintf(os.Stderr, "Remove obsolete legacy file? [Y/n]: ")
+		var resp string
+		if _, scanErr := fmt.Scanln(&resp); scanErr == nil {
+			resp = strings.TrimSpace(strings.ToLower(resp))
+			if resp == "n" || resp == "no" {
+				fmt.Fprintln(os.Stderr, "[sec-agent] Retained legacy file. You can remove it later with 'sec cleanup'.")
+				return
+			}
+		}
+		if rmErr := os.Remove(legacyPath); rmErr == nil {
+			fmt.Fprintf(os.Stderr, "[sec-agent] [✓] Removed obsolete legacy manifest: %s\n", legacyPath)
+		}
+	} else {
+		if rmErr := os.Remove(legacyPath); rmErr == nil {
+			fmt.Fprintf(os.Stderr, "[sec-agent] Notice: Cleaned up obsolete legacy manifest (%s). Active manifest is skills_manifest.json.\n", legacyPath)
+		}
+	}
+}
+
 func loadSkillManifest() (*SkillManifest, error) {
 	cfgDir, err := config.GetConfigDir()
 	if err != nil {
@@ -35,13 +88,14 @@ func loadSkillManifest() (*SkillManifest, error) {
 	// #nosec G304 G703
 	data, err := os.ReadFile(manifestPath)
 	if err != nil {
-		// Fallback: check legacy skills.json and auto-migrate
+		// Fallback: check legacy skills.json, auto-migrate, and clean up
 		legacyPath := filepath.Join(cfgDir, "skills.json")
 		// #nosec G304 G703
 		if legacyData, lErr := os.ReadFile(legacyPath); lErr == nil {
 			var m SkillManifest
 			if json.Unmarshal(legacyData, &m) == nil && len(m.Skills) > 0 {
 				_ = saveSkillManifest(&m)
+				retireLegacySkillsJson(cfgDir, &m)
 				return &m, nil
 			}
 		}
@@ -51,6 +105,7 @@ func loadSkillManifest() (*SkillManifest, error) {
 	if err := json.Unmarshal(data, &m); err != nil {
 		return nil, err
 	}
+	retireLegacySkillsJson(cfgDir, &m)
 	return &m, nil
 }
 
@@ -898,7 +953,9 @@ func handleCleanup(profile string, dryRun bool) {
 
 		isOrphanedLock := (strings.HasSuffix(name, ".sock") || strings.HasSuffix(name, ".pid") || strings.HasSuffix(name, ".tmp"))
 
-		if isBackupSnapshot {
+		isLegacySkillsManifest := (name == "skills.json")
+
+		if isBackupSnapshot || isLegacySkillsManifest {
 			legacyBakFiles = append(legacyBakFiles, path)
 			freedBytes += info.Size()
 		} else if isOrphanedLock {
@@ -918,12 +975,16 @@ func handleCleanup(profile string, dryRun bool) {
 	if len(legacyBakFiles) > 0 {
 		fmt.Printf("\n📁 Legacy (v1.0) & Rolling Backup Snapshots Identified (%d items):\n", len(legacyBakFiles))
 		for _, f := range legacyBakFiles {
+			suffix := ""
+			if strings.HasSuffix(f, "skills.json") {
+				suffix = " (obsolete legacy manifest)"
+			}
 			if dryRun {
-				fmt.Printf("  • [DRY-RUN WOULD REMOVE] %s\n", f)
+				fmt.Printf("  • [DRY-RUN WOULD REMOVE] %s%s\n", f, suffix)
 			} else {
 				// #nosec G703
 				if err := os.Remove(f); err == nil {
-					fmt.Printf("  • [✓ REMOVED] %s\n", f)
+					fmt.Printf("  • [✓ REMOVED] %s%s\n", f, suffix)
 				} else {
 					fmt.Printf("  • [❌ FAILED TO REMOVE] %s: %v\n", f, err)
 				}
