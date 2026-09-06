@@ -134,14 +134,34 @@ func handleStatusQuick(profile string) {
 	mode := info.Mode()
 	perms := mode.Perm()
 
+	var activeSkillPath string
+	skillSynced := false
+	if manifest, mErr := loadSkillManifest(); mErr == nil && manifest != nil && len(manifest.Skills) > 0 {
+		for _, s := range manifest.Skills {
+			if s.Path != "" {
+				activeSkillPath = s.Path
+				if s.Version == Version {
+					skillSynced = true
+				}
+				break
+			}
+		}
+	}
+
 	if jsonErrors {
-		data, _ := json.MarshalIndent(map[string]interface{}{
+		resMap := map[string]interface{}{
 			"success":      true,
 			"profile":      profile,
 			"socket_path":  socketPath,
 			"socket_perms": fmt.Sprintf("%04o", perms),
 			"status":       "ACTIVE",
-		}, "", "  ")
+		}
+		if activeSkillPath != "" {
+			resMap["skill_path"] = activeSkillPath
+			resMap["skill_version"] = Version
+			resMap["skill_synced"] = skillSynced
+		}
+		data, _ := json.MarshalIndent(resMap, "", "  ")
 		fmt.Println(string(data))
 		return
 	}
@@ -151,6 +171,13 @@ func handleStatusQuick(profile string) {
 	fmt.Printf("[✓] Socket Path:    %s\n", socketPath)
 	fmt.Printf("[✓] File Perms:     %04o (Strict)\n", perms)
 	fmt.Println("[✓] Socket Status:  ACTIVE (IPC socket file present)")
+	if activeSkillPath != "" {
+		syncMsg := "Synced"
+		if !skillSynced {
+			syncMsg = "Update Available"
+		}
+		fmt.Printf("[✓] AI Skill Doc:   %s (%s: %s)\n", activeSkillPath, Version, syncMsg)
+	}
 }
 
 func handleStatusAll() {

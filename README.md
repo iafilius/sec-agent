@@ -110,7 +110,7 @@ brew install sec-agent
 Download the latest pre-compiled, macOS Hardened Runtime signed binary tarball from [GitHub Releases](https://github.com/iafilius/sec-agent/releases/latest):
 ```bash
 # Extract and install binary to /usr/local/bin
-tar -xzf sec-agent_v1.9.1_darwin_arm64.tar.gz
+tar -xzf sec-agent_v2.10.0_darwin_arm64.tar.gz
 sudo mv sec-agent /usr/local/bin/
 ```
 
@@ -196,37 +196,63 @@ eval $(sec open)
 # Prompt: Touch ID request to authorize keychain access
 ```
 
-### 2. Store and Retrieve Secrets
+### 2. Guided Profile Provisioning (`sec profile new`)
+Create a completely isolated profile vault in a single step with Touch ID (Slot 0) and offline 24-word recovery seed (Slot 1):
+```bash
+# Interactively generate dual-slot vault and bind workspace .secrc
+sec profile new router-ax3600-prod
+
+# Inspect status of all discovered profile stores on disk
+sec profile ls
+```
+
+### 3. Store and Retrieve Secrets
 ```bash
 # 1. Interactive Hidden Prompt (RECOMMENDED - No Shell History / ps aux leakage)
 sec set app-secrets/db-pass
 # Enter secret value: [hidden]
 # Re-enter secret value: [hidden]
 
-# 2. Pipe from Stdin
-cat secret.txt | sec set app-secrets/db-pass --stdin
+# 2. Pipe from Stdin (trailing newlines trimmed automatically)
+echo "secret-value" | sec set app-secrets/db-pass --stdin
 
-# 3. Direct Positional Value
+# 3. Pipe Multiline Secrets (e.g. PEM private keys, TLS certs) preserving exact bytes
+cat id_ed25519 | sec set ssh/key --stdin --no-trim
+
+# 4. Direct Positional Value
 sec set app-secrets/db-pass "my-super-secret-password"
 ```
 
 > [!TIP]
 > **Shell History & Process List Security**: Passing secret values directly as CLI command-line positional arguments can be recorded in shell history (`.zsh_history`, `.bash_history`) or inspected by non-root OS processes via `ps aux`. For sensitive production keys, **always use the interactive prompt (`sec set <path>`) or piped stdin (`--stdin`)**.
 
-### 3. Run Applications (Frictionless Injection & Granular Scoping)
-Instead of sourcing `.env` files, execute commands directly in a wrapped environment. `sec` automatically translates paths like `app-secrets/db-pass` to uppercase environment variables (`APP_SECRETS_DB_PASS`):
+### 4. Run Applications with Dynamic Stream Redaction (`sec run --redact`)
+Instead of sourcing `.env` files, execute commands directly in a wrapped environment. Secrets are dynamically replaced with `[REDACTED_BY_SEC]` in stdout/stderr using sliding-window buffer streaming to prevent log leaks:
 ```bash
-# Execute test process with secrets injected & auto-redacted in logs
-sec run -- go test -v ./...
+# Execute test process with secrets injected & buffer-boundary-aware redaction
+sec run --redact -- go test -v ./...
 
 # Restrict injection strictly to specified keys (Principle of Least Privilege for AI subagents)
-sec run --allow-keys VCO_URL,VCO_ENTERPRISE_ID -- make test-unit
+sec run --allow-keys VCO_URL,VCO_ENTERPRISE_ID --redact -- make test-unit
 
 # Inspect injection plan without executing command or prompting Touch ID
 sec run --dry-run -- make testacc
 ```
 
-### 4. Automated Token Rotation & Expiring Inventory
+### 5. Native Pure Go SSH Client & Target Wizard (`sec ssh`)
+Connect to remote nodes or execute remote commands with vault authentication without requiring external `sshpass`:
+```bash
+# Interactively configure remote target into vault and workspace .secrc
+sec ssh init router --host 192.168.31.1 --user root
+
+# Connect to named target from .secrc ("ssh_targets")
+sec ssh router
+
+# Execute remote non-interactive command under vault password authentication
+sec ssh router -- uci show wireless
+```
+
+### 6. Automated Token Rotation & Expiring Inventory
 Register rotation hooks to rotate tokens in seconds and inspect expiring keys:
 ```bash
 # Register token with custom rotation hook command
@@ -241,7 +267,7 @@ sec rotate velocloud-provider-dev/vco_token
 sec ls --expiring 14d
 ```
 
-### 5. Native Cross-Profile Secret Copy & Workspace Auto-Open
+### 7. Native Cross-Profile Secret Copy & Workspace Auto-Open
 Safely copy credentials across vault profile stores in memory without shell process leaks, and unlock workspace profiles in a single Touch ID prompt:
 ```bash
 # Copy a secret from default profile to router-ax3600-prod profile
@@ -251,7 +277,7 @@ sec copy wifi/passphrase router/wifi_passphrase --from-profile default --to-prof
 eval $(sec open)
 ```
 
-### 6. Global Workstation Status & Entropy Linter
+### 8. Global Workstation Status & Entropy Linter
 Single-pane-of-glass status dump and side-channel safe entropy audit:
 ```bash
 # Global status matrix across all vault profiles & background daemons
@@ -261,7 +287,7 @@ sec status --all
 sec check --scan-weak
 ```
 
-### 7. Lock Session
+### 9. Lock Session
 Wipe decrypted credentials from system memory and lock the daemon:
 ```bash
 sec lock

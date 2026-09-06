@@ -30,9 +30,10 @@ func ZeroBytes(b []byte) { zeroBytes(b) }
 
 // VaultFileInfo describes a discovered vault file in the config directory.
 type VaultFileInfo struct {
-	Path    string // absolute path to the .enc file
-	Profile string // derived profile name (e.g. "default", "dev", "prod")
-	IsV2    bool   // true if already in v2.0 format
+	Path     string // absolute path to the .enc file
+	Profile  string // derived profile name (e.g. "default", "dev", "prod")
+	IsV2     bool   // true if in JSON envelope format (starts with '{')
+	HasSlot1 bool   // true if Slot1 BIP39 recovery key is enrolled and non-empty
 }
 
 // ListVaultFiles scans the sec-agent config directory and returns all *.enc vault files.
@@ -66,10 +67,19 @@ func ListVaultFiles() ([]VaultFileInfo, error) {
 			continue // skip unknown .enc files (e.g. temp files)
 		}
 
+		isV2 := IsV2Vault(absPath)
+		hasSlot1 := false
+		if isV2 {
+			if env, err := ReadVaultEnvelope(absPath); err == nil && env != nil {
+				hasSlot1 = env.HasSlot1()
+			}
+		}
+
 		vaults = append(vaults, VaultFileInfo{
-			Path:    absPath,
-			Profile: profile,
-			IsV2:    IsV2Vault(absPath),
+			Path:     absPath,
+			Profile:  profile,
+			IsV2:     isV2,
+			HasSlot1: hasSlot1,
 		})
 	}
 	return vaults, nil
@@ -112,17 +122,23 @@ type VaultEnvelope struct {
 	Payload []byte `json:"payload"`
 }
 
+// HasSlot1 returns true if the envelope contains an enrolled, non-empty Slot 1 recovery key.
+func (env *VaultEnvelope) HasSlot1() bool {
+	return env != nil && env.Slot1 != nil && len(env.Slot1.WrappedKey) > 0
+}
+
 // IsV2Vault returns true if the file at path is a v2.0 VaultEnvelope.
 func IsV2Vault(path string) bool {
 	// #nosec G304
-	f, err := os.Open(path)
-	if err != nil {
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) == 0 || data[0] != '{' {
 		return false
 	}
-	defer f.Close()
-	buf := make([]byte, 1)
-	n, _ := f.Read(buf)
-	return n > 0 && buf[0] == '{'
+	var env VaultEnvelope
+	if err := json.Unmarshal(data, &env); err != nil {
+		return false
+	}
+	return env.SchemaVersion == SchemaV2
 }
 
 // ReadVaultEnvelope reads and parses the v2.0 JSON envelope from disk.

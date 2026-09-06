@@ -433,3 +433,113 @@ func TestRelabelCommandAndExportIntegration(t *testing.T) {
 		t.Errorf("cleared alias should default to VELOCLOUD_TOKEN, got %q", exportKey2)
 	}
 }
+
+func TestSetStdinAndNoTrim(t *testing.T) {
+	profile := "stdin-trim-test-profile"
+	sockPath, _ := config.GetSocketPath(profile)
+	dbPath, _ := store.GetStorePath(profile)
+	os.Remove(sockPath)
+	os.Remove(dbPath)
+	defer os.Remove(sockPath)
+	defer os.Remove(dbPath)
+
+	d, err := daemon.NewDaemon(profile, 30*time.Second, Version)
+	if err != nil {
+		t.Fatalf("failed to create daemon: %v", err)
+	}
+	token := "stdin-test-token"
+	d.SetSessionTokenForTest(token)
+	d.SetMasterKeyForTest([]byte("11111111111111111111111111111111"))
+	d.SetSecretsForTest(map[string]store.SecretEntry{})
+	go func() {
+		_ = d.Start()
+	}()
+	defer d.Stop()
+
+	// Wait for socket
+	for i := 0; i < 20; i++ {
+		if _, err := os.Stat(sockPath); err == nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	origToken := os.Getenv("SEC_SESSION_TOKEN")
+	os.Setenv("SEC_SESSION_TOKEN", token)
+	defer func() {
+		if origToken != "" {
+			os.Setenv("SEC_SESSION_TOKEN", origToken)
+		} else {
+			os.Unsetenv("SEC_SESSION_TOKEN")
+		}
+	}()
+
+	// 1. Test --stdin with trailing newline (should be trimmed by default)
+	oldStdin := os.Stdin
+	rPipe, wPipe, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("failed to create pipe: %v", err)
+	}
+	_, _ = wPipe.WriteString("secret-token-123\n")
+	_ = wPipe.Close()
+	os.Stdin = rPipe
+
+	handleSet(profile, "api/token", "", []string{"--stdin"})
+	os.Stdin = oldStdin
+
+	// Verify api/token in daemon
+	c, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatalf("failed to dial daemon: %v", err)
+	}
+	_ = json.NewEncoder(c).Encode(daemon.IPCRequest{
+		Action: "get",
+		Path:   "api/token",
+		Token:  token,
+	})
+	var getResp daemon.IPCResponse
+	_ = json.NewDecoder(c).Decode(&getResp)
+	c.Close()
+
+	if !getResp.Success {
+		t.Fatalf("get secret failed: %s", getResp.Error)
+	}
+	if getResp.Value != "secret-token-123" {
+		t.Errorf("expected trimmed value 'secret-token-123', got %q", getResp.Value)
+	}
+
+	// 2. Test --stdin --no-trim with trailing newline and spaces
+	rawCert := "-----BEGIN CERTIFICATE-----\r\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8A\r\n-----END CERTIFICATE-----\n\n"
+	rPipe2, wPipe2, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("failed to create pipe: %v", err)
+	}
+	_, _ = wPipe2.WriteString(rawCert)
+	_ = wPipe2.Close()
+	os.Stdin = rPipe2
+
+	handleSet(profile, "cert/raw", "", []string{"--stdin", "--no-trim"})
+	os.Stdin = oldStdin
+
+	// Verify cert/raw in daemon
+	c2, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatalf("failed to dial daemon: %v", err)
+	}
+	_ = json.NewEncoder(c2).Encode(daemon.IPCRequest{
+		Action: "get",
+		Path:   "cert/raw",
+		Token:  token,
+	})
+	var getResp2 daemon.IPCResponse
+	_ = json.NewDecoder(c2).Decode(&getResp2)
+	c2.Close()
+
+	if !getResp2.Success {
+		t.Fatalf("get secret failed: %s", getResp2.Error)
+	}
+	if getResp2.Value != rawCert {
+		t.Errorf("expected exact rawCert preserved, got %q", getResp2.Value)
+	}
+}
+

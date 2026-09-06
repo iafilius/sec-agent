@@ -1,4 +1,4 @@
-VERSION := v2.9.1
+VERSION := v2.10.0
 BUILD_DATE := $(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
 LDFLAGS := -ldflags "-X main.Version=$(VERSION) -X main.BuildDate=$(BUILD_DATE)"
 
@@ -98,7 +98,7 @@ sync:
 	@echo "=== Syncing core codebase and packages to publish/ ==="
 	cp -r cmd docs internal scripts publish/
 	rm -rf publish/docs/internal publish/docs/medium_article_*
-	cp -r Formula .github go.mod go.sum Makefile LICENSE README.md .gitignore publish/
+	cp -r Formula .github go.mod go.sum Makefile LICENSE README.md CHANGELOG.md .gitignore publish/
 	@echo "=== Running Privacy Audit & Sanity Build inside publish/ ==="
 	chmod +x scripts/privacy_audit.sh && ./scripts/privacy_audit.sh publish
 	cd publish && make build codesign && make sec-check && go test -v ./...

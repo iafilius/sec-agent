@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -268,20 +267,26 @@ func handleSet(profile string, path, value string, args []string) {
 	metadata := make(map[string]string)
 	expiresStr := ""
 	useStdin := false
+	noTrim := false
 
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--stdin" {
 			useStdin = true
+		} else if args[i] == "--no-trim" {
+			noTrim = true
 		}
 	}
 
 	if value == "-" || useStdin {
-		r := bufio.NewReader(os.Stdin)
-		input, err := r.ReadString('\n')
-		if err != nil && err != io.EOF {
-			fail("STDIN_READ_ERROR", fmt.Errorf("failed to read secret from stdin: %v", err), "")
+		data, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			fail("STDIN_READ_ERROR", fmt.Errorf("failed to read secret from stdin: %w", err), "")
 		}
-		value = strings.TrimRight(input, "\r\n")
+		if noTrim {
+			value = string(data)
+		} else {
+			value = strings.TrimRight(string(data), "\r\n")
+		}
 	} else if value == "" {
 		if !term.IsTerminal(int(os.Stdin.Fd())) {
 			fail("MISSING_ARGUMENT", fmt.Errorf("secret value required for %q. Pass value, pipe stdin (--stdin), or run interactively", path), "Usage: sec set <path> or echo val | sec set <path> --stdin")

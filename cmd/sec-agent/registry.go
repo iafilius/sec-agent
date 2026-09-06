@@ -83,11 +83,11 @@ func initRegistry() {
 			Name:        "set",
 			Category:    "Core Secrets",
 			Description: "Store a secret with optional comment and env alias",
-			Usage:       "sec set <path> [<value>] [--stdin] [--comment <comment>] [--meta key=value ...]",
-			Flags:       []string{"--comment", "--meta", "--stdin", "--env-alias"},
+			Usage:       "sec set <path> [<value>] [--stdin] [--no-trim] [--comment <comment>] [--meta key=value ...]",
+			Flags:       []string{"--comment", "--meta", "--stdin", "--no-trim", "--env-alias"},
 			Handler: func(profile string, args []string) {
 				if len(args) < 1 {
-					fmt.Fprintln(os.Stderr, "Usage: sec set <path> [<value>] [--stdin] [--comment <comment>] [--meta key=value ...]")
+					fmt.Fprintln(os.Stderr, "Usage: sec set <path> [<value>] [--stdin] [--no-trim] [--comment <comment>] [--meta key=value ...]")
 					os.Exit(1)
 				}
 				path := args[0]
@@ -244,8 +244,18 @@ func initRegistry() {
 			Name:        "profile",
 			Category:    "Profiles & Scope",
 			Description: "Inspect or configure secret profiles & environment tier",
-			Usage:       "sec profile [set-env dev|dta|staging|prod]",
+			Usage:       "sec profile [new <name> [--seed <mnemonic>]] [ls] [set-env dev|dta|staging|prod]",
 			Subcommands: []SubcommandSpec{
+				{
+					Name:        "new",
+					Description: "Create a new named profile with Dual-Slot Touch ID and BIP39 recovery seed",
+					Flags:       []string{"--seed", "--secrc", "--no-secrc"},
+				},
+				{
+					Name:        "ls",
+					Aliases:     []string{"list"},
+					Description: "List all discovered profiles on disk",
+				},
 				{
 					Name:        "set-env",
 					Description: "Set profile environment tier (dev, dta, staging, prod)",
@@ -273,15 +283,22 @@ func initRegistry() {
 			Name:        "run",
 			Category:    "Profiles & Scope",
 			Description: "Execute process with scoped secrets injected",
-			Usage:       "sec run [--group <p>] [--allow-keys k1,k2] [--ssh-key <path>] -- <cmd>",
-			Flags:       []string{"--group", "--allow-keys", "--ssh-key", "--ssh-passphrase-key", "--dry-run", "--no-redact"},
+			Usage:       "sec run [--redact] [--group <p>] [--allow-keys k1,k2] [--ssh-key <path>] -- <cmd>",
+			Flags:       []string{"--redact", "--group", "--allow-keys", "--ssh-key", "--ssh-passphrase-key", "--dry-run", "--no-redact"},
 			Handler:     handleRun,
 		},
 		{
 			Name:        "ssh",
 			Category:    "Profiles & Scope",
-			Description: "Execute remote SSH commands or interactive sessions under ephemeral agent protection",
-			Usage:       "sec ssh [target | user@host] [--ssh-key <path>] [--port <p>] [-- <cmd...>]",
+			Description: "Execute remote SSH commands or interactive sessions under vault authentication",
+			Usage:       "sec ssh [init <target>] | [<target> | user@host] [--ssh-key <path>] [--port <p>] [-- <cmd...>]",
+			Subcommands: []SubcommandSpec{
+				{
+					Name:        "init",
+					Description: "Configure remote SSH credentials for target node into vault and .secrc",
+					Flags:       []string{"--host", "--user", "--port", "--password", "--key", "--secrc", "--no-secrc"},
+				},
+			},
 			Flags:       []string{"--ssh-key", "--ssh-passphrase-key", "--port"},
 			Handler:     handleSSH,
 		},

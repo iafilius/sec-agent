@@ -293,3 +293,59 @@ func TestMigrateV2AllProfilesFlagAndReporting(t *testing.T) {
 	}
 }
 
+func TestIncompleteVaultDetectionInMigrateV2(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "sec-incomplete-vault-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	origConfig := os.Getenv("SEC_CONFIG_DIR")
+	os.Setenv("SEC_CONFIG_DIR", tempDir)
+	defer func() {
+		if origConfig != "" {
+			os.Setenv("SEC_CONFIG_DIR", origConfig)
+		} else {
+			os.Unsetenv("SEC_CONFIG_DIR")
+		}
+	}()
+
+	// Write an incomplete v2 vault: schema_version: 2.0 but slot1 is null/missing
+	incompleteVaultJSON := `{
+  "schema_version": "2.0",
+  "created_at": "2026-09-06T12:00:00Z",
+  "slot1": null,
+  "payload": "dGVzdC1pbmNvbXBsZXRlLXBheWxvYWQ="
+}`
+	vaultPath := filepath.Join(tempDir, "secrets_testinc.enc")
+	if err := os.WriteFile(vaultPath, []byte(incompleteVaultJSON), 0600); err != nil {
+		t.Fatalf("failed to write incomplete vault: %v", err)
+	}
+
+	binPath := "./sec_test_bin_inc_vault"
+	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build binary: %v, output: %s", err, string(out))
+	}
+	defer os.Remove(binPath)
+
+	// Run migrate-v2 --dry-run --profile testinc
+	dryRunCmd := exec.Command(binPath, "migrate-v2", "--dry-run", "--profile", "testinc")
+	dryRunCmd.Env = append(os.Environ(), "SEC_CONFIG_DIR="+tempDir)
+	out, err := dryRunCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("migrate-v2 --dry-run --profile testinc failed: %v, output: %s", err, string(out))
+	}
+
+	outStr := string(out)
+	if !strings.Contains(outStr, "incomplete (Slot 1 missing)") {
+		t.Errorf("expected dry-run output to identify incomplete vault with 'incomplete (Slot 1 missing)', got:\n%s", outStr)
+	}
+	if !strings.Contains(outStr, "1 pending migration") {
+		t.Errorf("expected dry-run output to indicate '1 pending migration', got:\n%s", outStr)
+	}
+	if strings.Contains(outStr, "All vaults are already at v2.0 Dual-Slot format") {
+		t.Errorf("expected dry-run output NOT to claim all vaults already at v2.0, got:\n%s", outStr)
+	}
+}
+

@@ -255,6 +255,7 @@ func syncInstalledSkillsIfOutdated() {
 		return
 	}
 	updatedCount := 0
+	var updatedPaths []string
 	for i, entry := range manifest.Skills {
 		targetPath := entry.Path
 		if targetPath == "" || !filepath.IsAbs(targetPath) {
@@ -272,12 +273,20 @@ func syncInstalledSkillsIfOutdated() {
 			manifest.Skills[i].Version = Version
 			manifest.Skills[i].Path = targetPath
 			updatedCount++
+			updatedPaths = append(updatedPaths, targetPath)
 		}
 	}
 	if updatedCount > 0 {
+		oldVer := manifest.Version
 		manifest.Version = Version
 		_ = saveSkillManifest(manifest)
-		fmt.Fprintf(os.Stderr, "[sec-agent] Automatically upgraded AI agent skills (%s) across %d location(s).\n", Version, updatedCount)
+		fmt.Fprintf(os.Stderr, "[sec-agent] ⚡ Upgraded AI agent skill from %s to %s across %d location(s):\n", oldVer, Version, updatedCount)
+		for _, p := range updatedPaths {
+			fmt.Fprintf(os.Stderr, "  • %s\n", p)
+		}
+		fmt.Fprintf(os.Stderr, "[sec-agent] ⚠️ ACTION REQUIRED FOR AI ASSISTANTS:\n")
+		fmt.Fprintf(os.Stderr, "  New commands and security protocols available! Please re-read your updated skill file now\n")
+		fmt.Fprintf(os.Stderr, "  using your file viewing tool (e.g., view_file) to refresh cached instructions.\n")
 	}
 }
 
@@ -629,17 +638,6 @@ fi`
 	fmt.Printf("💡 Run 'source %s' or open a new terminal tab to activate.\n", rcFile)
 }
 
-func handleFeedback(args []string) {
-	showJSON := false
-	showExample := false
-	for _, a := range args {
-		if a == "--json" {
-			showJSON = true
-		} else if a == "--example" || a == "-e" {
-			showExample = true
-		}
-	}
-
 // AgentExampleUseCaseDTO represents a structured feedback example item.
 type AgentExampleUseCaseDTO struct {
 	Component string `json:"component"`
@@ -654,13 +652,33 @@ type AgentRoadmapSuggestionDTO struct {
 	Details string `json:"details"`
 }
 
+// AgentImpactTierDTO represents an impact severity classification.
+type AgentImpactTierDTO struct {
+	Tier        string `json:"tier"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
 // AgentFeedbackDTO represents structured agent feedback guidelines.
 type AgentFeedbackDTO struct {
 	Tool                      string                      `json:"tool"`
 	DesiredFeedbackCategories []string                    `json:"desired_feedback_categories"`
+	ImpactTierDefinitions     []AgentImpactTierDTO        `json:"impact_tier_definitions"`
+	SketchFormatGuide         []string                    `json:"sketch_format_guide"`
 	ExampleUsecases           []AgentExampleUseCaseDTO    `json:"example_usecases"`
 	FutureRoadmapSuggestions  []AgentRoadmapSuggestionDTO `json:"future_roadmap_suggestions"`
 }
+
+func handleFeedback(args []string) {
+	showJSON := false
+	showExample := false
+	for _, a := range args {
+		if a == "--json" {
+			showJSON = true
+		} else if a == "--example" || a == "-e" {
+			showExample = true
+		}
+	}
 
 	if showJSON {
 		resp := AgentFeedbackDTO{
@@ -670,6 +688,34 @@ type AgentFeedbackDTO struct {
 				"missing_cli_flags_or_subcommands",
 				"ai_skill_integration_friction",
 				"security_and_compliance_gaps",
+				"client_editor_and_assistant_telemetry",
+			},
+			ImpactTierDefinitions: []AgentImpactTierDTO{
+				{
+					Tier:        "Tier 0",
+					Name:        "Critical Security Leak / Exposure",
+					Description: "Plaintext secrets surfaced in terminal history, process tables, stderr, logs, or LLM context window.",
+				},
+				{
+					Tier:        "Tier 1",
+					Name:        "Architectural / Privilege Boundary Violation",
+					Description: "Session isolation failure, daemon IPC unauthorized access, or cross-profile data leakage.",
+				},
+				{
+					Tier:        "Tier 2",
+					Name:        "Agent Friction / Stall",
+					Description: "Interactive prompt blocking headless subagent, missing CLI flag requiring workarounds, or ambiguous failure exit.",
+				},
+				{
+					Tier:        "Tier 3",
+					Name:        "Ergonomics / Token Budget Waste",
+					Description: "Excessive verbose output exhausting LLM context window, misleading documentation, or autocompletion drift.",
+				},
+			},
+			SketchFormatGuide: []string{
+				"Use ASCII or Mermaid to illustrate caller sequence, trust boundaries, and points of friction.",
+				"Keep diagrams linear, top-to-bottom, and <= 42 characters wide for clean terminal and mobile rendering.",
+				"Clearly mark Expected vs. Actual friction point (e.g. [X] Stall or [!] Leak).",
 			},
 			ExampleUsecases: []AgentExampleUseCaseDTO{
 				{
@@ -702,25 +748,47 @@ type AgentFeedbackDTO struct {
 
 # Feedback / Proposal: [Feature or Fix Name]
 **Target Repository:** secure_secrets
-**Target Component:** sec-agent CLI & Embedded AI Skill
+**Target Component:** CLI | Daemon IPC | AI Skill | Injection Engine
 **Evaluation Date:** ` + time.Now().Format("2006-01-02") + `
-**Severity / Urgency:** 🔴 Critical | 🟠 High | 🟡 Medium | 🟢 Enhancement
 
-## 1. Executive Summary & Operational Context
-- **Workspace / Host Environment:** [e.g. macOS 15.6, VS Code / Terminal]
-- **Summary:** [1-2 sentence overview of observed behavior or need]
+## Impact & Friction Classification
+- [ ] 🔴 Tier 0: Critical Security Leak (Plaintext in terminal/logs/LLM context)
+- [ ] 🟠 Tier 1: Architectural / Boundary Violation (Cross-profile bleed, IPC bypass)
+- [ ] 🟡 Tier 2: Agent Friction / Stall (Headless prompt blocked, missing CLI flag)
+- [ ] 🟢 Tier 3: Ergonomics / Token Budget Waste (Excessive output lines, doc drift)
 
-## 2. Diagnostics & Observations (For Bugs / Regressions)
+## 1. Client & Environment Fingerprint
+- **Code Editor & Version:** [e.g. VS Code 1.93.1, Cursor 0.40, JetBrains 2026.2]
+- **AI Assistant & Extension:** [e.g. GitHub Copilot Chat v0.20, Claude Code, Antigravity]
+- **Active Model:** [e.g. Claude 3.5 Sonnet, GPT-4o, Gemini 1.5 Pro]
+- **Execution Mode:** [e.g. Headless Subagent Tool Call, Integrated PTY, Native macOS Terminal]
+- **sec-agent Version:** [e.g. v2.9.1 darwin/arm64]
+
+## 2. Situation Sketch (Workflow / Architecture Diagram)
+<!-- Please sketch the flow, failure point, or trust boundary using ASCII (<= 42 chars wide) or Mermaid -->
+` + "```" + `
+[Editor / AI Agent]
+        │
+        ▼ (runs tool command)
+  [sec-agent ...]
+        │
+        ├──> [Expected Behavior]: ...
+        │
+        └──! [Actual Failure / Friction]: ...
+` + "```" + `
+
+## 3. Diagnostics & Observations (For Bugs / Regressions)
 - **Command Run:** ` + "`sec-agent <command> [flags]`" + `
-- **Expected:** [Usage text, no side effects, or specific return state]
+- **Expected:** [Usage text, zero side effects, or specific return state]
 - **Actual:** [Unexpected execution, error output, or silent skip]
-- **Impact / Security Rationale:** [Why this matters, e.g. token budget, security barrier, operator confusion]
+- **Security & Friction Weighting:** [Why this matters, e.g. token budget, security boundary, operator confusion]
 
-## 3. Proposed Enhancements / Desired Behavior
+## 4. Proposed Enhancements & Desired Behavior
 - Specific CLI subcommand, flag, or architectural adjustments.
+- Client-specific tuning (if behavior needs to be adjusted for a specific IDE/agent).
 - Example CLI commands and output formats.
 
-## 4. Real-World Usecases & Impact
+## 5. Real-World Usecases & Impact
 - Hardware/Network device management (routers, switches, firewalls).
 - AI agent workflow integration ease.`)
 		return
@@ -731,9 +799,10 @@ type AgentFeedbackDTO struct {
 sec-agent welcomes actionable feedback and feature proposals! To help us continuously improve sec-agent:
 
 1. 🎯 What Information We Desire:
+   • Client & Runtime Context: Code editor, AI assistant/extension, model, and terminal/tool execution mode.
+   • Situation Sketch: ASCII flow or sequence diagram depicting components and the exact point of friction/failure.
+   • Impact & Security Weighting: Critical security leak vs. agent stall vs. token budget waste.
    • Operational Usecases: Real-world workflows (e.g. router SSH/HTTPS endpoints, Dropbear flags, KeePassXC custom fields).
-   • Workflow Friction: Missing CLI flags, unexpected shell formatting, or AI skill integration gaps.
-   • Security & Governance: Memory safety, session scoping, audit log requirements.
 
 2. 💡 Why Feature Motivators Matter:
    • Documenting the exact problem, operational context, and business rationale ensures new features are built to high quality standards without scope drift.

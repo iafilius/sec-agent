@@ -11,8 +11,11 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"secure_secrets/internal/biometrics"
 	"secure_secrets/internal/config"
+	"secure_secrets/internal/crypto"
 	"secure_secrets/internal/daemon"
+	"secure_secrets/internal/keychain"
 	"secure_secrets/internal/store"
 	"sort"
 	"strings"
@@ -191,7 +194,15 @@ func handleProfile(profile string, args []string) {
 		return
 	}
 
-	if args[0] == "set-env" {
+	subcmd := args[0]
+	switch subcmd {
+	case "new", "create", "init":
+		handleProfileNew(args[1:])
+		return
+	case "ls", "list":
+		handleProfileList()
+		return
+	case "set-env":
 		if len(args) < 2 {
 			fmt.Fprintln(os.Stderr, "Usage: sec profile set-env <dev|dta|staging|prod> [--profile <name>]")
 			os.Exit(1)
@@ -218,8 +229,199 @@ func handleProfile(profile string, args []string) {
 		return
 	}
 
-	fmt.Fprintln(os.Stderr, "Usage: sec profile [set-env dev|dta|staging|prod]")
+	fmt.Fprintln(os.Stderr, "Usage: sec profile [new <name> [--seed <mnemonic>]] [ls] [set-env dev|dta|staging|prod]")
 	os.Exit(1)
+}
+
+func handleProfileList() {
+	vaults, err := store.ListVaultFiles()
+	if err != nil {
+		fail("LIST_PROFILES_ERROR", fmt.Errorf("failed to discover profiles: %w", err), "")
+	}
+	if len(vaults) == 0 {
+		fmt.Println("No profiles discovered.")
+		return
+	}
+	fmt.Println("Discovered Profiles:")
+	for _, v := range vaults {
+		status := "v1.0"
+		if v.IsV2 {
+			if v.HasSlot1 {
+				status = "v2.0 Dual-Slot"
+			} else {
+				status = "v2.0 (Slot 1 missing)"
+			}
+		}
+		fmt.Printf("  • %-20s [%s]\n", v.Profile, status)
+	}
+}
+
+func handleProfileNew(args []string) {
+	var name string
+	seedInput := ""
+	autoSecrc := false
+	noSecrc := false
+
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--help" || a == "-h" || a == "help" {
+			fmt.Println("Usage: sec profile new <name> [--seed <mnemonic>] [--secrc|--no-secrc]")
+			fmt.Println("\nCreate a new named profile with Dual-Slot Touch ID (Slot 0) and BIP39 recovery seed (Slot 1).")
+			return
+		}
+		if a == "--seed" && i+1 < len(args) {
+			seedInput = strings.Trim(args[i+1], `"'`)
+			i++
+		} else if strings.HasPrefix(a, "--seed=") {
+			seedInput = strings.Trim(strings.TrimPrefix(a, "--seed="), `"'`)
+		} else if a == "--secrc" {
+			autoSecrc = true
+		} else if a == "--no-secrc" {
+			noSecrc = true
+		} else if !strings.HasPrefix(a, "-") && name == "" {
+			name = a
+		}
+	}
+
+	if name == "" {
+		fmt.Fprintln(os.Stderr, "Usage: sec profile new <name> [--seed <mnemonic>] [--secrc|--no-secrc]")
+		os.Exit(1)
+	}
+
+	pName := store.ProfileName(name)
+	if err := pName.Validate(); err != nil {
+		fail("INVALID_PROFILE_NAME", fmt.Errorf("invalid profile name %q: %w", name, err), "Profile names must contain only alphanumeric characters, dashes, and underscores.")
+	}
+	if pName.String() == "default" {
+		fail("INVALID_PROFILE_NAME", fmt.Errorf("cannot create profile named 'default' (default profile already exists)"), "")
+	}
+
+	vaultPath := store.GetStorePathForProfile(pName.String())
+	// #nosec G304 G703
+	if _, err := os.Stat(vaultPath); err == nil {
+		fail("PROFILE_EXISTS", fmt.Errorf("profile %q already exists at %s", pName.String(), vaultPath), "Use 'sec open --profile "+pName.String()+"' to unlock this profile.")
+	}
+
+	if !isInteractiveTerminal() && seedInput == "" {
+		printInteractiveBlocker("sec-agent profile new "+pName.String(), "Profile creation enrolls Touch ID and a 24-word recovery seed")
+		os.Exit(78)
+	}
+
+	if os.Getenv("SEC_TEST_MODE") != "1" {
+		if !biometrics.Authenticate("Authorize Creation of Profile " + pName.String()) {
+			fmt.Fprintln(os.Stderr, "❌ Touch ID biometric authorization required for profile creation.")
+			os.Exit(1)
+		}
+	}
+
+	mnemonic := seedInput
+	if mnemonic == "" {
+		m, err := crypto.GenerateMnemonic()
+		if err != nil {
+			fail("CRYPTO_ERROR", fmt.Errorf("failed to generate recovery mnemonic: %w", err), "")
+		}
+		mnemonic = m
+		words := strings.Fields(mnemonic)
+		fmt.Printf("\n🔑 Your 24-word recovery mnemonic for profile %q (WRITE THIS DOWN NOW):\n", pName.String())
+		for i, w := range words {
+			fmt.Printf("  %2d. %-12s", i+1, w)
+			if (i+1)%4 == 0 {
+				fmt.Println()
+			}
+		}
+		fmt.Println()
+
+		fmt.Println("To confirm you have written down the mnemonic, please enter:")
+		verificationWords := []int{4, 12, 20}
+		for _, pos := range verificationWords {
+			fmt.Printf("  Word #%d: ", pos)
+			reader := bufio.NewReader(os.Stdin)
+			entered, _ := reader.ReadString('\n')
+			entered = strings.TrimSpace(strings.ToLower(entered))
+			expected := strings.ToLower(words[pos-1])
+			if entered != expected {
+				fmt.Fprintf(os.Stderr, "\n❌ Word #%d mismatch (expected %q, got %q). Aborting.\n", pos, expected, entered)
+				os.Exit(1)
+			}
+		}
+	} else {
+		if !crypto.MnemonicValid(mnemonic) {
+			fmt.Fprintln(os.Stderr, "❌ Provided seed phrase is not a valid 24-word BIP39 mnemonic.")
+			os.Exit(1)
+		}
+	}
+
+	getter, setter := keychain.GetKeychainAccessPair(pName.String())
+	masterKey, err := store.InitializeMasterKey(pName.String(), getter, setter)
+	if err != nil {
+		fail("KEYCHAIN_ERROR", fmt.Errorf("failed to initialize profile master key: %w", err), "")
+	}
+
+	slot1, wrapErr := store.WrapMasterKey(mnemonic, masterKey)
+	if wrapErr != nil {
+		store.ZeroBytes(masterKey)
+		fail("WRAP_ERROR", fmt.Errorf("failed to wrap recovery key: %w", wrapErr), "")
+	}
+
+	// Ensure empty store is initialized on disk if not yet present
+	// #nosec G304 G703
+	if _, statErr := os.Stat(vaultPath); os.IsNotExist(statErr) {
+		if saveErr := store.SaveStore(pName.String(), &store.EncryptedStore{Secrets: make(map[store.SecretKey]store.SecretEntry)}, masterKey); saveErr != nil {
+			store.ZeroBytes(masterKey)
+			fail("VAULT_INIT_ERROR", fmt.Errorf("failed to initialize vault file: %w", saveErr), "")
+		}
+	}
+
+	env, readErr := store.ReadVaultEnvelope(vaultPath)
+	if readErr != nil {
+		store.ZeroBytes(masterKey)
+		fail("VAULT_READ_ERROR", fmt.Errorf("failed to read created vault: %w", readErr), "")
+	}
+	env.Slot1 = slot1
+	env.UpgradedAt = time.Now().UTC()
+	if writeErr := store.WriteVaultEnvelope(vaultPath, env); writeErr != nil {
+		store.ZeroBytes(masterKey)
+		fail("VAULT_WRITE_ERROR", fmt.Errorf("failed to write complete Dual-Slot vault: %w", writeErr), "")
+	}
+	store.ZeroBytes(masterKey)
+	fmt.Printf("✅ Profile %q successfully created with Dual-Slot Touch ID + BIP39 recovery key!\n", pName.String())
+
+	if noSecrc {
+		return
+	}
+
+	var existingCfg string
+	for _, f := range []string{".secrc", ".secenv", ".sec.json"} {
+		if _, err := os.Stat(f); err == nil {
+			existingCfg = f
+			break
+		}
+	}
+	if existingCfg != "" {
+		fmt.Printf("ℹ️  Workspace already contains %s. Skipping .secrc creation.\n", existingCfg)
+		return
+	}
+
+	doWrite := autoSecrc
+	if !doWrite && isInteractiveTerminal() {
+		fmt.Printf("\nBind current workspace directory to profile %q via .secrc? [Y/n]: ", pName.String())
+		reader := bufio.NewReader(os.Stdin)
+		ans, _ := reader.ReadString('\n')
+		ans = strings.ToLower(strings.TrimSpace(ans))
+		if ans == "" || ans == "y" || ans == "yes" {
+			doWrite = true
+		}
+	}
+
+	if doWrite {
+		secrcData := fmt.Sprintf("{\n  \"profile\": %q\n}\n", pName.String())
+		// #nosec G304 G703
+		if err := os.WriteFile(filepath.Clean(".secrc"), []byte(secrcData), 0600); err != nil {
+			fmt.Fprintf(os.Stderr, "⚠️  Failed to write .secrc: %v\n", err)
+		} else {
+			fmt.Printf("✅ Created .secrc bound to profile %q\n", pName.String())
+		}
+	}
 }
 
 func handleEnv(profile string, args []string) {
@@ -299,17 +501,67 @@ func handleLoad(profile string, args []string) {
 type redactWriter struct {
 	target  io.Writer
 	secrets []string
+	buf     []byte
+	maxLen  int
+}
+
+func newRedactWriter(target io.Writer, secrets []string) *redactWriter {
+	max := 0
+	var validSecrets []string
+	for _, s := range secrets {
+		trimmed := strings.TrimSpace(s)
+		if len(trimmed) >= 4 {
+			validSecrets = append(validSecrets, trimmed)
+			if len(trimmed) > max {
+				max = len(trimmed)
+			}
+		}
+	}
+	return &redactWriter{
+		target:  target,
+		secrets: validSecrets,
+		maxLen:  max,
+	}
 }
 
 func (w *redactWriter) Write(p []byte) (n int, err error) {
-	out := string(p)
-	for _, sec := range w.secrets {
-		if len(sec) > 3 {
-			out = strings.ReplaceAll(out, sec, "[REDACTED_BY_SEC]")
-		}
+	if len(w.secrets) == 0 {
+		return w.target.Write(p)
 	}
-	_, err = w.target.Write([]byte(out))
+
+	w.buf = append(w.buf, p...)
+	out := string(w.buf)
+	for _, sec := range w.secrets {
+		out = strings.ReplaceAll(out, sec, "[REDACTED_BY_SEC]")
+	}
+
+	margin := w.maxLen - 1
+	if margin < 0 {
+		margin = 0
+	}
+	if len(out) <= margin {
+		w.buf = []byte(out)
+		return len(p), nil
+	}
+
+	safeLen := len(out) - margin
+	toFlush := out[:safeLen]
+	w.buf = []byte(out[safeLen:])
+	_, err = w.target.Write([]byte(toFlush))
 	return len(p), err
+}
+
+func (w *redactWriter) Flush() error {
+	if len(w.buf) == 0 {
+		return nil
+	}
+	out := string(w.buf)
+	for _, sec := range w.secrets {
+		out = strings.ReplaceAll(out, sec, "[REDACTED_BY_SEC]")
+	}
+	w.buf = nil
+	_, err := w.target.Write([]byte(out))
+	return err
 }
 
 func setupEphemeralSSHAgent(profile, keyPath, passphraseVaultKey string) (socketPath string, cleanup func(), err error) {
@@ -419,6 +671,8 @@ func handleRun(profile string, args []string) {
 			dryRun = true
 		} else if args[i] == "--no-redact" {
 			noRedact = true
+		} else if args[i] == "--redact" {
+			noRedact = false
 		} else if args[i] == "--ssh-key" && i+1 < len(args) {
 			sshKeyPath = args[i+1]
 			i++
@@ -616,12 +870,15 @@ func handleRun(profile string, args []string) {
 	subProcess := exec.Command(targetCmd, targetArgs...)
 	subProcess.Env = finalEnv
 
+	var stdoutRedact, stderrRedact *redactWriter
 	if noRedact {
 		subProcess.Stdout = os.Stdout
 		subProcess.Stderr = os.Stderr
 	} else {
-		subProcess.Stdout = &redactWriter{target: os.Stdout, secrets: secretValues}
-		subProcess.Stderr = &redactWriter{target: os.Stderr, secrets: secretValues}
+		stdoutRedact = newRedactWriter(os.Stdout, secretValues)
+		stderrRedact = newRedactWriter(os.Stderr, secretValues)
+		subProcess.Stdout = stdoutRedact
+		subProcess.Stderr = stderrRedact
 	}
 	subProcess.Stdin = os.Stdin
 
@@ -635,11 +892,19 @@ func handleRun(profile string, args []string) {
 		}
 	}()
 
-	if err := subProcess.Run(); err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
+	runErr := subProcess.Run()
+	if stdoutRedact != nil {
+		_ = stdoutRedact.Flush()
+	}
+	if stderrRedact != nil {
+		_ = stderrRedact.Flush()
+	}
+
+	if runErr != nil {
+		if exitErr, ok := runErr.(*exec.ExitError); ok {
 			os.Exit(exitErr.ExitCode())
 		}
-		fail("SUBPROCESS_EXEC_FAILED", fmt.Errorf("failed executing command %q: %v", targetCmd, err), "")
+		fail("SUBPROCESS_EXEC_FAILED", fmt.Errorf("failed executing command %q: %v", targetCmd, runErr), "")
 	}
 }
 

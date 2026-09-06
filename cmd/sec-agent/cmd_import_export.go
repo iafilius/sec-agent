@@ -359,9 +359,7 @@ func promptKdbxPassword() string {
 
 func readMnemonicFromTTY() string {
 	if !isInteractiveTerminal() {
-		fmt.Fprintln(os.Stderr, "🔒 SECURITY: Recovery mnemonic entry requires an interactive TTY.")
-		fmt.Fprintln(os.Stderr, "   Automated/script invocations cannot read the recovery mnemonic.")
-		fmt.Fprintln(os.Stderr, "   This prevents AI agents and scripts from inadvertently capturing your seed phrase.")
+		printInteractiveBlocker("sec-agent session recover", "Recovery mnemonic entry requires an interactive TTY to prevent scripts/agents from capturing seeds")
 		os.Exit(78)
 	}
 	fmt.Print("Enter 24-word recovery mnemonic: ")
@@ -418,7 +416,14 @@ func handleMigrateV2(profile string, args []string) {
 	}
 
 	if !dryRun && !isInteractiveTerminal() && seedInput == "" {
-		fmt.Fprintln(os.Stderr, "🔒 SECURITY: migrate-v2 requires an interactive TTY.")
+		cmdStr := "sec-agent migrate-v2"
+		if profile != "default" && profile != "" {
+			cmdStr += " --profile " + profile
+		}
+		if allProfiles {
+			cmdStr += " --all-profiles"
+		}
+		printInteractiveBlocker(cmdStr, "Vault migration enrolls a 24-word recovery seed requiring physical human verification")
 		os.Exit(78)
 	}
 
@@ -437,7 +442,8 @@ func handleMigrateV2(profile string, args []string) {
 		if !allProfiles && profile != "default" && profile != "" && v.Profile != profile {
 			continue
 		}
-		if v.IsV2 && !forceReroll && seedInput == "" {
+		isCompleteV2 := v.IsV2 && v.HasSlot1
+		if isCompleteV2 && !forceReroll && seedInput == "" {
 			alreadyV2 = append(alreadyV2, v)
 		} else {
 			pending = append(pending, v)
@@ -453,10 +459,15 @@ func handleMigrateV2(profile string, args []string) {
 			}
 			status := "⬜ v1.0 — would upgrade"
 			if v.IsV2 {
-				status = "✅ v2.0 — already upgraded"
+				if v.HasSlot1 {
+					status = "✅ v2.0 — Dual-Slot complete"
+				} else {
+					status = "⚠️  v2.0 — incomplete (Slot 1 missing)"
+				}
 			}
 			fmt.Printf("  [%s]  profile=%-28s  %s\n", status, v.Profile, v.Path)
 		}
+		fmt.Printf("\nSummary: %d pending migration, %d already complete.\n", len(pending), len(alreadyV2))
 		return
 	}
 
@@ -597,7 +608,11 @@ func handleMigrateV2(profile string, args []string) {
 
 func handleSessionRecover(profile string) {
 	if !isInteractiveTerminal() {
-		fmt.Fprintln(os.Stderr, "🔒 SECURITY: 'sec session recover' requires an interactive TTY.")
+		cmdStr := "sec-agent session recover"
+		if profile != "default" && profile != "" {
+			cmdStr += " --profile " + profile
+		}
+		printInteractiveBlocker(cmdStr, "Session recovery requires interactive TTY to enter recovery mnemonic")
 		os.Exit(78)
 	}
 

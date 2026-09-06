@@ -32,7 +32,7 @@ var embeddedSkillBytes []byte
 
 var jsonErrors bool
 var (
-	Version   = "v2.9.1"
+	Version   = "v2.10.0"
 	BuildDate = "unknown"
 )
 
@@ -94,6 +94,7 @@ type SSHTarget struct {
 	Port          int    `json:"port,omitempty"`
 	IdentityFile  string `json:"identity_file,omitempty"`
 	PassphraseKey string `json:"passphrase_key,omitempty"`
+	PasswordKey   string `json:"password_key,omitempty"`
 }
 
 type WorkspaceConfig struct {
@@ -169,6 +170,18 @@ func isInteractiveTerminal() bool {
 		return false
 	}
 	return term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
+}
+
+func printInteractiveBlocker(command string, reason string) {
+	fmt.Fprintln(os.Stderr, "+------------------------------------------+")
+	fmt.Fprintln(os.Stderr, "| 🔒 INTERACTIVE TERMINAL REQUIRED         |")
+	fmt.Fprintln(os.Stderr, "+------------------------------------------+")
+	if reason != "" {
+		fmt.Fprintf(os.Stderr, "  Reason: %s\n", reason)
+	}
+	fmt.Fprintln(os.Stderr, "  Please run this in your physical terminal:")
+	fmt.Fprintf(os.Stderr, "\n    %s\n\n", command)
+	fmt.Fprintln(os.Stderr, "+------------------------------------------+")
 }
 
 func extractGlobalFlags() (string, []string) {

@@ -92,6 +92,15 @@ func TestIsV2Vault(t *testing.T) {
 	if IsV2Vault(v1Path) {
 		t.Error("IsV2Vault should return false for binary-format file")
 	}
+
+	// Write binary file that starts with '{' (e.g. random AES-GCM nonce)
+	v1StartingWithBrace := filepath.Join(dir, "v1brace.enc")
+	if err := os.WriteFile(v1StartingWithBrace, []byte{'{', 0x99, 0x12, 0x00, 0x55}, 0600); err != nil {
+		t.Fatalf("WriteFile error: %v", err)
+	}
+	if IsV2Vault(v1StartingWithBrace) {
+		t.Error("IsV2Vault should return false for binary file starting with { byte")
+	}
 }
 
 // TestAtomicWriteVaultEnvelope verifies WriteVaultEnvelope creates an fsync'd file.

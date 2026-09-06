@@ -591,3 +591,244 @@ func TestStatusAndVersionSkillDriftAlerts(t *testing.T) {
 	}
 }
 
+func TestFeedbackTemplateAndSchema(t *testing.T) {
+	binPath := "./sec_test_bin_feedback"
+	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build binary: %v, output: %s", err, string(out))
+	}
+	defer os.Remove(binPath)
+
+	// 1. Test feedback --example
+	exCmd := exec.Command(binPath, "feedback", "--example")
+	exOut, err := exCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("feedback --example failed: %v, output: %s", err, string(exOut))
+	}
+	exStr := string(exOut)
+
+	requiredSnippets := []string{
+		"Client & Environment Fingerprint",
+		"Code Editor & Version:",
+		"AI Assistant & Extension:",
+		"Active Model:",
+		"Execution Mode:",
+		"Situation Sketch (Workflow / Architecture Diagram)",
+		"Tier 0: Critical Security Leak",
+		"Tier 1: Architectural / Boundary Violation",
+		"Tier 2: Agent Friction / Stall",
+		"Tier 3: Ergonomics / Token Budget Waste",
+	}
+	for _, snip := range requiredSnippets {
+		if !strings.Contains(exStr, snip) {
+			t.Errorf("expected feedback --example output to contain %q, got:\n%s", snip, exStr)
+		}
+	}
+
+	// 2. Test feedback --json
+	jsonCmd := exec.Command(binPath, "feedback", "--json")
+	jsonOut, err := jsonCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("feedback --json failed: %v, output: %s", err, string(jsonOut))
+	}
+
+	var dto AgentFeedbackDTO
+	if err := json.Unmarshal(jsonOut, &dto); err != nil {
+		t.Fatalf("failed to parse feedback JSON: %v, output: %s", err, string(jsonOut))
+	}
+
+	if dto.Tool != "sec-agent" {
+		t.Errorf("expected tool = 'sec-agent', got %q", dto.Tool)
+	}
+	if len(dto.ImpactTierDefinitions) != 4 {
+		t.Errorf("expected 4 impact tier definitions, got %d", len(dto.ImpactTierDefinitions))
+	}
+	if len(dto.SketchFormatGuide) == 0 {
+		t.Errorf("expected non-empty sketch_format_guide")
+	}
+
+	foundTelemetryCat := false
+	for _, cat := range dto.DesiredFeedbackCategories {
+		if cat == "client_editor_and_assistant_telemetry" {
+			foundTelemetryCat = true
+			break
+		}
+	}
+	if !foundTelemetryCat {
+		t.Errorf("expected client_editor_and_assistant_telemetry in desired categories, got: %v", dto.DesiredFeedbackCategories)
+	}
+}
+
+func TestSyncInstalledSkillsIfOutdated_UpgradeDirective(t *testing.T) {
+	tempDir := t.TempDir()
+	origConfig := os.Getenv("SEC_CONFIG_DIR")
+	os.Setenv("SEC_CONFIG_DIR", tempDir)
+	defer func() {
+		if origConfig != "" {
+			os.Setenv("SEC_CONFIG_DIR", origConfig)
+		} else {
+			os.Unsetenv("SEC_CONFIG_DIR")
+		}
+	}()
+
+	// Create skill target directory and file
+	skillDir := filepath.Join(tempDir, "skills", "sec-agent-integration")
+	if err := os.MkdirAll(skillDir, 0700); err != nil {
+		t.Fatalf("failed to create skillDir: %v", err)
+	}
+	skillFile := filepath.Join(skillDir, "SKILL.md")
+	if err := os.WriteFile(skillFile, []byte("---\nname: sec-agent-integration\nversion: v2.9.1\n---\nOld content"), 0600); err != nil {
+		t.Fatalf("failed to write skill file: %v", err)
+	}
+
+	manifest := &SkillManifest{
+		Version: "v2.9.1",
+		Skills: []InstalledSkillEntry{
+			{
+				Target:  "antigravity",
+				Scope:   "global",
+				Path:    skillFile,
+				Version: "v2.9.1",
+			},
+		},
+	}
+	if err := saveSkillManifest(manifest); err != nil {
+		t.Fatalf("failed to save manifest: %v", err)
+	}
+
+	// Capture stderr
+	oldStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	syncInstalledSkillsIfOutdated()
+
+	_ = w.Close()
+	os.Stderr = oldStderr
+
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, r)
+	errOutput := buf.String()
+
+	if !strings.Contains(errOutput, "[sec-agent] ⚡ Upgraded AI agent skill from v2.9.1 to "+Version) {
+		t.Errorf("expected upgrade notice in stderr, got:\n%s", errOutput)
+	}
+	if !strings.Contains(errOutput, "ACTION REQUIRED FOR AI ASSISTANTS") {
+		t.Errorf("expected action required notice in stderr, got:\n%s", errOutput)
+	}
+	if !strings.Contains(errOutput, skillFile) {
+		t.Errorf("expected updated skill path in stderr, got:\n%s", errOutput)
+	}
+
+	// Verify manifest version was updated to Version
+	updatedManifest, err := loadSkillManifest()
+	if err != nil {
+		t.Fatalf("failed to load updated manifest: %v", err)
+	}
+	if updatedManifest.Version != Version {
+		t.Errorf("expected manifest version %s, got %s", Version, updatedManifest.Version)
+	}
+	if updatedManifest.Skills[0].Version != Version {
+		t.Errorf("expected skill entry version %s, got %s", Version, updatedManifest.Skills[0].Version)
+	}
+
+	// Verify skill file was overwritten with Version
+	data, err := os.ReadFile(skillFile)
+	if err != nil {
+		t.Fatalf("failed to read updated skill file: %v", err)
+	}
+	if !strings.Contains(string(data), "version: "+Version) {
+		t.Errorf("expected skill file to contain version: %s, got:\n%s", Version, string(data))
+	}
+}
+
+func TestHandleStatusQuick_SkillReporting(t *testing.T) {
+	tempDir := t.TempDir()
+	origConfig := os.Getenv("SEC_CONFIG_DIR")
+	os.Setenv("SEC_CONFIG_DIR", tempDir)
+	defer func() {
+		if origConfig != "" {
+			os.Setenv("SEC_CONFIG_DIR", origConfig)
+		} else {
+			os.Unsetenv("SEC_CONFIG_DIR")
+		}
+	}()
+
+	profile := "status-test-profile"
+	sockPath, err := config.GetSocketPath(profile)
+	if err != nil {
+		t.Fatalf("failed to get socket path: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(sockPath), 0700); err != nil {
+		t.Fatalf("failed to create socket dir: %v", err)
+	}
+	if err := os.WriteFile(sockPath, []byte(""), 0600); err != nil {
+		t.Fatalf("failed to create dummy socket: %v", err)
+	}
+	defer os.Remove(sockPath)
+
+	skillPath := filepath.Join(tempDir, "SKILL.md")
+	manifest := &SkillManifest{
+		Version: Version,
+		Skills: []InstalledSkillEntry{
+			{
+				Target:  "antigravity",
+				Scope:   "global",
+				Path:    skillPath,
+				Version: Version,
+			},
+		},
+	}
+	if err := saveSkillManifest(manifest); err != nil {
+		t.Fatalf("failed to save manifest: %v", err)
+	}
+
+	// 1. Test text output
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	jsonErrors = false
+	handleStatusQuick(profile)
+
+	_ = w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, r)
+	textOut := buf.String()
+
+	if !strings.Contains(textOut, "[✓] AI Skill Doc:   "+skillPath+" ("+Version+": Synced)") {
+		t.Errorf("expected skill line in status --quick, got:\n%s", textOut)
+	}
+
+	// 2. Test JSON output
+	r2, w2, _ := os.Pipe()
+	os.Stdout = w2
+
+	jsonErrors = true
+	handleStatusQuick(profile)
+	jsonErrors = false
+
+	_ = w2.Close()
+	os.Stdout = oldStdout
+
+	var buf2 bytes.Buffer
+	_, _ = io.Copy(&buf2, r2)
+	jsonOut := buf2.Bytes()
+
+	var res map[string]interface{}
+	if err := json.Unmarshal(jsonOut, &res); err != nil {
+		t.Fatalf("failed to parse JSON from handleStatusQuick: %v, raw:\n%s", err, string(jsonOut))
+	}
+	if res["skill_path"] != skillPath {
+		t.Errorf("expected skill_path %s, got %v", skillPath, res["skill_path"])
+	}
+	if res["skill_version"] != Version {
+		t.Errorf("expected skill_version %s, got %v", Version, res["skill_version"])
+	}
+	if res["skill_synced"] != true {
+		t.Errorf("expected skill_synced == true, got %v", res["skill_synced"])
+	}
+}
+
