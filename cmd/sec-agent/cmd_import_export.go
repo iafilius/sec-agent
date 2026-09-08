@@ -131,7 +131,7 @@ func handleExport(profile string, args []string) {
 
 	resp, err := queryDaemon(profile, daemon.IPCRequest{Action: "backup"})
 	if err != nil {
-		fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running. Please run 'sec open' to unlock the session."), "Run 'eval $(sec open)' to start/unlock the session.")
+		failDaemonNotRunning(profile)
 	}
 	if !resp.Success {
 		code, rem := mapDaemonError(resp.Error)
@@ -971,7 +971,7 @@ func handleMigrateLocal(profile string, dotenvPath string, args []string) {
 			Value:  entry.value,
 		})
 		if err != nil {
-			fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running. Please run 'sec open' to unlock the session."), "Run 'eval $(sec open)' to start/unlock the session.")
+			failDaemonNotRunning(profile)
 		}
 		if !resp.Success {
 			code, rem := mapDaemonError(resp.Error)

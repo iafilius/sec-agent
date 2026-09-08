@@ -45,6 +45,12 @@ func TestScriptScanner(t *testing.T) {
 # Safe mkdir
 mkdir -p /tmp/myfolder
 
+# Safe Makefile directives and commands with -p
+@read -p "Apply PATCH...? [y/N] " -n 1 -r REPLY; \
+@mkdir -p ../archive/
+git log -p -2
+curl -p https://example.com/api
+
 # Insecure command with -p flag
 ansible-vault view vault.yml -p secret123
 
@@ -61,6 +67,9 @@ curl -X POST https://api.example.com --password my-plain-password
 	}
 
 	if len(findings) != 2 {
+		for i, f := range findings {
+			t.Logf("Unexpected finding #%d: Line %d: %s (Reason: %s)", i+1, f.LineNumber, f.LineSnippet, f.Reason)
+		}
 		t.Fatalf("expected 2 insecure flag findings, got %d", len(findings))
 	}
 

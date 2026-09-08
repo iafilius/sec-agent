@@ -110,7 +110,7 @@ brew install sec-agent
 Download the latest pre-compiled, macOS Hardened Runtime signed binary tarball from [GitHub Releases](https://github.com/iafilius/sec-agent/releases/latest):
 ```bash
 # Extract and install binary to /usr/local/bin
-tar -xzf sec-agent_v2.10.0_darwin_arm64.tar.gz
+tar -xzf sec-agent_v2.11.0_darwin_arm64.tar.gz
 sudo mv sec-agent /usr/local/bin/
 ```
 

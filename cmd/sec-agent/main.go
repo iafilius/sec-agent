@@ -32,7 +32,7 @@ var embeddedSkillBytes []byte
 
 var jsonErrors bool
 var (
-	Version   = "v2.10.0"
+	Version   = "v2.11.0"
 	BuildDate = "unknown"
 )
 
@@ -86,6 +86,18 @@ func fail(code string, err error, remediation string) {
 		}
 	}
 	os.Exit(1)
+}
+
+func daemonNotRunningError(profile string) (error, string) {
+	if profile == "" || profile == "default" {
+		return fmt.Errorf("Daemon for profile 'default' is not running. Please run 'sec open' to unlock the session."), "Run 'eval $(sec open)' to start/unlock the session."
+	}
+	return fmt.Errorf("Daemon for profile %q is not running. Please run 'sec open' to unlock the session.", profile), fmt.Sprintf("Run 'eval $(sec --profile %s open)' to start/unlock the session.", profile)
+}
+
+func failDaemonNotRunning(profile string) {
+	err, rem := daemonNotRunningError(profile)
+	fail("DAEMON_NOT_RUNNING", err, rem)
 }
 
 type SSHTarget struct {
@@ -302,7 +314,16 @@ func queryDaemonRaw(profile string, req daemon.IPCRequest) (*daemon.IPCResponse,
 	// #nosec G704
 	conn, err := net.Dial("unix", socketPath)
 	if err != nil {
-		return nil, err // Daemon likely not running
+		retryDelay := 150 * time.Millisecond
+		if os.Getenv("SEC_TEST_MODE") == "1" {
+			retryDelay = 10 * time.Millisecond
+		}
+		time.Sleep(retryDelay)
+		// #nosec G704
+		conn, err = net.Dial("unix", socketPath)
+		if err != nil {
+			return nil, err // Daemon likely not running
+		}
 	}
 	defer conn.Close()
 
@@ -577,7 +598,7 @@ func handleGen(profile string, path string, args []string) {
 		Comment: comment,
 	})
 	if err != nil {
-		fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running. Please run 'sec open' to unlock the session."), "Run 'eval $(sec open)' to start/unlock the session.")
+		failDaemonNotRunning(profile)
 	}
 	if !resp.Success {
 		code, rem := mapDaemonError(resp.Error)

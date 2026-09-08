@@ -111,12 +111,12 @@ func handleDiffProfiles(p1, p2 string, args []string) {
 
 	resp1, err1 := queryDaemon(p1, daemon.IPCRequest{Action: "backup"})
 	if err1 != nil || !resp1.Success {
-		fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running or locked for profile %q.", p1), "Run 'eval $(sec open)' to unlock.")
+		failDaemonNotRunning(p1)
 	}
 
 	resp2, err2 := queryDaemon(p2, daemon.IPCRequest{Action: "backup"})
 	if err2 != nil || !resp2.Success {
-		fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running or locked for profile %q.", p2), "Run 'eval $(sec open --profile "+p2+")' to unlock.")
+		failDaemonNotRunning(p2)
 	}
 
 	map1 := make(map[string]string)
@@ -218,7 +218,7 @@ func handleProfile(profile string, args []string) {
 			Comment: "Profile Environment Tagging",
 		})
 		if err != nil {
-			fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running. Please run 'sec open' to unlock the session."), "Run 'eval $(sec open)' to start/unlock the session.")
+			failDaemonNotRunning(profile)
 		}
 		if !resp.Success {
 			code, rem := mapDaemonError(resp.Error)
@@ -414,12 +414,28 @@ func handleProfileNew(args []string) {
 	}
 
 	if doWrite {
+		cwd, _ := os.Getwd()
+		absSecrc := filepath.Join(cwd, ".secrc")
+		if cwd != "" {
+			isGit := false
+			for _, marker := range []string{".git", "go.mod", "package.json", "Makefile"} {
+				if _, err := os.Stat(filepath.Join(cwd, marker)); err == nil {
+					isGit = true
+					break
+				}
+			}
+			if !isGit {
+				fmt.Printf("⚠️  Warning: Current directory (%s) does not appear to be a Git repository or project root.\n", cwd)
+				fmt.Printf("   Any sibling/subdirectories will inherit profile %q via upward traversal!\n", pName.String())
+			}
+		}
+
 		secrcData := fmt.Sprintf("{\n  \"profile\": %q\n}\n", pName.String())
 		// #nosec G304 G703
 		if err := os.WriteFile(filepath.Clean(".secrc"), []byte(secrcData), 0600); err != nil {
 			fmt.Fprintf(os.Stderr, "⚠️  Failed to write .secrc: %v\n", err)
 		} else {
-			fmt.Printf("✅ Created .secrc bound to profile %q\n", pName.String())
+			fmt.Printf("✅ Created %s bound to profile %q\n", absSecrc, pName.String())
 		}
 	}
 }
@@ -432,7 +448,7 @@ func handleEnv(profile string, args []string) {
 
 	resp, err := queryDaemon(profile, daemon.IPCRequest{Action: "backup"})
 	if err != nil {
-		fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running. Please run 'sec open' to unlock the session."), "Run 'eval $(sec open)' to start/unlock the session.")
+		failDaemonNotRunning(profile)
 	}
 	if !resp.Success {
 		code, rem := mapDaemonError(resp.Error)
@@ -468,7 +484,7 @@ func handleLoad(profile string, args []string) {
 		Path:   prefix,
 	})
 	if err != nil {
-		fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running. Please run 'sec open' to unlock the session."), "Run 'eval $(sec open)' to start/unlock the session.")
+		failDaemonNotRunning(profile)
 	}
 	if !resp.Success {
 		code, rem := mapDaemonError(resp.Error)
@@ -700,7 +716,7 @@ func handleRun(profile string, args []string) {
 		Path:   groupPrefix,
 	})
 	if err != nil {
-		fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running. Please run 'sec open' to unlock the session."), "Run 'eval $(sec open)' to start/unlock the session.")
+		failDaemonNotRunning(profile)
 	}
 	if !resp.Success {
 		code, rem := mapDaemonError(resp.Error)
@@ -927,7 +943,7 @@ func handleStream(profile string, args []string) {
 
 	resp, err := queryDaemon(profile, daemon.IPCRequest{Action: "backup"})
 	if err != nil || !resp.Success {
-		fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running. Please run 'sec open' to unlock session."), "Run 'eval $(sec open)' to unlock.")
+		failDaemonNotRunning(profile)
 	}
 
 	re := regexp.MustCompile(`\{\{\s*([a-zA-Z0-9_\-\./]+)\s*\}\}`)

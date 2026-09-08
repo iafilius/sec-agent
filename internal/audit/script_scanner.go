@@ -21,13 +21,14 @@ type ScriptFinding struct {
 }
 
 var (
-	shortPassFlagRegex = regexp.MustCompile(`(?i)(?:^|[\s;&|])(?:(?:sudo\s+)?([a-zA-Z0-9_\-\.\/]+)\s+)?-p(?:=|\s+)(['"]?)([^\s;&|\$\-\'\"\#` + "`" + `]+)`)
+	shortPassFlagRegex = regexp.MustCompile(`(?i)(?:^|[\s;&|@])(?:(?:sudo\s+)?([a-zA-Z0-9_\-\.\/]+)\s+)?-p(?:=|\s+)(['"]?)([^\s;&|\$\-\'\"\#` + "`" + `]+)`)
 	longPassFlagRegex  = regexp.MustCompile(`(?i)(?:--password|--pass|--token|--auth-token|--api-key)(?:=|\s+)(['"]?)([^\s;&|\$\-\'\"\#` + "`" + `]+)`)
 
 	safeShortFlagCommands = map[string]bool{
-		"mkdir": true, "ssh": true, "scp": true, "sftp": true, "pacman": true,
+		"mkdir": true, "read": true, "cp": true, "curl": true, "git": true,
+		"ssh": true, "scp": true, "sftp": true, "pacman": true,
 		"tar": true, "sed": true, "grep": true, "psql": true, "ping": true,
-		"git": true, "docker": true, "podman": true, "nc": true, "netcat": true,
+		"docker": true, "podman": true, "nc": true, "netcat": true,
 		"socat": true, "iptables": true, "rsync": true, "make": true,
 	}
 )

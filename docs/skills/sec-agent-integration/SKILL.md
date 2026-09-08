@@ -1,10 +1,10 @@
 ---
 name: sec-agent-integration
 description: Use the sec-agent CLI utility to start background daemons, store secrets, run applications in isolated environments, migrate dotenv files, install AI skills, inspect snapshots, and manage backups.
-version: v2.10.0
+version: v2.11.0
 ---
 
-# sec-agent Secrets Management Integration (v2.10.0)
+# sec-agent Secrets Management Integration (v2.11.0)
 
 This skill enables AI coding agents and autonomous assistants to use the `sec-agent` CLI tool (v1.9.4+) to securely retrieve credentials, run application build/test/terraform pipelines in isolated process environments, migrate dotenv configuration files, install integration skills across IDEs, inspect point-in-time snapshots (`sec snapshot`), and manage KeePassXC `.kdbx` backups on macOS.
 
@@ -62,8 +62,8 @@ When `sec-agent` is updated on the workstation (e.g. via Homebrew or source rebu
 
 **CRITICAL RULE FOR AI ASSISTANTS**:
 1. **Dynamic Version Drift Detection**: When executing `sec status`, `sec status --quick`, or any CLI command, if the CLI output indicates:
-   * A structured upgrade notice (`[sec-agent] ⚡ Upgraded AI agent skill from ... to v2.10.0`), or
-   * A CLI version newer than this document's declared version (`v2.10.0`),
+   * A structured upgrade notice (`[sec-agent] ⚡ Upgraded AI agent skill from ... to v2.11.0`), or
+   * A CLI version newer than this document's declared version (`v2.11.0`),
 2. **Immediate Re-Read Obligation**: The AI agent **MUST IMMEDIATELY INVOKE its file viewing tool** (e.g. `view_file`) on the installed skill path (such as `.agents/skills/sec-agent-integration/SKILL.md` or `~/.gemini/config/skills/sec-agent-integration/SKILL.md`) before taking further action. This purges stale cached instructions from the LLM conversation context and equips the agent with new commands, flags, and security rules.
 
 ### 1.5. Guided Profile Onboarding Wizard (`sec profile new <name>`)
@@ -105,16 +105,15 @@ sec-agent skill update
 | `antigravity` | `global` | `~/.gemini/config/skills/sec-agent-integration/SKILL.md` |
 | `antigravity` | `workspace` | `.agents/skills/sec-agent-integration/SKILL.md` |
 | `copilot` | `workspace` | `.github/copilot-instructions.md` |
-| `copilot-agent` | `workspace` | `.github/agents/sec-agent.md` |
-| `cursor` | `global` | `~/.cursor/rules/sec-agent-integration.mdc` |
-| `cursor` | `workspace` | `.cursor/rules/sec-agent-integration.mdc` |
-| `claude` | `global` | `~/.claude/skills/sec-agent/SKILL.md` |
-| `claude` | `workspace` | `.claude/skills/sec-agent/SKILL.md` |
+| `cursor` | `global` | `~/.cursor/rules/sec-agent.mdc` |
+| `cursor` | `workspace` | `.cursor/rules/sec-agent.mdc` |
+| `claude` | `global` | `~/.claude/skills/sec-agent.md` |
+| `claude` | `workspace` | `.claude/skills/sec-agent.md` |
 | `windsurf` | `workspace` | `.windsurfrules` |
 
 ### 2.2. Automatic Upgrade Sync (`skills_manifest.json`)
 When `sec-agent` is updated (e.g. via `brew upgrade sec-agent`), the next CLI execution compares `skills_manifest.json` manifest version with binary `Version` and automatically updates installed skill files across all tracked IDE locations in-place, printing:
-`[sec-agent] Automatically upgraded AI agent skills (v2.9.0) across N location(s).`
+`[sec-agent] Automatically upgraded AI agent skills (v2.11.0) across N location(s).`
 
 ---
 

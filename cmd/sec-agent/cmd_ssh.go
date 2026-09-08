@@ -410,7 +410,7 @@ func handleSSHInit(profile string, args []string) {
 		}
 		resp, err := queryDaemon(profile, req)
 		if err != nil {
-			fail("DAEMON_NOT_RUNNING", fmt.Errorf("failed to save SSH secret: %v", err), "Run 'eval $(sec open)' to unlock session")
+			failDaemonNotRunning(profile)
 		}
 		if !resp.Success {
 			code, rem := mapDaemonError(resp.Error)

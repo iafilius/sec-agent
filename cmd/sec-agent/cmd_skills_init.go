@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -192,15 +193,29 @@ This workspace integrates with ` + "`sec-agent`" + ` for zero-plaintext secret m
 | ` + "`sec-agent skill show`" + ` | View complete, comprehensive AI integration manual |
 `
 
+func getSkillContent(target string) []byte {
+	if target == "copilot" {
+		return []byte(copilotInstructionsTemplate)
+	}
+	return embeddedSkillBytes
+}
+
+func isSkillContentIdentical(target, targetPath string) bool {
+	// #nosec G304 G703
+	existing, err := os.ReadFile(targetPath)
+	if err != nil {
+		return false
+	}
+	candidate := getSkillContent(target)
+	return bytes.Equal(existing, candidate)
+}
+
 func writeSkillToFile(target, targetPath string) error {
 	dir := filepath.Dir(targetPath)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
-	content := embeddedSkillBytes
-	if target == "copilot" {
-		content = []byte(copilotInstructionsTemplate)
-	}
+	content := getSkillContent(target)
 	// #nosec G304 G703
 	return os.WriteFile(targetPath, content, 0600)
 }
@@ -254,8 +269,9 @@ func syncInstalledSkillsIfOutdated() {
 	if manifest.Version == Version {
 		return
 	}
-	updatedCount := 0
-	var updatedPaths []string
+	var refreshedPaths []string
+	manifestModified := false
+
 	for i, entry := range manifest.Skills {
 		targetPath := entry.Path
 		if targetPath == "" || !filepath.IsAbs(targetPath) {
@@ -269,24 +285,35 @@ func syncInstalledSkillsIfOutdated() {
 		if _, statErr := os.Stat(dir); statErr != nil {
 			continue
 		}
+
+		if isSkillContentIdentical(entry.Target, targetPath) {
+			// Content is already up to date; align version tag without noisy false upgrade alerts
+			if manifest.Skills[i].Version != Version || manifest.Skills[i].Path != targetPath {
+				manifest.Skills[i].Version = Version
+				manifest.Skills[i].Path = targetPath
+				manifestModified = true
+			}
+			continue
+		}
+
 		if writeErr := writeSkillToFile(entry.Target, targetPath); writeErr == nil {
 			manifest.Skills[i].Version = Version
 			manifest.Skills[i].Path = targetPath
-			updatedCount++
-			updatedPaths = append(updatedPaths, targetPath)
+			manifestModified = true
+			refreshedPaths = append(refreshedPaths, targetPath)
 		}
 	}
-	if updatedCount > 0 {
-		oldVer := manifest.Version
+
+	if manifestModified || manifest.Version != Version {
 		manifest.Version = Version
 		_ = saveSkillManifest(manifest)
-		fmt.Fprintf(os.Stderr, "[sec-agent] ⚡ Upgraded AI agent skill from %s to %s across %d location(s):\n", oldVer, Version, updatedCount)
-		for _, p := range updatedPaths {
+	}
+
+	if len(refreshedPaths) > 0 {
+		fmt.Fprintf(os.Stderr, "[sec-agent] Refreshed AI assistant skill instructions across %d location(s):\n", len(refreshedPaths))
+		for _, p := range refreshedPaths {
 			fmt.Fprintf(os.Stderr, "  • %s\n", p)
 		}
-		fmt.Fprintf(os.Stderr, "[sec-agent] ⚠️ ACTION REQUIRED FOR AI ASSISTANTS:\n")
-		fmt.Fprintf(os.Stderr, "  New commands and security protocols available! Please re-read your updated skill file now\n")
-		fmt.Fprintf(os.Stderr, "  using your file viewing tool (e.g., view_file) to refresh cached instructions.\n")
 	}
 }
 
@@ -482,7 +509,7 @@ func handleInit(profile string, args []string) {
 
 func handleSkill(profile string, args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: sec-agent skill <install|status|update> [args]")
+		fmt.Fprintln(os.Stderr, "Usage: sec-agent skill <install|show|status|update> [args]")
 		os.Exit(1)
 	}
 
@@ -532,6 +559,7 @@ func handleSkill(profile string, args []string) {
 			return
 		}
 		updated := 0
+		unchanged := 0
 		for i, entry := range manifest.Skills {
 			targetPath := entry.Path
 			if targetPath == "" || !filepath.IsAbs(targetPath) {
@@ -545,6 +573,13 @@ func handleSkill(profile string, args []string) {
 			if _, statErr := os.Stat(dir); statErr != nil {
 				continue
 			}
+			if isSkillContentIdentical(entry.Target, targetPath) {
+				manifest.Skills[i].Version = Version
+				manifest.Skills[i].Path = targetPath
+				unchanged++
+				fmt.Printf("[✓] Already up to date: %s (%s) -> %s\n", entry.Target, entry.Scope, targetPath)
+				continue
+			}
 			if writeErr := writeSkillToFile(entry.Target, targetPath); writeErr == nil {
 				manifest.Skills[i].Version = Version
 				manifest.Skills[i].Path = targetPath
@@ -554,9 +589,33 @@ func handleSkill(profile string, args []string) {
 		}
 		manifest.Version = Version
 		_ = saveSkillManifest(manifest)
-		fmt.Printf("\nSuccessfully updated %d skill location(s) to %s.\n", updated, Version)
+		if updated > 0 {
+			fmt.Printf("\nSuccessfully updated %d skill location(s) to %s.\n", updated, Version)
+		} else {
+			fmt.Printf("\nAll tracked skills (%d location(s)) are already up to date with %s.\n", unchanged, Version)
+		}
+	case "show", "view":
+		target := "full"
+		for i := 1; i < len(args); i++ {
+			if (args[i] == "--target" || args[i] == "-t") && i+1 < len(args) {
+				target = strings.ToLower(args[i+1])
+				i++
+			}
+		}
+		switch target {
+		case "full", "manual", "all", "copilot", "antigravity", "cursor", "claude", "windsurf":
+			content := getSkillContent(target)
+			// #nosec G104
+			_, _ = os.Stdout.Write(content)
+			if len(content) > 0 && content[len(content)-1] != '\n' {
+				fmt.Println()
+			}
+		default:
+			fmt.Fprintf(os.Stderr, "Unknown skill target %q. Supported targets: full, copilot, antigravity, cursor, claude, windsurf\n", target)
+			os.Exit(1)
+		}
 	default:
-		fmt.Fprintf(os.Stderr, "Unknown skill subcommand %q. Supported: install, status, update\n", sub)
+		fmt.Fprintf(os.Stderr, "Unknown skill subcommand %q. Supported: install, show, status, update\n", sub)
 		os.Exit(1)
 	}
 }
@@ -744,7 +803,12 @@ func handleFeedback(args []string) {
 	}
 
 	if showExample {
-		fmt.Println(`=== sec-agent Feature Proposal & Feedback Example Template ===
+		fmt.Println(`---
+sec-agent-version: ` + Version + `
+report-date: ` + time.Now().UTC().Format(time.RFC3339) + `
+---
+
+=== sec-agent Feature Proposal & Feedback Example Template ===
 
 # Feedback / Proposal: [Feature or Fix Name]
 **Target Repository:** secure_secrets

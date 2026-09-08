@@ -84,8 +84,12 @@ func TestProfileNewWithSeedAndSecrc(t *testing.T) {
 	if !strings.Contains(outStr, "Dual-Slot Touch ID + BIP39 recovery key") {
 		t.Errorf("expected success message with Dual-Slot Touch ID + BIP39 recovery key, got:\n%s", outStr)
 	}
-	if !strings.Contains(outStr, "Created .secrc bound to profile \"testnode\"") {
-		t.Errorf("expected success message with .secrc creation, got:\n%s", outStr)
+	expectedSecrc := filepath.Join(tmpDir, ".secrc")
+	if !strings.Contains(outStr, expectedSecrc) {
+		t.Errorf("expected success message to contain absolute path %s, got:\n%s", expectedSecrc, outStr)
+	}
+	if !strings.Contains(outStr, "does not appear to be a Git repository") {
+		t.Errorf("expected warning about missing Git repository marker, got:\n%s", outStr)
 	}
 
 	// 1. Verify vault file was created with complete v2.0 envelope

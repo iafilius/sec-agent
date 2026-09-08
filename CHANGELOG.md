@@ -5,6 +5,38 @@ All notable changes to `sec-agent` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v2.11.0] - 2026-09-08
+
+### Added & Enhanced
+- **CLI Parameter Parity & Registry Realignment**:
+  - Replaced phantom `--show` in `sec get` documentation with canonical `--raw` (`-r`) and registered missing parameters `--prefix`, `--record`, and `--show-expired`. Added `--show` as a backwards-compatible alias for `--raw`.
+  - Registered missing handler flags in `registry.go` across multiple core subcommands:
+    - `set`: Added `--expires` (`-e`), `--rotate-cmd`, `--rotate-ttl`, `--env-alias` (`-a`), `--meta` (`-m`), `--comment` (`-c`).
+    - `ls`: Added `--long` (`-l`), `--stale [N]`.
+    - `open`: Added `--ttl`, `--grace`.
+    - `export`: Added `--all-profiles`, `--envelope`, `--no-envelope`, `--format` (`-f`).
+    - `check`: Added `--required` (`-r`), `--ping-host`, `--template` (`-t`), `--scan-weak` (`-w`), `--scan-scripts`.
+    - `prompt`: Added `--profile`.
+    - `profile`: Added `--seed`, `--secrc`, `--no-secrc`.
+    - `ssh`: Added `--ssh-key`, `--ssh-passphrase-key`, `--port`, `--host`, `--user`, `--password`, `--key`, `--secrc`, `--no-secrc`.
+    - `githook`: Added `--global`.
+    - `ide-proxy` & `env-file`: Added `--profile`.
+  - Integrated `sec backup import <file.kdbx>` and top-level `sec restore <file.kdbx>` with `handleRestore` (supporting password input, `--merge`, `--overwrite`, and `--full-metadata`).
+- **AI Skill Discovery Hardening & Recursive Loop Fix**:
+  - Fixed `sec-agent skill show` recursive loop: running `sec-agent skill show` without `--target` now defaults to displaying the full canonical manual (`embeddedSkillBytes`), while explicit `--target copilot` continues to serve the 20-line quick reference.
+  - Multi-IDE target path alignment: aligned `SKILL.md` target tables with `cmd_skills_init.go` (`resolveSkillPath`) by removing non-existent target `copilot-agent`, updating Cursor rule to `sec-agent.mdc`, updating Claude rule to `sec-agent.md`, and documenting Windsurf (`.windsurfrules`).
+- **Automated Verification & Test Safety**:
+  - Added `TestCommandRegistryBidirectionalParity` in `cmd_shell_completion_test.go` verifying across all 45 registered commands that every documented parameter in `Usage` exists in `Flags`, and every flag in `Flags` is in `Usage` (or is a registered backwards-compatible alias).
+  - Added `TestCommandRegistryFlagExecution` with 9 isolated subtests under `SEC_TEST_MODE=1` verifying execution safety of `--raw`, `--show`, `--show-expired`, `--expires`, `--rotate-cmd`, `--long`, `--stale`, `--all-profiles`, `backup export`, `backup import`, and `restore` without touching user vaults or macOS Keychain biometrics.
+
+### Fixed & Hardened
+- **Diagnostics & Redaction Hardening**:
+  - Fixed `sec status --quick` socket ping to perform live connection probes and detect orphaned socket files without false-positive reporting.
+  - Hardened sliding-window stream redaction against multiline tokens and prefix-matching corner cases.
+  - Masked secret values in non-interactive / agent terminals unless explicit `--raw` flag is passed.
+
+---
+
 ## [v2.10.0] - 2026-09-06
 
 ### Added & Enhanced

@@ -2,11 +2,13 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -227,3 +229,312 @@ func TestShellPromptAndInitDirenv(t *testing.T) {
 		t.Errorf("expected direnvrc to contain use_sec_agent(), got:\n%s", string(content))
 	}
 }
+
+var recognizedFlagAliases = map[string]map[string]bool{
+	"get": {
+		"--show": true, // Backwards-compatible alias for --raw
+	},
+	"check": {
+		"--scan-leaks":   true, // Alias for --leaks
+		"--history":      true, // Alias for --leaks
+		"--scan-scripts": true, // Alias for --scripts
+	},
+}
+
+func isRecognizedFlagAlias(cmdName, flag string) bool {
+	if aliases, ok := recognizedFlagAliases[cmdName]; ok {
+		return aliases[flag]
+	}
+	return false
+}
+
+func TestCommandRegistryFlagParity(t *testing.T) {
+	if len(CommandRegistry) == 0 {
+		initRegistry()
+	}
+
+	for _, cmd := range CommandRegistry {
+		for _, flag := range cmd.Flags {
+			if strings.HasPrefix(flag, "--") {
+				if isRecognizedFlagAlias(cmd.Name, flag) {
+					continue
+				}
+				if !strings.Contains(cmd.Usage, flag) {
+					t.Errorf("command %q has flag %q registered in Flags but missing from Usage string %q", cmd.Name, flag, cmd.Usage)
+				}
+			}
+		}
+	}
+}
+
+func TestCommandRegistryBidirectionalParity(t *testing.T) {
+	if len(CommandRegistry) == 0 {
+		initRegistry()
+	}
+
+	flagPattern := regexp.MustCompile(`--[a-zA-Z0-9-]+`)
+
+	for _, cmd := range CommandRegistry {
+		t.Run(cmd.Name, func(t *testing.T) {
+			if cmd.Handler == nil {
+				t.Fatalf("command %q has nil Handler", cmd.Name)
+			}
+
+			// 1. Every flag in Usage MUST be registered in Flags
+			usageFlags := flagPattern.FindAllString(cmd.Usage, -1)
+			for _, uf := range usageFlags {
+				found := false
+				for _, f := range cmd.Flags {
+					if f == uf {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("command %q has flag %q documented in Usage %q but missing from Flags slice %v", cmd.Name, uf, cmd.Usage, cmd.Flags)
+				}
+			}
+
+			// 2. Every full flag in Flags MUST appear in Usage or be a recognized alias
+			for _, f := range cmd.Flags {
+				if strings.HasPrefix(f, "--") {
+					if isRecognizedFlagAlias(cmd.Name, f) {
+						continue
+					}
+					if !strings.Contains(cmd.Usage, f) {
+						t.Errorf("command %q has flag %q in Flags but missing from Usage %q", cmd.Name, f, cmd.Usage)
+					}
+				}
+			}
+
+			// 3. For subcommands, verify subcommand flags
+			for _, sub := range cmd.Subcommands {
+				for _, sf := range sub.Flags {
+					if strings.HasPrefix(sf, "--") {
+						found := false
+						for _, f := range cmd.Flags {
+							if f == sf {
+								found = true
+								break
+							}
+						}
+						if !found {
+							t.Errorf("command %q subcommand %q has flag %q not registered in top-level Flags", cmd.Name, sub.Name, sf)
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestCommandRegistryFlagExecution(t *testing.T) {
+	t.Setenv("SEC_TEST_MODE", "1")
+	profile := "flag-exec-test-profile"
+
+	sockPath, _ := config.GetSocketPath(profile)
+	dbPath, _ := store.GetStorePath(profile)
+	_ = os.Remove(sockPath)
+	_ = os.Remove(dbPath)
+	defer os.Remove(sockPath)
+	defer os.Remove(dbPath)
+
+	tmpDir := t.TempDir()
+	binPath := filepath.Join(tmpDir, "sec_flag_test_bin")
+	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build flag test binary: %v\nOutput: %s", err, out)
+	}
+
+	d, err := daemon.NewDaemon(profile, 5*time.Minute, Version)
+	if err != nil {
+		t.Fatalf("failed to create test daemon: %v", err)
+	}
+	d.IsTestInstance = true
+	d.SetMasterKeyForTest([]byte("01234567890123456789012345678901"))
+	d.SetSessionTokenForTest("test-flag-token-123")
+
+	now := time.Now().Truncate(time.Second)
+	d.SetSecretsForTest(map[string]store.SecretEntry{
+		"app/api-key": {
+			Value:        "secret-12345",
+			Comment:      "active api key",
+			Created:      now.Add(-40 * 24 * time.Hour),
+			LastModified: now.Add(-40 * 24 * time.Hour),
+		},
+		"app/expired-key": {
+			Value:        "expired-secret",
+			Comment:      "expired api key",
+			Created:      now.Add(-10 * time.Hour),
+			LastModified: now.Add(-10 * time.Hour),
+			Expires:      now.Add(-1 * time.Hour),
+		},
+		"app/stale-key": {
+			Value:        "stale-secret-xyz",
+			Comment:      "stale api key",
+			Created:      now.Add(-60 * 24 * time.Hour),
+			LastModified: now.Add(-60 * 24 * time.Hour),
+			LastAccessed: now.Add(-50 * 24 * time.Hour),
+		},
+	})
+
+	go func() {
+		_ = d.Start()
+	}()
+	defer d.Stop()
+
+	for i := 0; i < 50; i++ {
+		if _, err := os.Stat(sockPath); err == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	var testEnv []string
+	for _, env := range os.Environ() {
+		if !strings.HasPrefix(env, "SEC_SESSION_TOKEN=") &&
+			!strings.HasPrefix(env, "SEC_PROFILE=") &&
+			!strings.HasPrefix(env, "SEC_TEST_MODE=") {
+			testEnv = append(testEnv, env)
+		}
+	}
+	testEnv = append(testEnv, "SEC_SESSION_TOKEN=test-flag-token-123", "SEC_PROFILE="+profile, "SEC_TEST_MODE=1")
+
+	runCLI := func(args ...string) (string, error) {
+		cmd := exec.Command(binPath, append(args, "--profile", profile)...)
+		cmd.Env = testEnv
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+
+	// 1. Test get --raw (verifies raw value output without newline or masking)
+	t.Run("get --raw", func(t *testing.T) {
+		out, err := runCLI("get", "app/api-key", "--raw")
+		if err != nil {
+			t.Fatalf("get --raw failed: %v, output: %s", err, out)
+		}
+		if out != "secret-12345" {
+			t.Errorf("expected exact raw value %q, got %q", "secret-12345", out)
+		}
+	})
+
+	// 2. Test get --show (alias for --raw)
+	t.Run("get --show", func(t *testing.T) {
+		out, err := runCLI("get", "app/api-key", "--show")
+		if err != nil {
+			t.Fatalf("get --show failed: %v, output: %s", err, out)
+		}
+		if out != "secret-12345" {
+			t.Errorf("expected exact raw value %q, got %q", "secret-12345", out)
+		}
+	})
+
+	// 3. Test get --show-expired
+	t.Run("get --show-expired", func(t *testing.T) {
+		out, err := runCLI("get", "app/expired-key", "--show-expired", "--raw")
+		if err != nil {
+			t.Fatalf("get --show-expired failed: %v, output: %s", err, out)
+		}
+		if out != "expired-secret" {
+			t.Errorf("expected expired secret value %q, got %q", "expired-secret", out)
+		}
+	})
+
+	// 4. Test set --expires, --rotate-cmd, --rotate-ttl
+	t.Run("set --expires and rotate flags", func(t *testing.T) {
+		out, err := runCLI("set", "app/rotating-secret", "new-rotating-val", "--expires", "30d", "--rotate-cmd", "echo rotate", "--rotate-ttl", "30d")
+		if err != nil {
+			t.Fatalf("set with rotate flags failed: %v, output: %s", err, out)
+		}
+		getOut, getErr := runCLI("get", "app/rotating-secret", "--json")
+		if getErr != nil {
+			t.Fatalf("get --json failed: %v, output: %s", getErr, getOut)
+		}
+		var metaResp struct {
+			Metadata map[string]string `json:"metadata"`
+			Expires  string            `json:"expires"`
+		}
+		if err := json.Unmarshal([]byte(getOut), &metaResp); err != nil {
+			t.Fatalf("failed to unmarshal JSON response: %v\nOutput: %s", err, getOut)
+		}
+		if metaResp.Metadata["rotate_cmd"] != "echo rotate" {
+			t.Errorf("expected rotate_cmd metadata 'echo rotate', got %q", metaResp.Metadata["rotate_cmd"])
+		}
+		if metaResp.Metadata["rotate_ttl"] != "30d" {
+			t.Errorf("expected rotate_ttl metadata '30d', got %q", metaResp.Metadata["rotate_ttl"])
+		}
+		if metaResp.Expires == "" {
+			t.Errorf("expected non-empty expires in JSON response, got empty")
+		}
+	})
+
+	// 5. Test ls --long
+	t.Run("ls --long", func(t *testing.T) {
+		out, err := runCLI("ls", "--long")
+		if err != nil {
+			t.Fatalf("ls --long failed: %v, output: %s", err, out)
+		}
+		if !strings.Contains(out, "app/api-key") {
+			t.Errorf("expected ls --long to contain app/api-key, got:\n%s", out)
+		}
+	})
+
+	// 6. Test ls --stale
+	t.Run("ls --stale", func(t *testing.T) {
+		out, err := runCLI("ls", "--stale", "30")
+		if err != nil {
+			t.Fatalf("ls --stale failed: %v, output: %s", err, out)
+		}
+		if !strings.Contains(out, "app/stale-key") {
+			t.Errorf("expected ls --stale to list unaccessed app/stale-key, got:\n%s", out)
+		}
+	})
+
+	// 7. Test export --all-profiles
+	t.Run("export --all-profiles", func(t *testing.T) {
+		out, err := runCLI("export", "--format", "json", "--all-profiles")
+		if err != nil {
+			t.Fatalf("export --all-profiles failed: %v, output: %s", err, out)
+		}
+		if !strings.Contains(out, "app/api-key") {
+			t.Errorf("expected export output to contain app/api-key, got:\n%s", out)
+		}
+	})
+
+	// 8. Test backup export and backup import roundtrip
+	kdbxPath := filepath.Join(tmpDir, "cli_test_backup.kdbx")
+	t.Run("backup export and backup import", func(t *testing.T) {
+		exportOut, exportErr := runCLI("backup", "export", kdbxPath, "-p", "kdbx-test-pass-456")
+		if exportErr != nil {
+			t.Fatalf("backup export failed: %v, output: %s", exportErr, exportOut)
+		}
+		if !strings.Contains(exportOut, "[✓] Backup created at:") {
+			t.Errorf("expected backup confirmation in output, got: %s", exportOut)
+		}
+		if _, statErr := os.Stat(kdbxPath); statErr != nil {
+			t.Fatalf("expected KDBX file at %s: %v", kdbxPath, statErr)
+		}
+
+		importOut, importErr := runCLI("backup", "import", kdbxPath, "-p", "kdbx-test-pass-456", "--merge")
+		if importErr != nil {
+			t.Fatalf("backup import failed: %v, output: %s", importErr, importOut)
+		}
+		if !strings.Contains(importOut, "Secrets restored successfully") {
+			t.Errorf("expected restore confirmation in output, got: %s", importOut)
+		}
+	})
+
+	// 9. Test restore command
+	t.Run("restore command", func(t *testing.T) {
+		restoreOut, restoreErr := runCLI("restore", kdbxPath, "-p", "kdbx-test-pass-456", "--overwrite")
+		if restoreErr != nil {
+			t.Fatalf("restore failed: %v, output: %s", restoreErr, restoreOut)
+		}
+		if !strings.Contains(restoreOut, "Secrets restored successfully") {
+			t.Errorf("expected restore confirmation in output, got: %s", restoreOut)
+		}
+	})
+}
+
+
+

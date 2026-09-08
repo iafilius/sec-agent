@@ -74,16 +74,12 @@ func handleDoctor(profile string) {
 
 	// 7. Vault Envelope & Keychain Diagnostics across all profiles
 	fmt.Println("\n--- Vault & Keychain Health ---")
+	fmt.Println("[ℹ] Auditing enrolled profile keys in macOS Keychain (Touch ID prompt may appear)...")
 	vaults, vErr := store.ListVaultFiles()
 	if vErr == nil {
 		for _, v := range vaults {
-			kcSvc := "sec-session"
-			if v.Profile != "default" {
-				kcSvc = "sec-session:profile_" + v.Profile
-			}
-			kcAcc := "master"
-
-			kcKey, err := keychain.Get(kcSvc, kcAcc)
+			getter, _ := keychain.GetKeychainAccessPair(v.Profile)
+			kcKey, err := getter()
 			if err != nil {
 				fmt.Printf("[!] Profile %-20s Vault: %s | Keychain: Key Missing/Locked (%v)\n", v.Profile, v.Path, err)
 				continue
@@ -128,11 +124,38 @@ func handleStatusQuick(profile string) {
 	}
 	info, err := os.Stat(socketPath)
 	if err != nil {
-		fail("DAEMON_NOT_RUNNING", fmt.Errorf("daemon socket not found at %s", socketPath), "Run 'eval $(sec-agent open)' to start daemon.")
+		failDaemonNotRunning(profile)
 	}
 
 	mode := info.Mode()
 	perms := mode.Perm()
+
+	// Live IPC dial check to confirm daemon responsiveness and detect orphaned socket files
+	pingResp, pingErr := queryDaemonRaw(profile, daemon.IPCRequest{Action: daemon.IPCActionPing})
+	if pingErr != nil {
+		fmt.Fprintf(os.Stderr, "Notice: Stale socket file detected at %s (daemon process is not running).\n", socketPath)
+		failDaemonNotRunning(profile)
+	}
+
+	daemonVer := ""
+	daemonSynced := true
+	if pingResp != nil && pingResp.Version != "" {
+		daemonVer = pingResp.Version
+		if pingResp.Version != Version {
+			daemonSynced = false
+		}
+	} else if pidPath, pErr := config.GetPIDFilePath(profile); pErr == nil {
+		// #nosec G304 G703
+		if data, err := os.ReadFile(pidPath); err == nil {
+			var pInfo daemon.PIDLockInfo
+			if json.Unmarshal(data, &pInfo) == nil && pInfo.Version != "" {
+				daemonVer = pInfo.Version
+				if pInfo.Version != Version {
+					daemonSynced = false
+				}
+			}
+		}
+	}
 
 	var activeSkillPath string
 	skillSynced := false
@@ -148,6 +171,11 @@ func handleStatusQuick(profile string) {
 		}
 	}
 
+	socketStatus := "ACTIVE (IPC socket responsive)"
+	if pingResp != nil && !pingResp.Success && strings.Contains(pingResp.Error, "locked") {
+		socketStatus = "LOCKED (Daemon running, session locked)"
+	}
+
 	if jsonErrors {
 		resMap := map[string]interface{}{
 			"success":      true,
@@ -161,6 +189,10 @@ func handleStatusQuick(profile string) {
 			resMap["skill_version"] = Version
 			resMap["skill_synced"] = skillSynced
 		}
+		if daemonVer != "" {
+			resMap["daemon_version"] = daemonVer
+			resMap["daemon_synced"] = daemonSynced
+		}
 		data, _ := json.MarshalIndent(resMap, "", "  ")
 		fmt.Println(string(data))
 		return
@@ -170,7 +202,14 @@ func handleStatusQuick(profile string) {
 	fmt.Printf("[✓] Active Profile: %s\n", profile)
 	fmt.Printf("[✓] Socket Path:    %s\n", socketPath)
 	fmt.Printf("[✓] File Perms:     %04o (Strict)\n", perms)
-	fmt.Println("[✓] Socket Status:  ACTIVE (IPC socket file present)")
+	fmt.Printf("[✓] Socket Status:  %s\n", socketStatus)
+	if daemonVer != "" {
+		if !daemonSynced {
+			fmt.Printf("[✓] Daemon Version: %s (⚠️ Outdated: CLI is %s — run 'sec restart --hot-reload')\n", daemonVer, Version)
+		} else {
+			fmt.Printf("[✓] Daemon Version: %s (Synced)\n", daemonVer)
+		}
+	}
 	if activeSkillPath != "" {
 		syncMsg := "Synced"
 		if !skillSynced {
@@ -341,7 +380,7 @@ func handleStatus(profile string, args []string) {
 
 	resp, err := queryDaemon(profile, daemon.IPCRequest{Action: "status"})
 	if err != nil {
-		fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running. Please run 'sec open' to unlock the session."), "Run 'eval $(sec open)' to start/unlock the session.")
+		failDaemonNotRunning(profile)
 	}
 	if !resp.Success {
 		code, rem := mapDaemonError(resp.Error)
@@ -371,7 +410,11 @@ func handleStatus(profile string, args []string) {
 	}
 	fmt.Printf("Active Profile:       %s (Tier: %s)\n", info.Profile, strings.ToUpper(tier.String()))
 	printEnvBadge(store.ProfileName(profile))
-	fmt.Printf("Daemon Version:       %s\n", info.Version)
+	daemonVerStr := info.Version
+	if info.Version != "" && info.Version != Version {
+		daemonVerStr = fmt.Sprintf("%s (⚠️ Outdated: CLI is %s — run 'sec restart --hot-reload')", info.Version, Version)
+	}
+	fmt.Printf("Daemon Version:       %s\n", daemonVerStr)
 	fmt.Printf("Vault Schema:         %s\n", schemaStatus)
 	fmt.Println("Biometric Policy:     kSecAccessControlBiometryCurrentSet (Admin Defense Active)")
 	if info.IsUnlocked {
@@ -456,7 +499,7 @@ func handleAudit(profile string, args []string) {
 		Limit:  limit,
 	})
 	if err != nil {
-		fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running. Please run 'sec open' to unlock the session."), "Run 'eval $(sec open)' to start/unlock the session.")
+		failDaemonNotRunning(profile)
 	}
 	if !resp.Success {
 		code, rem := mapDaemonError(resp.Error)

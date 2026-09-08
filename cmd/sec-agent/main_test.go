@@ -28,6 +28,7 @@ func TestMain(m *testing.M) {
 }
 
 func TestMainIntegration(t *testing.T) {
+	t.Setenv("SEC_TEST_MODE", "1")
 	profile := "main-integration-test"
 
 	// 1. Clean up stale files
@@ -50,6 +51,7 @@ func TestMainIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create test daemon: %v", err)
 	}
+	d.IsTestInstance = true
 
 	// Preset the masterKey and dummy secrets to unlock it programmatically
 	d.SetMasterKeyForTest([]byte("01234567890123456789012345678901")) // 32-byte key
@@ -86,11 +88,11 @@ func TestMainIntegration(t *testing.T) {
 
 	var testEnv []string
 	for _, env := range os.Environ() {
-		if !strings.HasPrefix(env, "SEC_SESSION_TOKEN=") && !strings.HasPrefix(env, "SEC_PROFILE=") && !strings.HasPrefix(env, "VELOCLOUD_") && !strings.HasPrefix(env, "PROVIDER_") {
+		if !strings.HasPrefix(env, "SEC_SESSION_TOKEN=") && !strings.HasPrefix(env, "SEC_PROFILE=") && !strings.HasPrefix(env, "VELOCLOUD_") && !strings.HasPrefix(env, "PROVIDER_") && !strings.HasPrefix(env, "SEC_TEST_MODE=") {
 			testEnv = append(testEnv, env)
 		}
 	}
-	testEnv = append(testEnv, "SEC_SESSION_TOKEN=integration-token-123", "SEC_PROFILE="+profile)
+	testEnv = append(testEnv, "SEC_SESSION_TOKEN=integration-token-123", "SEC_PROFILE="+profile, "SEC_TEST_MODE=1")
 
 	// 4. Test 1: Verify 'sec env' output and prefix filtering
 	envCmd := exec.Command("./sec_test_bin", "env", "velocloud-provider", "--profile", profile)
@@ -682,5 +684,118 @@ func TestOpenExportsProfileAndContextualTip(t *testing.T) {
 	_ = defaultTip
 	_ = namedTip
 }
+
+func TestDaemonNotRunningErrorDiagnostics(t *testing.T) {
+	// 1. Default profile
+	errDef, remDef := daemonNotRunningError("default")
+	if !strings.Contains(errDef.Error(), "profile 'default'") {
+		t.Errorf("expected default error to mention profile 'default', got: %v", errDef)
+	}
+	if !strings.Contains(remDef, "eval $(sec open)") {
+		t.Errorf("expected default remediation to suggest 'eval $(sec open)', got: %s", remDef)
+	}
+
+	// 2. Empty profile (defaults to default)
+	errEmpty, remEmpty := daemonNotRunningError("")
+	if !strings.Contains(errEmpty.Error(), "profile 'default'") {
+		t.Errorf("expected empty profile to mention profile 'default', got: %v", errEmpty)
+	}
+	if !strings.Contains(remEmpty, "eval $(sec open)") {
+		t.Errorf("expected empty profile remediation to suggest 'eval $(sec open)', got: %s", remEmpty)
+	}
+
+	// 3. Named profile
+	errNamed, remNamed := daemonNotRunningError("t430")
+	if !strings.Contains(errNamed.Error(), `profile "t430"`) {
+		t.Errorf("expected named error to mention profile \"t430\", got: %v", errNamed)
+	}
+	if !strings.Contains(remNamed, "eval $(sec --profile t430 open)") {
+		t.Errorf("expected named remediation to include profile flag, got: %s", remNamed)
+	}
+}
+
+func TestStatusDaemonVersionDriftOutput(t *testing.T) {
+	oldVer := Version
+	defer func() { Version = oldVer }()
+	Version = "v2.11.0"
+
+	// Mock older daemon info
+	info := daemon.DaemonStatusInfo{
+		Profile:        "t430",
+		Version:        "v2.9.1",
+		IsUnlocked:     true,
+		TotalSecrets:   4,
+		ExpiredSecrets: 0,
+		SessionTTL:     "8h0m0s",
+		GraceTTL:       "30m0s",
+	}
+
+	daemonVerStr := info.Version
+	if info.Version != "" && info.Version != Version {
+		daemonVerStr = fmt.Sprintf("%s (⚠️ Outdated: CLI is %s — run 'sec restart --hot-reload')", info.Version, Version)
+	}
+
+	if !strings.Contains(daemonVerStr, "⚠️ Outdated: CLI is v2.11.0") {
+		t.Errorf("expected outdated warning badge, got: %s", daemonVerStr)
+	}
+	if !strings.Contains(daemonVerStr, "v2.9.1") {
+		t.Errorf("expected daemon version v2.9.1 to be displayed, got: %s", daemonVerStr)
+	}
+
+	// When versions match
+	infoSynced := daemon.DaemonStatusInfo{
+		Profile: "t430",
+		Version: "v2.11.0",
+	}
+	daemonSyncedStr := infoSynced.Version
+	if infoSynced.Version != "" && infoSynced.Version != Version {
+		daemonSyncedStr = fmt.Sprintf("%s (⚠️ Outdated: CLI is %s — run 'sec restart --hot-reload')", infoSynced.Version, Version)
+	}
+	if strings.Contains(daemonSyncedStr, "⚠️ Outdated") {
+		t.Errorf("expected synced versions not to show outdated badge, got: %s", daemonSyncedStr)
+	}
+}
+
+func TestSkillShowCLI(t *testing.T) {
+	// Build test binary
+	tmpDir := t.TempDir()
+	binPath := filepath.Join(tmpDir, "sec_skill_show_test")
+	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
+	if err := buildCmd.Run(); err != nil {
+		t.Fatalf("failed to build sec test binary: %v", err)
+	}
+
+	// 1. Run sec-agent skill show without flags (default to canonical full manual)
+	cmdDefault := exec.Command(binPath, "skill", "show")
+	outDefault, err := cmdDefault.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sec-agent skill show failed: %v, output: %s", err, string(outDefault))
+	}
+	if !strings.Contains(string(outDefault), "sec-agent Secrets Management Integration") {
+		t.Errorf("expected default skill show to contain canonical manual, got:\n%s", string(outDefault))
+	}
+
+	// 2. Run sec-agent skill show --target copilot
+	cmdCopilot := exec.Command(binPath, "skill", "show", "--target", "copilot")
+	outCopilot, err := cmdCopilot.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sec-agent skill show --target copilot failed: %v, output: %s", err, string(outCopilot))
+	}
+	if !strings.Contains(string(outCopilot), "sec-agent — Secret Management Quick Reference") {
+		t.Errorf("expected copilot instructions, got:\n%s", string(outCopilot))
+	}
+
+	// 3. Run sec-agent skill show with invalid target
+	cmdInvalid := exec.Command(binPath, "skill", "show", "--target", "nonexistent-target")
+	outInvalid, err := cmdInvalid.CombinedOutput()
+	if err == nil {
+		t.Errorf("expected skill show with invalid target to fail, got success. Output: %s", string(outInvalid))
+	}
+	if !strings.Contains(string(outInvalid), "Unknown skill target") {
+		t.Errorf("expected error message to mention unknown skill target, got: %s", string(outInvalid))
+	}
+}
+
+
 
 

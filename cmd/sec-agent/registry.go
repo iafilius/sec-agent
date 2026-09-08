@@ -36,6 +36,7 @@ func initRegistry() {
 			Category:    "Session & Setup",
 			Description: "Initialize/unlock the secrets session using Touch ID",
 			Usage:       "sec open [--ttl <duration>] [--grace <duration>]",
+			Flags:       []string{"--ttl", "--grace"},
 			Handler:     handleOpen,
 		},
 		{
@@ -43,7 +44,7 @@ func initRegistry() {
 			Aliases:     []string{"setup"},
 			Category:    "Session & Setup",
 			Description: "Initialize vault configuration & install AI skills",
-			Usage:       "sec init [--vault] [--skill <target>] [--scope <global|workspace>]",
+			Usage:       "sec init [--vault] [--skill <target>] [--scope <global|workspace>] [--non-interactive]",
 			Flags:       []string{"--vault", "--skill", "--scope", "--non-interactive"},
 			Handler:     handleInit,
 		},
@@ -52,7 +53,7 @@ func initRegistry() {
 			Category:    "Session & Setup",
 			Description: "Output formatted shell prompt status indicator (<5ms probe)",
 			Usage:       "sec prompt [--format plain|starship|p10k] [--profile <name>]",
-			Flags:       []string{"--format"},
+			Flags:       []string{"--format", "--profile"},
 			Handler:     handlePrompt,
 		},
 		{
@@ -68,12 +69,12 @@ func initRegistry() {
 			Name:        "get",
 			Category:    "Core Secrets",
 			Description: "Retrieve a secret or group of secrets",
-			Usage:       "sec get <path> [--prefix] [--record] [--json | --comment | --meta <key>]",
+			Usage:       "sec get <path> [--prefix] [--record] [--copy] [--raw] [--show-expired] [--json | --comment | --meta <key>]",
 			ExpectsKeys: true,
-			Flags:       []string{"--copy", "--json", "--show", "--comment", "--meta"},
+			Flags:       []string{"--copy", "-C", "--raw", "-r", "--show", "--prefix", "--record", "--show-expired", "--json", "--comment", "-c", "--meta", "-m"},
 			Handler: func(profile string, args []string) {
 				if len(args) < 1 {
-					fmt.Fprintln(os.Stderr, "Usage: sec get <path> [--json | --comment | --meta <key>]")
+					fmt.Fprintln(os.Stderr, "Usage: sec get <path> [--prefix] [--record] [--copy] [--raw] [--show-expired] [--json | --comment | --meta <key>]")
 					os.Exit(1)
 				}
 				handleGet(profile, args[0], args[1:])
@@ -83,11 +84,11 @@ func initRegistry() {
 			Name:        "set",
 			Category:    "Core Secrets",
 			Description: "Store a secret with optional comment and env alias",
-			Usage:       "sec set <path> [<value>] [--stdin] [--no-trim] [--comment <comment>] [--meta key=value ...]",
-			Flags:       []string{"--comment", "--meta", "--stdin", "--no-trim", "--env-alias"},
+			Usage:       "sec set <path> [<value>] [--stdin] [--no-trim] [--comment <comment>] [--env-alias <alias>] [--expires <ttl>] [--rotate-cmd <cmd>] [--rotate-ttl <ttl>] [--meta key=value ...]",
+			Flags:       []string{"--comment", "-c", "--meta", "-m", "--stdin", "--no-trim", "--env-alias", "-a", "--expires", "-e", "--rotate-cmd", "--rotate-ttl"},
 			Handler: func(profile string, args []string) {
 				if len(args) < 1 {
-					fmt.Fprintln(os.Stderr, "Usage: sec set <path> [<value>] [--stdin] [--no-trim] [--comment <comment>] [--meta key=value ...]")
+					fmt.Fprintln(os.Stderr, "Usage: sec set <path> [<value>] [--stdin] [--no-trim] [--comment <comment>] [--env-alias <alias>] [--expires <ttl>] [--rotate-cmd <cmd>] [--rotate-ttl <ttl>] [--meta key=value ...]")
 					os.Exit(1)
 				}
 				path := args[0]
@@ -139,12 +140,12 @@ func initRegistry() {
 			Aliases:     []string{"copy"},
 			Category:    "Core Secrets",
 			Description: "Duplicate a secret key path or prefix group",
-			Usage:       "sec cp <src-path> <dst-path> [--prefix]",
+			Usage:       "sec cp <src-path> <dst-path> [--prefix] [--from-profile <p>] [--to-profile <p>]",
 			ExpectsKeys: true,
 			Flags:       []string{"--prefix", "--from-profile", "--to-profile"},
 			Handler: func(profile string, args []string) {
 				if len(args) < 2 {
-					fmt.Fprintln(os.Stderr, "Usage: sec cp <src-path> <dst-path> [--prefix]")
+					fmt.Fprintln(os.Stderr, "Usage: sec cp <src-path> <dst-path> [--prefix] [--from-profile <p>] [--to-profile <p>]")
 					os.Exit(1)
 				}
 				handleCopy(profile, args[0], args[1], args[2:])
@@ -184,8 +185,8 @@ func initRegistry() {
 			Aliases:     []string{"list"},
 			Category:    "Core Secrets",
 			Description: "List secret paths, trash bin, or expiring keys",
-			Usage:       "sec ls [<prefix>] [--json] [--trash] [--expiring N]",
-			Flags:       []string{"--json", "--trash", "--expiring"},
+			Usage:       "sec ls [<prefix>] [--long] [--stale [N]] [--expiring [N]] [--trash] [--json]",
+			Flags:       []string{"--long", "-l", "--stale", "--expiring", "--trash", "--json"},
 			Handler:     handleList,
 		},
 		{
@@ -244,7 +245,8 @@ func initRegistry() {
 			Name:        "profile",
 			Category:    "Profiles & Scope",
 			Description: "Inspect or configure secret profiles & environment tier",
-			Usage:       "sec profile [new <name> [--seed <mnemonic>]] [ls] [set-env dev|dta|staging|prod]",
+			Usage:       "sec profile [new <name> [--seed <mnemonic>] [--secrc | --no-secrc]] [ls] [set-env dev|dta|staging|prod]",
+			Flags:       []string{"--seed", "--secrc", "--no-secrc"},
 			Subcommands: []SubcommandSpec{
 				{
 					Name:        "new",
@@ -283,7 +285,7 @@ func initRegistry() {
 			Name:        "run",
 			Category:    "Profiles & Scope",
 			Description: "Execute process with scoped secrets injected",
-			Usage:       "sec run [--redact] [--group <p>] [--allow-keys k1,k2] [--ssh-key <path>] -- <cmd>",
+			Usage:       "sec run [--redact] [--no-redact] [--dry-run] [--group <p>] [--allow-keys k1,k2] [--ssh-key <path>] [--ssh-passphrase-key <key>] -- <cmd>",
 			Flags:       []string{"--redact", "--group", "--allow-keys", "--ssh-key", "--ssh-passphrase-key", "--dry-run", "--no-redact"},
 			Handler:     handleRun,
 		},
@@ -291,7 +293,8 @@ func initRegistry() {
 			Name:        "ssh",
 			Category:    "Profiles & Scope",
 			Description: "Execute remote SSH commands or interactive sessions under vault authentication",
-			Usage:       "sec ssh [init <target>] | [<target> | user@host] [--ssh-key <path>] [--port <p>] [-- <cmd...>]",
+			Usage:       "sec ssh [init <target>] | [<target> | user@host] [--ssh-key <path>] [--ssh-passphrase-key <k>] [--port <p>] [--host <h>] [--user <u>] [--password <p>] [--key <k>] [--secrc | --no-secrc] [-- <cmd...>]",
+			Flags:       []string{"--ssh-key", "--ssh-passphrase-key", "--port", "--host", "--user", "--password", "--key", "--secrc", "--no-secrc"},
 			Subcommands: []SubcommandSpec{
 				{
 					Name:        "init",
@@ -299,8 +302,7 @@ func initRegistry() {
 					Flags:       []string{"--host", "--user", "--port", "--password", "--key", "--secrc", "--no-secrc"},
 				},
 			},
-			Flags:       []string{"--ssh-key", "--ssh-passphrase-key", "--port"},
-			Handler:     handleSSH,
+			Handler: handleSSH,
 		},
 		{
 			Name:        "stream",
@@ -343,8 +345,8 @@ func initRegistry() {
 			Name:        "check",
 			Category:    "Security & Maintenance",
 			Description: "Validate schema, audit entropy, scan history, audit scripts, or verify remote drift",
-			Usage:       "sec check [--template <f>] [--scan-weak] [--leaks] [--scripts [<path>]] [--remote <host> --uci <k>=<v>]",
-			Flags:       []string{"--template", "--scan-weak", "--leaks", "--scripts", "--remote", "--uci", "--env"},
+			Usage:       "sec check [--required <keys>] [--template <f>] [--scan-weak] [--leaks] [--scripts [<path>]] [--ping-host <host>] [--remote <host> --uci <k>=<v>] [--env <k>=<v>]",
+			Flags:       []string{"--required", "-r", "--template", "-t", "--scan-weak", "-w", "--leaks", "--scan-leaks", "-l", "--history", "--scripts", "--scan-scripts", "--ping-host", "--remote", "--uci", "--env"},
 			Handler:     handleCheck,
 		},
 		{
@@ -361,6 +363,7 @@ func initRegistry() {
 			Category:    "Security & Maintenance",
 			Description: "Install or execute git pre-commit privacy guard scanner",
 			Usage:       "sec githook <install|check> [--global]",
+			Flags:       []string{"--global"},
 			Subcommands: []SubcommandSpec{
 				{Name: "install", Description: "Install pre-commit hook in local or global git config", Flags: []string{"--global"}},
 				{Name: "check", Description: "Scan staged git files against privacy rules & active vault values"},
@@ -378,6 +381,7 @@ func initRegistry() {
 			Category:    "Profiles & Scope",
 			Description: "Execute target process under IDE debug session with enclave secrets",
 			Usage:       "sec ide-proxy [--profile <name>] -- <cmd> [args...]",
+			Flags:       []string{"--profile"},
 			Handler:     handleIDEProxy,
 		},
 		{
@@ -425,7 +429,7 @@ func initRegistry() {
 			Name:        "import",
 			Category:    "Backup & Migration",
 			Description: "Bulk import secrets from JSON, Doppler, or AWS payloads",
-			Usage:       "sec import <file> [--format <f>]",
+			Usage:       "sec import <file> [--format <f>] [--prefix <prefix>]",
 			Flags:       []string{"--format", "--prefix"},
 			Handler: func(profile string, args []string) {
 				if len(args) < 1 {
@@ -439,8 +443,8 @@ func initRegistry() {
 			Name:        "export",
 			Category:    "Backup & Migration",
 			Description: "Output decrypted database contents to stdout",
-			Usage:       "sec export [--format <json|env|aws|doppler|template>]",
-			Flags:       []string{"--format"},
+			Usage:       "sec export [--format <json|env|aws|doppler|template>] [--all-profiles] [--envelope | --no-envelope]",
+			Flags:       []string{"--format", "-f", "--all-profiles", "--envelope", "--no-envelope"},
 			Handler:     handleExport,
 		},
 		{
@@ -459,17 +463,45 @@ func initRegistry() {
 		{
 			Name:        "backup",
 			Category:    "Backup & Migration",
-			Description: "Export secrets to KeePassXC (.kdbx) file",
-			Usage:       "sec backup <file> [--custom-password | -p <password>]",
-			Flags:       []string{"--custom-password", "-p"},
+			Description: "Export secrets to KeePassXC (.kdbx) file or manage backups",
+			Usage:       "sec backup <export|import|list> [<file.kdbx>] [--password <p> | --custom-password] [--merge | --overwrite] [--full-metadata]",
+			Flags:       []string{"--password", "-p", "--custom-password", "--merge", "-m", "--overwrite", "--full-metadata"},
+			Subcommands: []SubcommandSpec{
+				{Name: "export", Description: "Export secrets to KeePassXC (.kdbx) file", Flags: []string{"--password", "-p", "--custom-password"}},
+				{Name: "import", Description: "Import secrets from KeePassXC (.kdbx) file", Flags: []string{"--password", "-p", "--merge", "-m", "--overwrite", "--full-metadata"}},
+				{Name: "list", Description: "List automatic KeePassXC backups in vault directory"},
+			},
 			Handler: func(profile string, args []string) {
-				if len(args) >= 1 && args[0] == "list" {
+				if len(args) < 1 {
+					fmt.Fprintln(os.Stderr, "Usage: sec backup <file.kdbx> [--custom-password] | sec backup <export|import|list> [<file.kdbx>]")
+					os.Exit(1)
+				}
+				if args[0] == "list" {
 					handleBackupList(profile)
 					return
 				}
-				if len(args) < 1 {
-					fmt.Fprintln(os.Stderr, "Usage: sec backup <file.kdbx> [--custom-password]")
-					os.Exit(1)
+				if args[0] == "import" {
+					if len(args) < 2 {
+						fmt.Fprintln(os.Stderr, "Usage: sec backup import <file.kdbx> [--password <p>] [--merge | --overwrite]")
+						os.Exit(1)
+					}
+					handleRestore(profile, args[1], args[2:])
+					return
+				}
+				if args[0] == "export" {
+					if len(args) < 2 {
+						fmt.Fprintln(os.Stderr, "Usage: sec backup export <file.kdbx> [--custom-password | -p <password>]")
+						os.Exit(1)
+					}
+					explicitPassword := ""
+					for i := 2; i < len(args); i++ {
+						if (args[i] == "-p" || args[i] == "--password" || args[i] == "--custom-password") && i+1 < len(args) {
+							explicitPassword = args[i+1]
+							break
+						}
+					}
+					handleBackup(profile, args[1], explicitPassword)
+					return
 				}
 				explicitPassword := ""
 				for i := 1; i < len(args); i++ {
@@ -482,11 +514,25 @@ func initRegistry() {
 			},
 		},
 		{
+			Name:        "restore",
+			Category:    "Backup & Migration",
+			Description: "Import/restore secrets from a KeePassXC (.kdbx) backup file",
+			Usage:       "sec restore <file.kdbx> [--password <p>] [--merge | --overwrite] [--full-metadata]",
+			Flags:       []string{"--password", "-p", "--merge", "-m", "--overwrite", "--full-metadata"},
+			Handler: func(profile string, args []string) {
+				if len(args) < 1 {
+					fmt.Fprintln(os.Stderr, "Usage: sec restore <file.kdbx> [--password <p>] [--merge | --overwrite] [--full-metadata]")
+					os.Exit(1)
+				}
+				handleRestore(profile, args[0], args[1:])
+			},
+		},
+		{
 			Name:        "snapshot",
 			Aliases:     []string{"snapshots"},
 			Category:    "Backup & Migration",
 			Description: "Manage point-in-time vault snapshots (list, create, restore)",
-			Usage:       "sec snapshot <list|create|restore>",
+			Usage:       "sec snapshot <list|create|restore> [--all-profiles] [--comment <c>] [--force] [--verbose] [--json]",
 			Flags:       []string{"--json", "--comment", "--force", "--all-profiles", "--verbose"},
 			Handler:     handleSnapshot,
 		},
@@ -523,9 +569,11 @@ func initRegistry() {
 			Name:        "skill",
 			Category:    "Session & Setup",
 			Description: "Install, view, or update AI assistant integration skills",
-			Usage:       "sec skill <install|status|update>",
+			Usage:       "sec skill <install|show|status|update> [--target <t>] [--scope <global|workspace>]",
+			Flags:       []string{"--target", "--scope"},
 			Subcommands: []SubcommandSpec{
 				{ Name: "install", Description: "Install sec-agent integration skill across IDEs" },
+				{ Name: "show", Aliases: []string{"view"}, Description: "Display AI integration instructions or manual to stdout" },
 				{ Name: "status", Aliases: []string{"list", "ls"}, Description: "Display installed AI agent skill status" },
 				{ Name: "update", Description: "Sync AI skills across all installed IDE targets" },
 			},
@@ -659,6 +707,7 @@ func initRegistry() {
 			Category:    "Profiles & Scope",
 			Description: "Run command with temporary .env file and auto-shred it on exit",
 			Usage:       "sec env-file [--profile <name>] -- <command> [args...]",
+			Flags:       []string{"--profile"},
 			Handler: func(profile string, args []string) {
 				handleEnvFile(profile, args)
 			},

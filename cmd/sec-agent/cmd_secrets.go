@@ -39,7 +39,7 @@ func handleGet(profile string, path string, args []string) {
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--json" {
 			showJSON = true
-		} else if args[i] == "--raw" || args[i] == "-r" {
+		} else if args[i] == "--raw" || args[i] == "-r" || args[i] == "--show" {
 			showRaw = true
 		} else if args[i] == "--copy" || args[i] == "-C" {
 			showCopy = true
@@ -70,7 +70,7 @@ func handleGet(profile string, path string, args []string) {
 			ShowExpired: showExpired,
 		})
 		if err != nil {
-			fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running. Please run 'sec open' to unlock the session."), "Run 'eval $(sec open)' to start/unlock the session.")
+			failDaemonNotRunning(profile)
 		}
 		if !resp.Success {
 			code, rem := mapDaemonError(resp.Error)
@@ -163,7 +163,7 @@ func handleGet(profile string, path string, args []string) {
 		ShowExpired: showExpired,
 	})
 	if err != nil {
-		fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running. Please run 'sec open' to unlock the session."), "Run 'eval $(sec open)' to start/unlock the session.")
+		failDaemonNotRunning(profile)
 	}
 
 	if !resp.Success {
@@ -395,7 +395,7 @@ func handleSet(profile string, path, value string, args []string) {
 		Expires:  expiresTimeStr,
 	})
 	if err != nil {
-		fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running. Please run 'sec open' to unlock the session."), "Run 'eval $(sec open)' to start/unlock the session.")
+		failDaemonNotRunning(profile)
 	}
 
 	if !resp.Success {
@@ -447,7 +447,7 @@ func handleCopy(profile string, srcPath, dstPath string, args []string) {
 			Path:   srcPath,
 		})
 		if err != nil {
-			fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon for source profile %q is not running. Run 'eval $(sec open --profile %s)' to unlock.", fromProfile, fromProfile), "")
+			failDaemonNotRunning(fromProfile)
 		}
 		if !resp.Success {
 			fail("SECRET_NOT_FOUND", fmt.Errorf("Source secret %q not found in profile %q: %s", srcPath, fromProfile, resp.Error), "")
@@ -460,7 +460,7 @@ func handleCopy(profile string, srcPath, dstPath string, args []string) {
 			Comment: resp.Comment,
 		})
 		if err != nil {
-			fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon for target profile %q is not running. Run 'eval $(sec open --profile %s)' to unlock.", toProfile, toProfile), "")
+			failDaemonNotRunning(toProfile)
 		}
 		if !setResp.Success {
 			fail("COPY_FAILED", fmt.Errorf("Failed writing secret to target profile %q: %s", toProfile, setResp.Error), "")
@@ -481,7 +481,7 @@ func handleCopy(profile string, srcPath, dstPath string, args []string) {
 		IsPrefix: isPrefix,
 	})
 	if err != nil {
-		fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running. Please run 'sec open' to unlock the session."), "Run 'eval $(sec open)' to start/unlock the session.")
+		failDaemonNotRunning(profile)
 	}
 	if !resp.Success {
 		code, rem := mapDaemonError(resp.Error)
@@ -514,7 +514,7 @@ func handleDiff(profile string, args []string) {
 
 	respA, err := queryDaemon(profile, daemon.IPCRequest{Action: "backup"})
 	if err != nil || !respA.Success {
-		fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running or locked for profile %q.", profile), "Run 'eval $(sec open)' to unlock.")
+		failDaemonNotRunning(profile)
 	}
 	keysA := make(map[string]bool)
 	for k := range respA.Secrets {
@@ -530,7 +530,7 @@ func handleDiff(profile string, args []string) {
 		targetLabel = fmt.Sprintf("Profile %q", otherProfile)
 		respB, err := queryDaemon(otherProfile, daemon.IPCRequest{Action: "backup"})
 		if err != nil || !respB.Success {
-			fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running or locked for other profile %q.", otherProfile), "Run 'sec open --profile "+otherProfile+"' to unlock.")
+			failDaemonNotRunning(otherProfile)
 		}
 		for k := range respB.Secrets {
 			if prefix == "" || strings.HasPrefix(k, prefix) {
@@ -615,7 +615,7 @@ func handleRename(profile string, oldPath, newPath string, args []string) {
 		IsPrefix: isPrefix,
 	})
 	if err != nil {
-		fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running. Please run 'sec open' to unlock the session."), "Run 'eval $(sec open)' to start/unlock the session.")
+		failDaemonNotRunning(profile)
 	}
 	if !resp.Success {
 		code, rem := mapDaemonError(resp.Error)
@@ -699,7 +699,7 @@ func handleRelabel(profile string, path string, args []string) {
 		ClearAlias: clearAlias,
 	})
 	if err != nil {
-		fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running. Please run 'sec open' to unlock the session."), "Run 'eval $(sec open)' to start/unlock the session.")
+		failDaemonNotRunning(profile)
 	}
 	if !resp.Success {
 		code, rem := mapDaemonError(resp.Error)
@@ -761,7 +761,7 @@ func handleList(profile string, args []string) {
 	if checkExpiring {
 		bkResp, err := queryDaemon(profile, daemon.IPCRequest{Action: "backup"})
 		if err != nil || !bkResp.Success {
-			fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running. Please run 'sec open' to unlock session."), "Run 'eval $(sec open)' to unlock.")
+			failDaemonNotRunning(profile)
 		}
 		now := time.Now()
 		limit := time.Duration(expiringDays*24) * time.Hour
@@ -814,7 +814,7 @@ func handleList(profile string, args []string) {
 	if showLong || checkStale {
 		bkResp, err := queryDaemon(profile, daemon.IPCRequest{Action: "backup"})
 		if err != nil || !bkResp.Success {
-			fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running. Please run 'sec open' to unlock session."), "Run 'eval $(sec open)' to unlock.")
+			failDaemonNotRunning(profile)
 		}
 		now := time.Now()
 		limit := time.Duration(staleDays*24) * time.Hour
@@ -907,7 +907,7 @@ func handleList(profile string, args []string) {
 		ShowTrash: showTrash,
 	})
 	if err != nil {
-		fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running. Please run 'sec open' to unlock the session."), "Run 'eval $(sec open)' to start/unlock the session.")
+		failDaemonNotRunning(profile)
 	}
 	if !resp.Success {
 		code, rem := mapDaemonError(resp.Error)
@@ -957,7 +957,7 @@ func handleDelete(profile string, path string, args []string) {
 		Permanent: permanent,
 	})
 	if err != nil {
-		fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running. Please run 'sec open' to unlock the session."), "Run 'eval $(sec open)' to start/unlock the session.")
+		failDaemonNotRunning(profile)
 	}
 	if !resp.Success {
 		code, rem := mapDaemonError(resp.Error)
@@ -973,7 +973,7 @@ func handleHistory(profile string, path string) {
 		Path:   path,
 	})
 	if err != nil {
-		fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running. Please run 'sec open' to unlock the session."), "Run 'eval $(sec open)' to start/unlock the session.")
+		failDaemonNotRunning(profile)
 	}
 	if !resp.Success {
 		code, rem := mapDaemonError(resp.Error)
@@ -1022,7 +1022,7 @@ func handleRollback(profile string, path string, args []string) {
 		TargetVersion: targetVer,
 	})
 	if err != nil {
-		fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running. Please run 'sec open' to unlock the session."), "Run 'eval $(sec open)' to start/unlock the session.")
+		failDaemonNotRunning(profile)
 	}
 	if !resp.Success {
 		code, rem := mapDaemonError(resp.Error)
@@ -1038,7 +1038,7 @@ func handleRestoreDeleted(profile string, path string) {
 		Path:   path,
 	})
 	if err != nil {
-		fail("DAEMON_NOT_RUNNING", fmt.Errorf("Daemon is not running. Please run 'sec open' to unlock the session."), "Run 'eval $(sec open)' to start/unlock the session.")
+		failDaemonNotRunning(profile)
 	}
 	if !resp.Success {
 		code, rem := mapDaemonError(resp.Error)

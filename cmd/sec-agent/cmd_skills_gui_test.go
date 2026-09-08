@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -271,6 +272,39 @@ func TestCopilotSkillCompactFormat(t *testing.T) {
 	}
 	if !strings.Contains(content, "sec run") || !strings.Contains(content, "sec open") {
 		t.Errorf("copilot instructions missing essential command patterns")
+	}
+}
+
+func TestSkillShow(t *testing.T) {
+	// Capture stdout when executing handleSkill with "show"
+	rescueStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	handleSkill("default", []string{"show", "--target", "copilot"})
+
+	w.Close()
+	outBytes, _ := io.ReadAll(r)
+	os.Stdout = rescueStdout
+
+	output := string(outBytes)
+	if !strings.Contains(output, "sec-agent — Secret Management Quick Reference") {
+		t.Errorf("expected copilot quick reference in skill show output, got: %s", output)
+	}
+	if !strings.Contains(output, "sec-agent skill show") {
+		t.Errorf("expected pointer to skill show in output, got: %s", output)
+	}
+
+	// Test default target (defaults to canonical full manual)
+	r2, w2, _ := os.Pipe()
+	os.Stdout = w2
+	handleSkill("default", []string{"show"})
+	w2.Close()
+	outBytes2, _ := io.ReadAll(r2)
+	os.Stdout = rescueStdout
+
+	if !strings.Contains(string(outBytes2), "sec-agent Secrets Management Integration") {
+		t.Errorf("expected default skill show to render full canonical manual")
 	}
 }
 
@@ -710,11 +744,11 @@ func TestSyncInstalledSkillsIfOutdated_UpgradeDirective(t *testing.T) {
 	_, _ = io.Copy(&buf, r)
 	errOutput := buf.String()
 
-	if !strings.Contains(errOutput, "[sec-agent] ⚡ Upgraded AI agent skill from v2.9.1 to "+Version) {
-		t.Errorf("expected upgrade notice in stderr, got:\n%s", errOutput)
+	if !strings.Contains(errOutput, "[sec-agent] Refreshed AI assistant skill instructions across 1 location(s):") {
+		t.Errorf("expected refreshed notice in stderr, got:\n%s", errOutput)
 	}
-	if !strings.Contains(errOutput, "ACTION REQUIRED FOR AI ASSISTANTS") {
-		t.Errorf("expected action required notice in stderr, got:\n%s", errOutput)
+	if strings.Contains(errOutput, "ACTION REQUIRED FOR AI ASSISTANTS") {
+		t.Errorf("expected no prompt-injection phrasing in stderr, got:\n%s", errOutput)
 	}
 	if !strings.Contains(errOutput, skillFile) {
 		t.Errorf("expected updated skill path in stderr, got:\n%s", errOutput)
@@ -740,9 +774,26 @@ func TestSyncInstalledSkillsIfOutdated_UpgradeDirective(t *testing.T) {
 	if !strings.Contains(string(data), "version: "+Version) {
 		t.Errorf("expected skill file to contain version: %s, got:\n%s", Version, string(data))
 	}
+
+	// 2. Second invocation: on-disk content is already identical, so stderr should be clean!
+	r2, w2, _ := os.Pipe()
+	os.Stderr = w2
+
+	syncInstalledSkillsIfOutdated()
+
+	_ = w2.Close()
+	os.Stderr = oldStderr
+
+	var buf2 bytes.Buffer
+	_, _ = io.Copy(&buf2, r2)
+	errOutput2 := buf2.String()
+
+	if errOutput2 != "" {
+		t.Errorf("expected zero stderr output when skill is already identical, got:\n%s", errOutput2)
+	}
 }
 
-func TestHandleStatusQuick_SkillReporting(t *testing.T) {
+func TestSyncInstalledSkills_NoOpWhenIdentical(t *testing.T) {
 	tempDir := t.TempDir()
 	origConfig := os.Getenv("SEC_CONFIG_DIR")
 	os.Setenv("SEC_CONFIG_DIR", tempDir)
@@ -754,7 +805,74 @@ func TestHandleStatusQuick_SkillReporting(t *testing.T) {
 		}
 	}()
 
-	profile := "status-test-profile"
+	skillPath := filepath.Join(tempDir, "copilot-instructions.md")
+	// Write exact candidate content for copilot
+	if err := os.WriteFile(skillPath, []byte(copilotInstructionsTemplate), 0600); err != nil {
+		t.Fatalf("failed to write copilot skill: %v", err)
+	}
+
+	manifest := &SkillManifest{
+		Version: "v2.9.1",
+		Skills: []InstalledSkillEntry{
+			{
+				Target:  "copilot",
+				Scope:   "workspace",
+				Path:    skillPath,
+				Version: "v2.9.1",
+			},
+		},
+	}
+	if err := saveSkillManifest(manifest); err != nil {
+		t.Fatalf("failed to save manifest: %v", err)
+	}
+
+	oldStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	syncInstalledSkillsIfOutdated()
+
+	_ = w.Close()
+	os.Stderr = oldStderr
+
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, r)
+	output := buf.String()
+
+	if output != "" {
+		t.Errorf("expected empty output when skill content was already identical, got: %s", output)
+	}
+
+	m, err := loadSkillManifest()
+	if err != nil {
+		t.Fatalf("failed to reload manifest: %v", err)
+	}
+	if m.Version != Version {
+		t.Errorf("expected manifest version to be silently aligned to %s, got %s", Version, m.Version)
+	}
+	if m.Skills[0].Version != Version {
+		t.Errorf("expected skill entry version to be %s, got %s", Version, m.Skills[0].Version)
+	}
+}
+
+func TestHandleStatusQuick_SkillReporting(t *testing.T) {
+	tempDir, err := os.MkdirTemp("/tmp", "sq-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	origConfig := os.Getenv("SEC_CONFIG_DIR")
+	os.Setenv("SEC_CONFIG_DIR", tempDir)
+	defer func() {
+		if origConfig != "" {
+			os.Setenv("SEC_CONFIG_DIR", origConfig)
+		} else {
+			os.Unsetenv("SEC_CONFIG_DIR")
+		}
+	}()
+
+	profile := "p"
 	sockPath, err := config.GetSocketPath(profile)
 	if err != nil {
 		t.Fatalf("failed to get socket path: %v", err)
@@ -762,10 +880,29 @@ func TestHandleStatusQuick_SkillReporting(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(sockPath), 0700); err != nil {
 		t.Fatalf("failed to create socket dir: %v", err)
 	}
-	if err := os.WriteFile(sockPath, []byte(""), 0600); err != nil {
-		t.Fatalf("failed to create dummy socket: %v", err)
+	_ = os.Remove(sockPath)
+
+	// Spin up a responsive mock unix socket listener
+	l, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("failed to listen on unix socket: %v", err)
 	}
+	defer l.Close()
 	defer os.Remove(sockPath)
+
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+			var req daemon.IPCRequest
+			_ = json.NewDecoder(conn).Decode(&req)
+			resp := daemon.IPCResponse{Success: true, Version: Version}
+			_ = json.NewEncoder(conn).Encode(resp)
+			_ = conn.Close()
+		}
+	}()
 
 	skillPath := filepath.Join(tempDir, "SKILL.md")
 	manifest := &SkillManifest{
@@ -801,6 +938,9 @@ func TestHandleStatusQuick_SkillReporting(t *testing.T) {
 	if !strings.Contains(textOut, "[✓] AI Skill Doc:   "+skillPath+" ("+Version+": Synced)") {
 		t.Errorf("expected skill line in status --quick, got:\n%s", textOut)
 	}
+	if !strings.Contains(textOut, "[✓] Socket Status:  ACTIVE (IPC socket responsive)") {
+		t.Errorf("expected active socket responsive status, got:\n%s", textOut)
+	}
 
 	// 2. Test JSON output
 	r2, w2, _ := os.Pipe()
@@ -830,5 +970,49 @@ func TestHandleStatusQuick_SkillReporting(t *testing.T) {
 	if res["skill_synced"] != true {
 		t.Errorf("expected skill_synced == true, got %v", res["skill_synced"])
 	}
+	if res["status"] != "ACTIVE" {
+		t.Errorf("expected status == ACTIVE, got %v", res["status"])
+	}
 }
+
+func TestHandleStatusQuick_OrphanedSocketDetection(t *testing.T) {
+	tempDir := t.TempDir()
+	profile := "orphaned-socket-test-profile"
+
+	sockPath, err := config.GetSocketPath(profile)
+	if err != nil {
+		t.Fatalf("failed to get socket path: %v", err)
+	}
+	_ = os.Remove(sockPath)
+	if err := os.MkdirAll(filepath.Dir(sockPath), 0700); err != nil {
+		t.Fatalf("failed to create socket dir: %v", err)
+	}
+
+	// Create an orphaned regular file at the socket path (no process listening)
+	if err := os.WriteFile(sockPath, []byte(""), 0600); err != nil {
+		t.Fatalf("failed to write dummy socket file: %v", err)
+	}
+	defer os.Remove(sockPath)
+
+	// Build sec binary
+	binPath := filepath.Join(tempDir, "sec_orphaned_bin")
+	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build binary: %v\nOutput: %s", err, out)
+	}
+	defer os.Remove(binPath)
+
+	cmd := exec.Command(binPath, "status", "--quick", "--profile", profile)
+	cmd.Env = append(os.Environ(), "SEC_TEST_MODE=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected status --quick on orphaned socket to exit with error, output:\n%s", out)
+	}
+
+	outStr := string(out)
+	if !strings.Contains(outStr, "Stale socket file detected") && !strings.Contains(outStr, "is not running") {
+		t.Errorf("expected output to mention stale socket or daemon not running, got:\n%s", outStr)
+	}
+}
+
 
