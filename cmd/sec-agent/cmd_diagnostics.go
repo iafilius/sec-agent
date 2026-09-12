@@ -18,7 +18,45 @@ import (
 	"secure_secrets/internal/store"
 )
 
-func handleDoctor(profile string) {
+func handleDoctor(profile string, args []string) {
+	skipKeychain := false
+	repairMode := false
+	for _, a := range args {
+		if a == "--skip-keychain" {
+			skipKeychain = true
+		} else if a == "--repair" {
+			repairMode = true
+		}
+	}
+
+	if repairMode {
+		fmt.Println("=== sec-agent Vault Envelope Structure Repair ===")
+		vaults, vErr := store.ListVaultFiles()
+		if vErr != nil {
+			fmt.Printf("[✗] Failed to list vault files: %v\n", vErr)
+			os.Exit(1)
+		}
+		repairedCount := 0
+		for _, v := range vaults {
+			if v.NestingDepth > 1 {
+				fmt.Printf("[⏳] Profile %-20s Vault: Nested Envelope (Depth: %d). Flattening...\n", v.Profile, v.NestingDepth)
+				origDepth, err := store.FlattenVaultFile(v.Path)
+				if err != nil {
+					fmt.Printf("[✗] Profile %-20s Repair failed: %v\n", v.Profile, err)
+				} else {
+					fmt.Printf("[✓] Profile %-20s Repaired successfully! Flattened from depth %d to 1 (Backup: %s.bak_nested)\n", v.Profile, origDepth, filepath.Base(v.Path))
+					repairedCount++
+				}
+			}
+		}
+		if repairedCount == 0 {
+			fmt.Println("[✓] All vault envelopes are already clean (no nested envelopes found).")
+		} else {
+			fmt.Printf("\n[✓] Successfully repaired %d nested vault envelope(s).\n", repairedCount)
+		}
+		return
+	}
+
 	fmt.Println("=== sec-agent System & Security Doctor ===")
 
 	// 1. Operating System & Arch
@@ -74,9 +112,24 @@ func handleDoctor(profile string) {
 
 	// 7. Vault Envelope & Keychain Diagnostics across all profiles
 	fmt.Println("\n--- Vault & Keychain Health ---")
-	fmt.Println("[ℹ] Auditing enrolled profile keys in macOS Keychain (Touch ID prompt may appear)...")
 	vaults, vErr := store.ListVaultFiles()
 	if vErr == nil {
+		for _, v := range vaults {
+			if v.NestingDepth > 1 {
+				fmt.Printf("[⚠️] Profile %-20s Vault: Nested Envelope Detected (Depth: %d) — Run 'sec doctor --repair' to auto-heal\n", v.Profile, v.NestingDepth)
+			}
+		}
+	}
+
+	if skipKeychain || (!isInteractiveTerminal() && os.Getenv("SEC_TEST_MODE") != "1") {
+		reason := "headless / non-interactive terminal detected"
+		if skipKeychain {
+			reason = "--skip-keychain flag supplied"
+		}
+		fmt.Printf("[ℹ] Skipped live Touch ID Keychain probe (%s).\n", reason)
+		fmt.Println("    (Run 'sec doctor' in an interactive terminal to verify Touch ID hardware keys)")
+	} else if vErr == nil {
+		fmt.Println("[ℹ] Auditing enrolled profile keys in macOS Keychain (Touch ID prompt may appear)...")
 		for _, v := range vaults {
 			getter, _ := keychain.GetKeychainAccessPair(v.Profile)
 			kcKey, err := getter()
@@ -217,6 +270,8 @@ func handleStatusQuick(profile string) {
 		}
 		fmt.Printf("[✓] AI Skill Doc:   %s (%s: %s)\n", activeSkillPath, Version, syncMsg)
 	}
+
+	fmt.Println("\n💡 Encountered friction, bugs, or have an idea? Run 'sec feedback' or submit an issue on GitHub.")
 }
 
 func handleStatusAll() {

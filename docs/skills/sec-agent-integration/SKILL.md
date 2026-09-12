@@ -1,10 +1,10 @@
 ---
 name: sec-agent-integration
 description: Use the sec-agent CLI utility to start background daemons, store secrets, run applications in isolated environments, migrate dotenv files, install AI skills, inspect snapshots, and manage backups.
-version: v2.11.0
+version: v2.12.0
 ---
 
-# sec-agent Secrets Management Integration (v2.11.0)
+# sec-agent Secrets Management Integration (v2.12.0)
 
 This skill enables AI coding agents and autonomous assistants to use the `sec-agent` CLI tool (v1.9.4+) to securely retrieve credentials, run application build/test/terraform pipelines in isolated process environments, migrate dotenv configuration files, install integration skills across IDEs, inspect point-in-time snapshots (`sec snapshot`), and manage KeePassXC `.kdbx` backups on macOS.
 
@@ -26,6 +26,7 @@ When operating in a workspace that uses `sec-agent` (indicated by a `.secrc` fil
    * **Daemon Locked / Not Running**: If the task requires secrets, the agent can directly execute `sec-agent open` (or `sec open`) with an appropriate timeout (~15s). On macOS, the operating system natively displays the system Touch ID biometric window on screen; the user approves via fingerprint, and the command completes with zero terminal context switching required. Alternatively, prompt the user:
      > 🔑 **`sec-agent` session is currently locked.**
      > Please approve the Touch ID prompt (or run `eval $(sec open)`) to retain session access for the execution run.
+   * **Decryption Authentication Errors**: If unlocking or recovery returns `cipher: message authentication failed`, immediately run `sec-agent doctor` to check for nested envelope depth anomalies before advising the user to re-enter their 24-word recovery seed.
 
 ### 1.2. Pre-flight Initialization Guard (`sec-agent init`)
 When running `sec-agent` on a fresh workstation or uninitialized environment:
@@ -50,20 +51,25 @@ sec-agent version [--json]
 sec-agent status --all
 
 # Run deep pre-flight vault envelope, keychain key, and system diagnostics
-sec-agent doctor
+# (Pass --skip-keychain or run in headless/agent environments to skip live Touch ID challenge)
+sec-agent doctor [--skip-keychain]
+
+# Audit and automatically flatten multi-nested corrupted vault envelopes offline
+sec-agent doctor --repair
 ```
 
 * **Daemon "Active" / "Running"**: The session is unlocked and secrets are queryable.
 * **Daemon "Session locked" / "Not running"**: Tell the user to run `eval $(sec-agent open)`.
 * **Version Mismatch**: Advise user to run `sec-agent restart` and `eval $(sec-agent open)`.
+* **Multi-Nested Envelope Auto-Repair (`sec doctor --repair`)**: If diagnostic output reports `Depth Anomaly Detected (nesting_depth > 1)` on any `.enc` vault, running `sec doctor --repair` safely writes a `.bak_nested` backup and flattens all affected profile envelopes down to single-layer format offline without requiring Keychain biometrics or seed phrases.
 
 ### 1.4. Skill Version Synchronization & Dynamic Re-Read Protocol
 When `sec-agent` is updated on the workstation (e.g. via Homebrew or source rebuild), the CLI automatically updates installed skill files across all configured IDE locations on its next execution.
 
 **CRITICAL RULE FOR AI ASSISTANTS**:
 1. **Dynamic Version Drift Detection**: When executing `sec status`, `sec status --quick`, or any CLI command, if the CLI output indicates:
-   * A structured upgrade notice (`[sec-agent] ⚡ Upgraded AI agent skill from ... to v2.11.0`), or
-   * A CLI version newer than this document's declared version (`v2.11.0`),
+   * A structured upgrade notice (`[sec-agent] ⚡ Upgraded AI agent skill from ... to v2.12.0`), or
+   * A CLI version newer than this document's declared version (`v2.12.0`),
 2. **Immediate Re-Read Obligation**: The AI agent **MUST IMMEDIATELY INVOKE its file viewing tool** (e.g. `view_file`) on the installed skill path (such as `.agents/skills/sec-agent-integration/SKILL.md` or `~/.gemini/config/skills/sec-agent-integration/SKILL.md`) before taking further action. This purges stale cached instructions from the LLM conversation context and equips the agent with new commands, flags, and security rules.
 
 ### 1.5. Guided Profile Onboarding Wizard (`sec profile new <name>`)
@@ -79,8 +85,9 @@ sec profile new <profile-name> --seed "<24-word mnemonic>" [--secrc | --no-secrc
 sec profile ls (alias: sec profile list)
 ```
 * Automatically validates profile name invariants (rejecting slashes, spaces, and path traversals).
-* Interactively verifies recovery seed words 4, 12, and 20 to ensure offline backup safety.
-* Automatically offers to generate a workspace `.secrc` (`{"profile": "<name>"}`) binding the active directory to the new vault.
+* Outputs both a 4-column reading table and a raw single-line space-separated mnemonic string for 1-click password manager copying.
+* Interactively verifies recovery seed words 4, 12, and 20, or accepts `r` at verification prompt to supply and link an existing 24-word seed phrase.
+* Automatically offers to generate a workspace `.secrc` (`{"profile": "<name>"}`) binding the active directory to the new vault, echoing the resolved path and warning if outside a git repository.
 
 ---
 
@@ -93,12 +100,17 @@ sec profile ls (alias: sec profile list)
 # Install AI skill for a specific IDE target and scope
 sec-agent skill install --target <target> [--scope global|workspace]
 
-# View status of installed skills tracked in skills_manifest.json
+# View status of installed skills, scopes, and live disk integrity
 sec-agent skill status
 
-# Update all manifest-tracked skills to current binary version
+# Update all manifest-tracked and discovered workspace skills to current binary version
 sec-agent skill update
 ```
+
+* **Scope Definitions**:
+  * `global`: Machine-wide in user home directory (`~/.gemini/config/skills/`, `~/.cursor/rules/`, `~/.claude/skills/`). Applies across all projects on this machine.
+  * `workspace`: Project-bound in current repository (`.github/copilot-instructions.md`, `.agents/skills/`, `.cursor/rules/`, `.windsurfrules`). Committed and shared with project source code.
+* **Live Filesystem Scanning**: `skill status` automatically discovers unmanifested workspace skill files in the active working directory and validates byte-level integrity against the running binary.
 
 | IDE Target | Scope | Destination Path |
 | :--- | :--- | :--- |
@@ -113,7 +125,7 @@ sec-agent skill update
 
 ### 2.2. Automatic Upgrade Sync (`skills_manifest.json`)
 When `sec-agent` is updated (e.g. via `brew upgrade sec-agent`), the next CLI execution compares `skills_manifest.json` manifest version with binary `Version` and automatically updates installed skill files across all tracked IDE locations in-place, printing:
-`[sec-agent] Automatically upgraded AI agent skills (v2.11.0) across N location(s).`
+`[sec-agent] Automatically upgraded AI agent skills (v2.12.0) across N location(s).`
 
 ---
 
@@ -348,6 +360,7 @@ When users request new features or report friction during tool usage:
 1. **Run `sec-agent feedback` / `sec-agent feedback --example`**: Fetch structured feedback guidelines, client environment fingerprint, situation sketch format, and impact tier template.
 2. **Always Document Operational Rationale & Diagnostics:** Capture the exact problem statement, client runtime telemetry (code editor, AI assistant/extension, model, tool execution mode), an ASCII situation sketch of the flow and friction point, impact classification (Critical Security Leak vs. Boundary vs. Agent Friction vs. Token Waste), and real-world usecases.
 3. **High Quality OpenSpec Proposals:** Create clear, well-motivated OpenSpec proposals (`proposal.md`, `design.md`, `specs/`, `tasks.md`) detailing the operational motivation before implementing.
+4. **Proactive Feedback Escalation Directive**: Whenever an AI agent encounters unexpected CLI errors, unhandled edge-cases (e.g. envelope nesting anomalies), process lockouts, or has to perform an undocumented workaround, the agent **MUST** surface the friction point to the user and offer to generate a structured feedback proposal using `sec-agent feedback --example`. Never silently swallow or ignore tooling friction.
 
 ### 5.19. Secret Version History & Soft-Delete Recovery Protocol
 1. **View Secret History:** Use `sec-agent history <path>` to review past version snapshots, timestamps, and comments before updating or troubleshooting.

@@ -179,11 +179,13 @@ func LoadStore(profile string, masterKey []byte) (*EncryptedStore, error) {
 		return nil, fmt.Errorf("failed to read store file: %w", err)
 	}
 
-	// v2.0 detection: JSON envelope starts with '{'
-	if len(data) > 0 && data[0] == '{' {
+	// v2.0 detection: defensively peel nested JSON envelopes down to raw ciphertext
+	for len(data) > 0 && data[0] == '{' {
 		var env VaultEnvelope
 		if jsonErr := json.Unmarshal(data, &env); jsonErr == nil && env.Payload != nil {
 			data = env.Payload // unwrap to inner AES-GCM ciphertext
+		} else {
+			break
 		}
 	}
 
@@ -247,6 +249,14 @@ func SaveStore(profile string, store *EncryptedStore, masterKey []byte) error {
 	ciphertext, err := crypto.Encrypt(masterKey, plaintext)
 	if err != nil {
 		return fmt.Errorf("failed to encrypt store: %w", err)
+	}
+
+	// Pre-save invariant check: Ciphertext must never be a JSON envelope
+	if len(ciphertext) > 0 && ciphertext[0] == '{' {
+		var checkEnv VaultEnvelope
+		if jsonErr := json.Unmarshal(ciphertext, &checkEnv); jsonErr == nil && checkEnv.SchemaVersion == SchemaV2 {
+			return fmt.Errorf("%w: ciphertext is a valid JSON vault envelope", ErrNestedPayload)
+		}
 	}
 
 	env := &VaultEnvelope{

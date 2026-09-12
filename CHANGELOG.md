@@ -5,6 +5,23 @@ All notable changes to `sec-agent` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v2.12.0] - 2026-09-12
+
+### Added & Enhanced
+- **Vault Envelope Self-Healing & Peeling Protection**:
+  - Implemented transparent multi-envelope iterative loop peeling in `store.ReadVaultEnvelope` and `store.LoadStore`, resolving `cipher: message authentication failed` caused by legacy re-wrap nesting (up to 50 depth levels) without requiring user intervention.
+  - Added pre-save invariant validation in `store.SaveStore` to verify ciphertext bytes never unmarshal as a V2 vault envelope, returning typed `store.ErrNestedPayload` before touching disk.
+  - Implemented offline un-nesting engine primitive `store.FlattenVaultFile` with automatic `.bak_nested` backup generation and atomic file replacement.
+- **Offline CLI Diagnostics & Repair Mode (`sec doctor --repair`)**:
+  - Extended `sec doctor` to audit envelope nesting depth across all local profile `.enc` files and report nesting anomalies even in non-interactive/headless (`--skip-keychain`) mode.
+  - Implemented `sec doctor --repair` to inspect and flatten all detected multi-nested profile vaults offline without requiring Keychain biometrics, active sessions, or recovery seed phrases.
+  - Synchronized shell autocompletion (`sec completion`) across Zsh, Bash, and Fish for `--repair`.
+- **Proactive Feedback Guidance & Touchpoints**:
+  - Added feedback invitation footers to `sec doctor` and `sec version` pointing users and agents to `sec feedback` and upstream issue trackers.
+  - Updated embedded AI agent integration skill (`SKILL.md`) with explicit guidance on offline envelope recovery and a proactive feedback escalation directive for unexpected runtime friction.
+
+---
+
 ## [v2.11.0] - 2026-09-08
 
 ### Added & Enhanced

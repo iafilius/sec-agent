@@ -32,7 +32,7 @@ var embeddedSkillBytes []byte
 
 var jsonErrors bool
 var (
-	Version   = "v2.11.0"
+	Version   = "v2.12.0"
 	BuildDate = "unknown"
 )
 
@@ -711,6 +711,8 @@ func handleVersion(profile string) {
 			}
 		}
 	}
+
+	fmt.Println("\n💬 Feedback & Proposals: Run 'sec feedback' or visit https://github.com/iafilius/sec-agent")
 }
 
 func runDaemon(profile string) {

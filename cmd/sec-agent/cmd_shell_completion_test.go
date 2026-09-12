@@ -158,6 +158,15 @@ func TestShellCompletionOutput(t *testing.T) {
 				t.Errorf("expected shell completion for %s to contain skill subcommand %q, got:\n%s", shell, sub, out)
 			}
 		}
+		if shell == "fish" {
+			if !strings.Contains(out, "-l repair") {
+				t.Errorf("expected shell completion for fish to contain '-l repair', got:\n%s", out)
+			}
+		} else {
+			if !strings.Contains(out, "--repair") {
+				t.Errorf("expected shell completion for %s to contain '--repair', got:\n%s", shell, out)
+			}
+		}
 	}
 }
 

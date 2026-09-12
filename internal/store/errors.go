@@ -13,6 +13,7 @@ var (
 	ErrStoreUninitialized = errors.New("store is uninitialized")
 	ErrPathEmpty          = errors.New("path cannot be empty")
 	ErrSecretNotDeleted   = errors.New("secret is not deleted")
+	ErrNestedPayload      = errors.New("invariant violation: payload contains nested vault envelope")
 )
 
 // ErrorCode represents a strongly-typed API error code for IPC and REST payloads.
@@ -24,6 +25,7 @@ const (
 	ErrCodeVaultLocked      ErrorCode = "ERR_VAULT_LOCKED"
 	ErrCodeMasterKeyMismatch ErrorCode = "ERR_MASTER_KEY_MISMATCH"
 	ErrCodeProfileNotFound  ErrorCode = "ERR_PROFILE_NOT_FOUND"
+	ErrCodeNestedPayload    ErrorCode = "ERR_NESTED_PAYLOAD"
 	ErrCodeInvalidToken     ErrorCode = "ERR_INVALID_TOKEN"
 	ErrCodeAccessDenied     ErrorCode = "ERR_ACCESS_DENIED"
 	ErrCodeInternalError    ErrorCode = "ERR_INTERNAL_ERROR"
@@ -43,6 +45,8 @@ func ToErrorCode(err error) ErrorCode {
 		return ErrCodeMasterKeyMismatch
 	case errors.Is(err, ErrProfileNotFound):
 		return ErrCodeProfileNotFound
+	case errors.Is(err, ErrNestedPayload):
+		return ErrCodeNestedPayload
 	default:
 		return ErrCodeInternalError
 	}

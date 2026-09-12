@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"secure_secrets/internal/crypto"
@@ -307,3 +308,203 @@ func TestVaultEnvelopeMasterKeySHA256OnDisk(t *testing.T) {
 		t.Errorf("expected MasterKeySHA256 %s, got %s", expectedFP, readEnv.MasterKeySHA256)
 	}
 }
+
+func TestVaultEnvelopeDefensiveUnnesting(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	profile := "nested-test-prof"
+	vaultPath, err := GetStorePath(profile)
+	if err != nil {
+		t.Fatalf("GetStorePath() error = %v", err)
+	}
+	_ = os.MkdirAll(filepath.Dir(vaultPath), 0700)
+
+	masterKey, err := crypto.GenerateRandomKey()
+	if err != nil {
+		t.Fatalf("GenerateRandomKey() error = %v", err)
+	}
+	mnemonic, err := crypto.GenerateMnemonic()
+	if err != nil {
+		t.Fatalf("GenerateMnemonic() error = %v", err)
+	}
+	slot1, err := WrapMasterKey(mnemonic, masterKey)
+	if err != nil {
+		t.Fatalf("WrapMasterKey() error = %v", err)
+	}
+
+	// 1. Create base encrypted payload
+	originalStore := &EncryptedStore{
+		Secrets: map[SecretKey]SecretEntry{
+			"db/password": {Value: "s3cr3t-p@ss"},
+		},
+	}
+	storeJSON, _ := json.Marshal(originalStore)
+	genuineCiphertext, err := crypto.Encrypt(masterKey, storeJSON)
+	if err != nil {
+		t.Fatalf("Encrypt() error = %v", err)
+	}
+
+	// 2. Artificially nest 15 levels deep
+	currPayload := genuineCiphertext
+	for level := 1; level <= 15; level++ {
+		env := &VaultEnvelope{
+			SchemaVersion:   SchemaV2,
+			UpgradedAt:      time.Now().UTC(),
+			MasterKeySHA256: crypto.MasterKeyFingerprint(masterKey),
+			Slot1:           slot1,
+			Payload:         currPayload,
+		}
+		marshaled, mErr := json.Marshal(env)
+		if mErr != nil {
+			t.Fatalf("json.Marshal() level %d error = %v", level, mErr)
+		}
+		currPayload = marshaled
+	}
+
+	// Write 15-level nested file to disk
+	if err := os.WriteFile(vaultPath, currPayload, 0600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	// 3. Verify InspectVaultNesting reports 15
+	detectedDepth := InspectVaultNesting(vaultPath)
+	if detectedDepth != 15 {
+		t.Fatalf("expected nesting depth 15, got %d", detectedDepth)
+	}
+
+	// 4. Test ReadVaultEnvelope defensively peels to innermost ciphertext
+	readEnv, err := ReadVaultEnvelope(vaultPath)
+	if err != nil {
+		t.Fatalf("ReadVaultEnvelope() error = %v", err)
+	}
+	if len(readEnv.Payload) == 0 || readEnv.Payload[0] == '{' {
+		t.Fatalf("ReadVaultEnvelope failed to peel innermost payload: payload starts with '{'")
+	}
+	if string(readEnv.Payload) != string(genuineCiphertext) {
+		t.Fatalf("peeled payload does not match original genuine ciphertext")
+	}
+
+	// 5. Test LoadStore successfully decrypts the 15-level nested file
+	loadedStore, err := LoadStore(profile, masterKey)
+	if err != nil {
+		t.Fatalf("LoadStore() on 15-level nested vault failed: %v", err)
+	}
+	if loadedStore.Secrets["db/password"].Value != "s3cr3t-p@ss" {
+		t.Errorf("expected secret value 's3cr3t-p@ss', got %q", loadedStore.Secrets["db/password"].Value)
+	}
+
+	// 6. Test SaveStore writes back a single-layer Depth-1 envelope
+	if err := SaveStore(profile, loadedStore, masterKey); err != nil {
+		t.Fatalf("SaveStore() after unnesting failed: %v", err)
+	}
+	newDepth := InspectVaultNesting(vaultPath)
+	if newDepth != 1 {
+		t.Errorf("expected vault depth to be 1 after SaveStore, got %d", newDepth)
+	}
+}
+
+func TestFlattenVaultFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	profile := "flatten-test-prof"
+	vaultPath, _ := GetStorePath(profile)
+	_ = os.MkdirAll(filepath.Dir(vaultPath), 0700)
+
+	masterKey, _ := crypto.GenerateRandomKey()
+	mnemonic, _ := crypto.GenerateMnemonic()
+	slot1, _ := WrapMasterKey(mnemonic, masterKey)
+
+	originalStore := &EncryptedStore{
+		Secrets: map[SecretKey]SecretEntry{
+			"api/key": {Value: "test-api-key"},
+		},
+	}
+	storeJSON, _ := json.Marshal(originalStore)
+	genuineCiphertext, _ := crypto.Encrypt(masterKey, storeJSON)
+
+	// Create 5-level nested file
+	currPayload := genuineCiphertext
+	for level := 1; level <= 5; level++ {
+		env := &VaultEnvelope{
+			SchemaVersion: SchemaV2,
+			Slot1:         slot1,
+			Payload:       currPayload,
+		}
+		currPayload, _ = json.Marshal(env)
+	}
+	_ = os.WriteFile(vaultPath, currPayload, 0600)
+
+	if d := InspectVaultNesting(vaultPath); d != 5 {
+		t.Fatalf("expected depth 5 before flatten, got %d", d)
+	}
+
+	// Flatten
+	origDepth, err := FlattenVaultFile(vaultPath)
+	if err != nil {
+		t.Fatalf("FlattenVaultFile() error = %v", err)
+	}
+	if origDepth != 5 {
+		t.Errorf("expected FlattenVaultFile to return origDepth 5, got %d", origDepth)
+	}
+
+	// Check backup file exists
+	bakPath := vaultPath + ".bak_nested"
+	if _, statErr := os.Stat(bakPath); statErr != nil {
+		t.Errorf("expected backup file %s to exist: %v", bakPath, statErr)
+	}
+
+	// Check new depth is 1
+	if d := InspectVaultNesting(vaultPath); d != 1 {
+		t.Errorf("expected depth 1 after flatten, got %d", d)
+	}
+
+	// Verify LoadStore works smoothly
+	loaded, err := LoadStore(profile, masterKey)
+	if err != nil {
+		t.Fatalf("LoadStore() after FlattenVaultFile failed: %v", err)
+	}
+	if loaded.Secrets["api/key"].Value != "test-api-key" {
+		t.Errorf("expected 'test-api-key', got %q", loaded.Secrets["api/key"].Value)
+	}
+}
+
+func TestVaultEnvelopePreSaveInvariant(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	profile := "invariant-test-prof"
+	vaultPath, _ := GetStorePath(profile)
+	_ = os.MkdirAll(filepath.Dir(vaultPath), 0700)
+
+	inner := &VaultEnvelope{
+		SchemaVersion: SchemaV2,
+		Payload:       []byte("innermost"),
+	}
+	innerBytes, _ := json.Marshal(inner)
+
+	// Direct WriteVaultEnvelope with nested JSON envelope bytes in payload
+	env := &VaultEnvelope{
+		SchemaVersion: SchemaV2,
+		Payload:       innerBytes,
+	}
+	if err := WriteVaultEnvelope(vaultPath, env); err != nil {
+		t.Fatalf("WriteVaultEnvelope() error = %v", err)
+	}
+
+	// WriteVaultEnvelope should have peeled env.Payload
+	readEnv, err := ReadVaultEnvelope(vaultPath)
+	if err != nil {
+		t.Fatalf("ReadVaultEnvelope() error = %v", err)
+	}
+	if string(readEnv.Payload) != "innermost" {
+		t.Errorf("expected peeled payload 'innermost', got %q", string(readEnv.Payload))
+	}
+
+	// Verify ToErrorCode maps ErrNestedPayload properly
+	if code := ToErrorCode(ErrNestedPayload); code != ErrCodeNestedPayload {
+		t.Errorf("expected %s, got %s", ErrCodeNestedPayload, code)
+	}
+}
+

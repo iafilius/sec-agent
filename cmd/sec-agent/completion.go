@@ -178,6 +178,11 @@ complete -F _sec_completions sec sec-agent
 					}
 				}
 				fishBuf.WriteString(fmt.Sprintf("complete -c sec -n \"__fish_seen_subcommand_from %s\" -a \"%s\"\n", cmd.Name, strings.Join(subNames, " ")))
+			} else if len(cmd.Flags) > 0 && !cmd.ExpectsKeys {
+				for _, flag := range cmd.Flags {
+					cleanFlag := strings.TrimPrefix(flag, "--")
+					fishBuf.WriteString(fmt.Sprintf("complete -c sec -n \"__fish_seen_subcommand_from %s\" -l %s\n", cmd.Name, cleanFlag))
+				}
 			}
 		}
 		fishBuf.WriteString("\ncomplete -c sec -l profile -d \"Target secret profile\"\n")

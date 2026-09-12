@@ -331,13 +331,28 @@ func handleProfileNew(args []string) {
 		}
 		fmt.Println()
 
-		fmt.Println("To confirm you have written down the mnemonic, please enter:")
+		fmt.Println("📋 Raw Mnemonic (triple-click to copy into password manager):")
+		fmt.Printf("   %s\n\n", mnemonic)
+
+		fmt.Println("To confirm you have saved the mnemonic, enter verification words (or enter 'r' to reuse an existing seed phrase instead):")
 		verificationWords := []int{4, 12, 20}
 		for _, pos := range verificationWords {
 			fmt.Printf("  Word #%d: ", pos)
 			reader := bufio.NewReader(os.Stdin)
 			entered, _ := reader.ReadString('\n')
 			entered = strings.TrimSpace(strings.ToLower(entered))
+			if entered == "r" || entered == "reuse" {
+				fmt.Print("Enter your existing 24-word recovery seed phrase: ")
+				existingSeed, _ := reader.ReadString('\n')
+				existingSeed = strings.Trim(strings.TrimSpace(existingSeed), `"'`)
+				if !crypto.MnemonicValid(existingSeed) {
+					fmt.Fprintln(os.Stderr, "\n❌ Provided seed phrase is not a valid 24-word BIP39 mnemonic. Aborting.")
+					os.Exit(1)
+				}
+				mnemonic = existingSeed
+				fmt.Println("✅ Existing recovery seed phrase verified and linked.")
+				break
+			}
 			expected := strings.ToLower(words[pos-1])
 			if entered != expected {
 				fmt.Fprintf(os.Stderr, "\n❌ Word #%d mismatch (expected %q, got %q). Aborting.\n", pos, expected, entered)

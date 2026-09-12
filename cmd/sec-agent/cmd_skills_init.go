@@ -507,17 +507,53 @@ func handleInit(profile string, args []string) {
 	fmt.Println("\nSetup complete! You can re-run 'sec-agent init' anytime to update settings or install skills.")
 }
 
+func discoverWorkspaceSkills(cwd string) []InstalledSkillEntry {
+	if cwd == "" {
+		return nil
+	}
+	type candidate struct {
+		target string
+		rel    string
+	}
+	candidates := []candidate{
+		{target: "copilot", rel: filepath.Join(".github", "copilot-instructions.md")},
+		{target: "antigravity", rel: filepath.Join(".agents", "skills", "sec-agent-integration", "SKILL.md")},
+		{target: "cursor", rel: filepath.Join(".cursor", "rules", "sec-agent.mdc")},
+		{target: "claude", rel: filepath.Join(".claude", "skills", "sec-agent.md")},
+		{target: "windsurf", rel: ".windsurfrules"},
+	}
+	var res []InstalledSkillEntry
+	for _, c := range candidates {
+		p := filepath.Join(cwd, c.rel)
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+			res = append(res, InstalledSkillEntry{
+				Target:  c.target,
+				Scope:   "workspace",
+				Path:    p,
+				Version: Version,
+			})
+		}
+	}
+	return res
+}
+
 func handleSkill(profile string, args []string) {
-	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: sec-agent skill <install|show|status|update> [args]")
-		os.Exit(1)
+	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
+		fmt.Println("Usage: sec-agent skill <install|show|status|update> [args]")
+		fmt.Println("\nManage AI assistant integration skills, view docs, and inspect sync state.")
+		fmt.Println("\nSubcommands:")
+		fmt.Println("  install [--target <t>] [--scope <global|workspace>]  Install skills into IDE or workspace")
+		fmt.Println("  show [--target <copilot|full>]                         Print integration manual to stdout")
+		fmt.Println("  status                                                 List installed skills, scopes, and health")
+		fmt.Println("  update                                                 Refresh installed skills to current CLI version")
+		return
 	}
 
 	sub := args[0]
 	switch sub {
 	case "install":
 		target := ""
-		scope := "global"
+		scope := "workspace"
 		for i := 1; i < len(args); i++ {
 			if (args[i] == "--target" || args[i] == "-t") && i+1 < len(args) {
 				target = args[i+1]
@@ -535,26 +571,80 @@ func handleSkill(profile string, args []string) {
 	case "status", "list", "ls":
 		manifest, err := loadSkillManifest()
 		if err != nil || manifest == nil {
-			fmt.Println("No skill manifest found. Run 'sec-agent init' or 'sec-agent skill install' to configure skills.")
-			return
+			manifest = &SkillManifest{Version: Version, Skills: []InstalledSkillEntry{}}
 		}
 		fmt.Println("=== 🤖 sec-agent AI Skill Installation Status ===")
 		fmt.Printf("Binary Skill Version: %s\n\n", Version)
-		if len(manifest.Skills) == 0 {
-			fmt.Println("No skills currently tracked in manifest.")
+		fmt.Println("Scope Definitions:")
+		fmt.Println("  • global    : Machine-wide in user home directory (applies across all projects)")
+		fmt.Println("  • workspace : Project-bound in current repository (committed with source code)")
+		fmt.Println()
+
+		cwd, _ := os.Getwd()
+		discovered := discoverWorkspaceSkills(cwd)
+
+		allSkills := append([]InstalledSkillEntry{}, manifest.Skills...)
+		for _, disc := range discovered {
+			alreadyTracked := false
+			for _, s := range allSkills {
+				if s.Path == disc.Path {
+					alreadyTracked = true
+					break
+				}
+			}
+			if !alreadyTracked {
+				allSkills = append(allSkills, disc)
+			}
+		}
+
+		if len(allSkills) == 0 {
+			fmt.Println("No skills currently tracked in manifest or detected in current directory.")
+			fmt.Println("Run 'sec-agent init' or 'sec-agent skill install' to configure AI skills.")
 			return
 		}
-		for _, s := range manifest.Skills {
+		for _, s := range allSkills {
+			targetPath := s.Path
+			if targetPath == "" || !filepath.IsAbs(targetPath) {
+				p, err := resolveSkillPath(s.Target, s.Scope)
+				if err == nil {
+					targetPath = p
+				}
+			}
 			status := "[✓] Up to date"
-			if s.Version != Version {
-				status = fmt.Sprintf("[!] Outdated (installed %s)", s.Version)
+			if _, statErr := os.Stat(targetPath); statErr != nil {
+				status = "[✗] Missing on disk"
+			} else if !isSkillContentIdentical(s.Target, targetPath) {
+				if s.Version != "" && s.Version != Version {
+					status = fmt.Sprintf("[!] Outdated (installed %s)", s.Version)
+				} else {
+					status = "[!] Modified / Outdated"
+				}
 			}
 			fmt.Printf("  • %-15s (%-9s) %s\n", s.Target, s.Scope, status)
-			fmt.Printf("    Path: %s\n", s.Path)
+			fmt.Printf("    Path: %s\n", targetPath)
 		}
 	case "update":
 		manifest, err := loadSkillManifest()
-		if err != nil || manifest == nil || len(manifest.Skills) == 0 {
+		if err != nil || manifest == nil {
+			manifest = &SkillManifest{Version: Version, Skills: []InstalledSkillEntry{}}
+		}
+
+		cwd, _ := os.Getwd()
+		discovered := discoverWorkspaceSkills(cwd)
+		for _, disc := range discovered {
+			found := false
+			for _, s := range manifest.Skills {
+				if s.Path == disc.Path {
+					found = true
+					break
+				}
+			}
+			if !found {
+				manifest.Skills = append(manifest.Skills, disc)
+			}
+		}
+
+		if len(manifest.Skills) == 0 {
 			fmt.Println("No skills tracked in manifest to update.")
 			return
 		}

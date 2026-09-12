@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -155,3 +156,116 @@ func TestProfileNewDefaultProfileRejection(t *testing.T) {
 		t.Errorf("expected error message rejecting 'default', got:\n%s", string(out))
 	}
 }
+
+func TestDoctorSkipKeychainAndHeadless(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("SEC_CONFIG_DIR", tmpDir)
+
+	binPath := "./sec_doctor_test_bin"
+	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build test binary: %v, output: %s", err, string(out))
+	}
+	defer os.Remove(binPath)
+
+	// Test with --skip-keychain flag
+	cmd := exec.Command(binPath, "doctor", "--skip-keychain")
+	cmd.Env = append(os.Environ(), "SEC_CONFIG_DIR="+tmpDir)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("doctor --skip-keychain failed: %v, output:\n%s", err, string(out))
+	}
+
+	outStr := string(out)
+	if !strings.Contains(outStr, "Skipped live Touch ID Keychain probe") {
+		t.Errorf("expected skipped Touch ID Keychain probe message, got:\n%s", outStr)
+	}
+	if !strings.Contains(outStr, "--skip-keychain flag supplied") {
+		t.Errorf("expected mention of --skip-keychain flag, got:\n%s", outStr)
+	}
+	if !strings.Contains(outStr, "All system diagnostic checks complete!") {
+		t.Errorf("expected completion message, got:\n%s", outStr)
+	}
+}
+
+func TestDoctorNestedEnvelopeDetectionAndRepair(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("SEC_CONFIG_DIR", tmpDir)
+
+	binPath := filepath.Join(tmpDir, "sec_doctor_repair_bin")
+	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build test binary: %v, output: %s", err, string(out))
+	}
+
+	// 1. Create a 4-level nested vault file in tmpDir
+	vaultPath := filepath.Join(tmpDir, "secrets_test-nested.enc")
+	currPayload := []byte("dummy-ciphertext-bytes")
+	for level := 1; level <= 4; level++ {
+		env := &store.VaultEnvelope{
+			SchemaVersion: store.SchemaV2,
+			Payload:       currPayload,
+		}
+		currPayload, _ = json.Marshal(env)
+	}
+	if err := os.WriteFile(vaultPath, currPayload, 0600); err != nil {
+		t.Fatalf("failed to write nested vault file: %v", err)
+	}
+
+	if d := store.InspectVaultNesting(vaultPath); d != 4 {
+		t.Fatalf("expected initial depth 4, got %d", d)
+	}
+
+	// 2. Execute `sec doctor --skip-keychain` and verify detection
+	docCmd := exec.Command(binPath, "doctor", "--skip-keychain")
+	docCmd.Env = append(os.Environ(), "SEC_CONFIG_DIR="+tmpDir)
+	docOut, err := docCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("doctor --skip-keychain failed: %v, output:\n%s", err, string(docOut))
+	}
+	docStr := string(docOut)
+	if !strings.Contains(docStr, "Nested Envelope Detected (Depth: 4)") {
+		t.Errorf("expected doctor output to detect depth 4 nesting, got:\n%s", docStr)
+	}
+	if !strings.Contains(docStr, "Run 'sec doctor --repair' to auto-heal") {
+		t.Errorf("expected doctor output to suggest --repair, got:\n%s", docStr)
+	}
+
+	// 3. Execute `sec doctor --repair` and verify flattening
+	repairCmd := exec.Command(binPath, "doctor", "--repair")
+	repairCmd.Env = append(os.Environ(), "SEC_CONFIG_DIR="+tmpDir)
+	repairOut, err := repairCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("doctor --repair failed: %v, output:\n%s", err, string(repairOut))
+	}
+	repStr := string(repairOut)
+	if !strings.Contains(repStr, "Flattened from depth 4 to 1") {
+		t.Errorf("expected repair output to mention flattening from depth 4 to 1, got:\n%s", repStr)
+	}
+	if !strings.Contains(repStr, "Successfully repaired 1 nested vault envelope(s)") {
+		t.Errorf("expected 1 repaired vault message, got:\n%s", repStr)
+	}
+
+	// Check backup file exists
+	bakPath := vaultPath + ".bak_nested"
+	if _, statErr := os.Stat(bakPath); statErr != nil {
+		t.Errorf("expected backup file %s to exist: %v", bakPath, statErr)
+	}
+
+	// Check new depth is 1
+	if d := store.InspectVaultNesting(vaultPath); d != 1 {
+		t.Errorf("expected depth 1 after repair, got %d", d)
+	}
+
+	// 4. Re-running `doctor --repair` on clean vaults reports all clean
+	rerunCmd := exec.Command(binPath, "doctor", "--repair")
+	rerunCmd.Env = append(os.Environ(), "SEC_CONFIG_DIR="+tmpDir)
+	rerunOut, err := rerunCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("second doctor --repair failed: %v, output:\n%s", err, string(rerunOut))
+	}
+	if !strings.Contains(string(rerunOut), "All vault envelopes are already clean") {
+		t.Errorf("expected clean message on rerun, got:\n%s", string(rerunOut))
+	}
+}
+

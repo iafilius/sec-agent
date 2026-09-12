@@ -30,10 +30,11 @@ func ZeroBytes(b []byte) { zeroBytes(b) }
 
 // VaultFileInfo describes a discovered vault file in the config directory.
 type VaultFileInfo struct {
-	Path     string // absolute path to the .enc file
-	Profile  string // derived profile name (e.g. "default", "dev", "prod")
-	IsV2     bool   // true if in JSON envelope format (starts with '{')
-	HasSlot1 bool   // true if Slot1 BIP39 recovery key is enrolled and non-empty
+	Path         string // absolute path to the .enc file
+	Profile      string // derived profile name (e.g. "default", "dev", "prod")
+	IsV2         bool   // true if in JSON envelope format (starts with '{')
+	HasSlot1     bool   // true if Slot1 BIP39 recovery key is enrolled and non-empty
+	NestingDepth int    // envelope nesting depth (0 for non-v2, 1 for clean v2.0, >1 for nested)
 }
 
 // ListVaultFiles scans the sec-agent config directory and returns all *.enc vault files.
@@ -69,17 +70,20 @@ func ListVaultFiles() ([]VaultFileInfo, error) {
 
 		isV2 := IsV2Vault(absPath)
 		hasSlot1 := false
+		nestingDepth := 0
 		if isV2 {
+			nestingDepth = InspectVaultNesting(absPath)
 			if env, err := ReadVaultEnvelope(absPath); err == nil && env != nil {
 				hasSlot1 = env.HasSlot1()
 			}
 		}
 
 		vaults = append(vaults, VaultFileInfo{
-			Path:     absPath,
-			Profile:  profile,
-			IsV2:     isV2,
-			HasSlot1: hasSlot1,
+			Path:         absPath,
+			Profile:      profile,
+			IsV2:         isV2,
+			HasSlot1:     hasSlot1,
+			NestingDepth: nestingDepth,
 		})
 	}
 	return vaults, nil
@@ -141,7 +145,86 @@ func IsV2Vault(path string) bool {
 	return env.SchemaVersion == SchemaV2
 }
 
+// InspectVaultNesting reads the vault file at path and counts the envelope nesting depth.
+// Returns 0 if not a v2 vault or unreadable, 1 for a normal clean v2 vault, >1 if nested.
+func InspectVaultNesting(path string) int {
+	// #nosec G304
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) == 0 || data[0] != '{' {
+		return 0
+	}
+	depth := 0
+	curr := data
+	for len(curr) > 0 && curr[0] == '{' {
+		var env VaultEnvelope
+		if jsonErr := json.Unmarshal(curr, &env); jsonErr != nil || env.Payload == nil {
+			break
+		}
+		depth++
+		curr = env.Payload
+	}
+	return depth
+}
+
+// FlattenVaultFile audits a vault file, creates a backup if nested (depth > 1),
+// and atomically rewrites it as a clean single-layer v2.0 envelope.
+// Returns the original nesting depth.
+func FlattenVaultFile(path string) (int, error) {
+	depth := InspectVaultNesting(path)
+	if depth <= 1 {
+		return depth, nil
+	}
+
+	// 1. Read outer envelope to preserve slot1 and metadata
+	// #nosec G304
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return depth, fmt.Errorf("failed to read vault file: %w", err)
+	}
+
+	var outerEnv VaultEnvelope
+	if err := json.Unmarshal(data, &outerEnv); err != nil {
+		return depth, fmt.Errorf("failed to parse outer envelope: %w", err)
+	}
+
+	// 2. Peel down to the innermost payload
+	currPayload := outerEnv.Payload
+	for len(currPayload) > 0 && currPayload[0] == '{' {
+		var innerEnv VaultEnvelope
+		if jsonErr := json.Unmarshal(currPayload, &innerEnv); jsonErr == nil && len(innerEnv.Payload) > 0 {
+			currPayload = innerEnv.Payload
+		} else {
+			break
+		}
+	}
+
+	// 3. Create backup copy with .bak_nested extension
+	bakPath := path + ".bak_nested"
+	// #nosec G304 G703
+	if err := os.WriteFile(bakPath, data, 0600); err != nil {
+		return depth, fmt.Errorf("failed to create backup file %s: %w", bakPath, err)
+	}
+
+	// 4. Assemble clean single-layer envelope
+	cleanEnv := &VaultEnvelope{
+		SchemaVersion:   SchemaV2,
+		UpgradedAt:      outerEnv.UpgradedAt,
+		MasterKeySHA256: outerEnv.MasterKeySHA256,
+		Slot1:           outerEnv.Slot1,
+		Payload:         currPayload,
+	}
+
+	// 5. Write clean envelope
+	if err := WriteVaultEnvelope(path, cleanEnv); err != nil {
+		return depth, fmt.Errorf("failed to write flattened vault: %w", err)
+	}
+
+	return depth, nil
+}
+
 // ReadVaultEnvelope reads and parses the v2.0 JSON envelope from disk.
+// It defensively peels any nested JSON envelopes down to the innermost ciphertext payload,
+// preserving the outermost envelope's recovery slots and schema metadata.
 func ReadVaultEnvelope(path string) (*VaultEnvelope, error) {
 	// #nosec G304
 	data, err := os.ReadFile(path)
@@ -155,17 +238,31 @@ func ReadVaultEnvelope(path string) (*VaultEnvelope, error) {
 	if env.SchemaVersion != SchemaV2 {
 		return nil, fmt.Errorf("unsupported vault schema version %q (expected %q)", env.SchemaVersion, SchemaV2)
 	}
+
+	// Defensively peel nested envelopes in a loop
+	peeled := env.Payload
+	for len(peeled) > 0 && peeled[0] == '{' {
+		var inner VaultEnvelope
+		if jsonErr := json.Unmarshal(peeled, &inner); jsonErr == nil && len(inner.Payload) > 0 {
+			peeled = inner.Payload
+		} else {
+			break
+		}
+	}
+	env.Payload = peeled
 	return &env, nil
 }
 
 // WriteVaultEnvelope atomically writes a v2.0 VaultEnvelope to disk.
 // Uses the same temp-file + fsync + rename pattern as SaveStore for power-loss safety.
 func WriteVaultEnvelope(path string, env *VaultEnvelope) error {
-	// Safeguard: Ensure env.Payload is not double-wrapped JSON text
-	if env != nil && len(env.Payload) > 0 && env.Payload[0] == '{' {
+	// Safeguard: Ensure env.Payload is not double-wrapped JSON text (peel iteratively)
+	for env != nil && len(env.Payload) > 0 && env.Payload[0] == '{' {
 		var innerEnv VaultEnvelope
 		if jsonErr := json.Unmarshal(env.Payload, &innerEnv); jsonErr == nil && len(innerEnv.Payload) > 0 {
 			env.Payload = innerEnv.Payload
+		} else {
+			break
 		}
 	}
 

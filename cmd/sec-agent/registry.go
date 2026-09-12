@@ -352,10 +352,11 @@ func initRegistry() {
 		{
 			Name:        "doctor",
 			Category:    "Security & Maintenance",
-			Description: "Run workstation system & security diagnostic checks",
-			Usage:       "sec doctor",
+			Description: "Run workstation system & security diagnostic checks and repair nested vault envelopes",
+			Usage:       "sec doctor [--skip-keychain] [--repair]",
+			Flags:       []string{"--skip-keychain", "--repair"},
 			Handler: func(profile string, args []string) {
-				handleDoctor(profile)
+				handleDoctor(profile, args)
 			},
 		},
 		{

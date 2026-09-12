@@ -1015,4 +1015,42 @@ func TestHandleStatusQuick_OrphanedSocketDetection(t *testing.T) {
 	}
 }
 
+func TestSkillStatusScopesAndWorkspaceDiscovery(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	origWd, _ := os.Getwd()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("failed to chdir: %v", err)
+	}
+	defer func() { _ = os.Chdir(origWd) }()
+
+	// Create a mock .github/copilot-instructions.md in tmpDir
+	copilotDir := filepath.Join(tmpDir, ".github")
+	_ = os.MkdirAll(copilotDir, 0700)
+	copilotFile := filepath.Join(copilotDir, "copilot-instructions.md")
+	_ = os.WriteFile(copilotFile, []byte(copilotInstructionsTemplate), 0600)
+
+	rescueStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	handleSkill("default", []string{"status"})
+
+	w.Close()
+	outBytes, _ := io.ReadAll(r)
+	os.Stdout = rescueStdout
+	out := string(outBytes)
+
+	if !strings.Contains(out, "Scope Definitions:") {
+		t.Errorf("expected Scope Definitions header in status output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "global") || !strings.Contains(out, "workspace") {
+		t.Errorf("expected global and workspace explanations in status output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "copilot") || !strings.Contains(out, "[✓] Up to date") {
+		t.Errorf("expected discovered copilot skill to be reported as Up to date, got:\n%s", out)
+	}
+}
+
+
 
