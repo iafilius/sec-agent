@@ -660,6 +660,76 @@ func TestStatusAllDiscoversNamedProfilesOnDisk(t *testing.T) {
 	}
 }
 
+// TestStatusAllJSONEmitsParseableJSON verifies `sec status --all --json`
+// actually emits structured JSON instead of silently falling back to the
+// plain-text table.
+func TestStatusAllJSONEmitsParseableJSON(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "sec-agent-status-all-json-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+	t.Setenv("SEC_CONFIG_DIR", tempDir)
+
+	testFile := filepath.Join(tempDir, "secrets_velocloud-prod.enc")
+	if err := os.WriteFile(testFile, []byte("test-payload"), 0600); err != nil {
+		t.Fatalf("failed to write dummy vault: %v", err)
+	}
+
+	oldJSONErrors := jsonErrors
+	jsonErrors = true
+	defer func() { jsonErrors = oldJSONErrors }()
+
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	handleStatusAll()
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, r)
+	out := buf.Bytes()
+
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		t.Fatalf("expected status --all --json output to parse as JSON: %v\nraw output:\n%s", err, string(out))
+	}
+
+	profilesRaw, ok := parsed["profiles"].([]interface{})
+	if !ok {
+		t.Fatalf("expected 'profiles' array in JSON output, got: %v", parsed["profiles"])
+	}
+
+	found := false
+	for _, p := range profilesRaw {
+		entry, ok := p.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if entry["name"] == "velocloud-prod" {
+			found = true
+			if _, ok := entry["total_keys"]; !ok {
+				t.Errorf("expected 'total_keys' field on profile entry, got: %v", entry)
+			}
+			if _, ok := entry["expired_keys"]; !ok {
+				t.Errorf("expected 'expired_keys' field on profile entry, got: %v", entry)
+			}
+			if _, ok := entry["tier"]; !ok {
+				t.Errorf("expected 'tier' field on profile entry, got: %v", entry)
+			}
+			if _, ok := entry["unlocked"]; !ok {
+				t.Errorf("expected 'unlocked' field on profile entry, got: %v", entry)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected discovered profile 'velocloud-prod' in JSON output, got: %v", profilesRaw)
+	}
+}
+
 func TestOpenExportsProfileAndContextualTip(t *testing.T) {
 	// Test default profile tip
 	var defaultTip strings.Builder
@@ -796,6 +866,213 @@ func TestSkillShowCLI(t *testing.T) {
 	}
 }
 
+// TestOpenAllProfilesFailNoSuccessBanner reproduces the confirmed report: when
+// every requested profile fails to unlock (here, a master-key mismatch at the
+// daemon level - the deterministic, safe equivalent of a real Keychain/biometric
+// failure), sec open must not print the success banner or export a session
+// token, and must exit non-zero.
+func TestOpenAllProfilesFailNoSuccessBanner(t *testing.T) {
+	t.Setenv("SEC_TEST_MODE", "1")
+	profile := "open-failure-test-profile"
 
+	sockPath, _ := config.GetSocketPath(profile)
+	dbPath, _ := store.GetStorePath(profile)
+	os.Remove(sockPath)
+	os.Remove(dbPath)
+	defer os.Remove(sockPath)
+	defer os.Remove(dbPath)
 
+	// Persist a vault encrypted with a key that does NOT match the fixed
+	// SEC_TEST_MODE master key, so the daemon's IPCActionOpen fails to decrypt it.
+	wrongKey := []byte("99999999999999999999999999999999")
+	if err := store.SaveStore(profile, &store.EncryptedStore{Secrets: map[store.SecretKey]store.SecretEntry{}}, wrongKey); err != nil {
+		t.Fatalf("failed to seed store: %v", err)
+	}
 
+	tmpDir := t.TempDir()
+	binPath := filepath.Join(tmpDir, "sec_open_fail_bin")
+	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build test binary: %v\nOutput: %s", err, out)
+	}
+
+	d, err := daemon.NewDaemon(profile, 30*time.Second, Version)
+	if err != nil {
+		t.Fatalf("failed to create test daemon: %v", err)
+	}
+	d.IsTestInstance = true
+	go func() {
+		if err := d.Start(); err != nil {
+			t.Logf("daemon stopped: %v", err)
+		}
+	}()
+	defer d.Stop()
+
+	for i := 0; i < 50; i++ {
+		if _, err := os.Stat(sockPath); err == nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	openCmd := exec.Command(binPath, "open", "--profile", profile)
+	openCmd.Env = append(os.Environ(), "SEC_TEST_MODE=1")
+	out, err := openCmd.CombinedOutput()
+	outStr := string(out)
+
+	if err == nil {
+		t.Fatalf("expected sec open to exit non-zero when every profile fails, got success. Output:\n%s", outStr)
+	}
+	if strings.Contains(outStr, "Session unlocked successfully") {
+		t.Errorf("expected no success banner when every profile fails, got:\n%s", outStr)
+	}
+	if strings.Contains(outStr, "export SEC_SESSION_TOKEN=") {
+		t.Errorf("expected no exported session token when every profile fails, got:\n%s", outStr)
+	}
+}
+
+// TestOpenSingleProfileSucceedsPrintsBanner verifies the unaffected success
+// path still prints the banner and exports a token when the profile unlocks.
+func TestOpenSingleProfileSucceedsPrintsBanner(t *testing.T) {
+	t.Setenv("SEC_TEST_MODE", "1")
+	profile := "open-success-test-profile"
+
+	sockPath, _ := config.GetSocketPath(profile)
+	dbPath, _ := store.GetStorePath(profile)
+	os.Remove(sockPath)
+	os.Remove(dbPath)
+	defer os.Remove(sockPath)
+	defer os.Remove(dbPath)
+
+	// Persist a vault encrypted with the exact fixed SEC_TEST_MODE master key,
+	// so the daemon's IPCActionOpen succeeds.
+	testModeKey := []byte("01234567890123456789012345678901")
+	if err := store.SaveStore(profile, &store.EncryptedStore{Secrets: map[store.SecretKey]store.SecretEntry{}}, testModeKey); err != nil {
+		t.Fatalf("failed to seed store: %v", err)
+	}
+
+	tmpDir := t.TempDir()
+	binPath := filepath.Join(tmpDir, "sec_open_success_bin")
+	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build test binary: %v\nOutput: %s", err, out)
+	}
+
+	d, err := daemon.NewDaemon(profile, 30*time.Second, Version)
+	if err != nil {
+		t.Fatalf("failed to create test daemon: %v", err)
+	}
+	d.IsTestInstance = true
+	go func() {
+		if err := d.Start(); err != nil {
+			t.Logf("daemon stopped: %v", err)
+		}
+	}()
+	defer d.Stop()
+
+	for i := 0; i < 50; i++ {
+		if _, err := os.Stat(sockPath); err == nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	openCmd := exec.Command(binPath, "open", "--profile", profile)
+	openCmd.Env = append(os.Environ(), "SEC_TEST_MODE=1")
+	out, err := openCmd.CombinedOutput()
+	outStr := string(out)
+
+	if err != nil {
+		t.Fatalf("expected sec open to succeed, got error: %v\nOutput:\n%s", err, outStr)
+	}
+	if !strings.Contains(outStr, "Session unlocked successfully") {
+		t.Errorf("expected success banner when profile unlocks, got:\n%s", outStr)
+	}
+	if !strings.Contains(outStr, "export SEC_SESSION_TOKEN=") {
+		t.Errorf("expected exported session token when profile unlocks, got:\n%s", outStr)
+	}
+}
+
+// TestOpenWorkspaceLinkedMultiProfileSuccessBanner verifies the multi-profile
+// path (active "default" profile + a workspace-linked profile from .secrc,
+// both succeeding) still prints the "✨ Unlocked profile..." message and the
+// success banner. Uses an isolated SEC_CONFIG_DIR so the real "default"
+// profile is never touched.
+func TestOpenWorkspaceLinkedMultiProfileSuccessBanner(t *testing.T) {
+	cfgDir, err := os.MkdirTemp("", "scfg")
+	if err != nil {
+		t.Fatalf("failed to create short-path config dir: %v", err)
+	}
+	defer os.RemoveAll(cfgDir)
+	t.Setenv("SEC_CONFIG_DIR", cfgDir)
+	t.Setenv("SEC_TEST_MODE", "1")
+
+	workspaceProfile := "ws-linked"
+	testModeKey := []byte("01234567890123456789012345678901")
+
+	for _, p := range []string{"default", workspaceProfile} {
+		if err := store.SaveStore(p, &store.EncryptedStore{Secrets: map[store.SecretKey]store.SecretEntry{}}, testModeKey); err != nil {
+			t.Fatalf("failed to seed store for %q: %v", p, err)
+		}
+	}
+
+	tmpDir := t.TempDir()
+	binPath := filepath.Join(tmpDir, "sec_open_multi_bin")
+	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build test binary: %v\nOutput: %s", err, out)
+	}
+
+	var daemons []*daemon.Daemon
+	for _, p := range []string{"default", workspaceProfile} {
+		d, err := daemon.NewDaemon(p, 30*time.Second, Version)
+		if err != nil {
+			t.Fatalf("failed to create test daemon for %q: %v", p, err)
+		}
+		d.IsTestInstance = true
+		daemons = append(daemons, d)
+		go func() {
+			if err := d.Start(); err != nil {
+				t.Logf("daemon %q stopped: %v", p, err)
+			}
+		}()
+	}
+	defer func() {
+		for _, d := range daemons {
+			d.Stop()
+		}
+	}()
+
+	for _, p := range []string{"default", workspaceProfile} {
+		sockPath, _ := config.GetSocketPath(p)
+		for i := 0; i < 50; i++ {
+			if _, err := os.Stat(sockPath); err == nil {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+
+	// Workspace dir with a .secrc linking to the workspace profile.
+	wsDir := t.TempDir()
+	secrcContent := fmt.Sprintf(`{"profile": %q}`, workspaceProfile)
+	if err := os.WriteFile(filepath.Join(wsDir, ".secrc"), []byte(secrcContent), 0600); err != nil {
+		t.Fatalf("failed to write .secrc: %v", err)
+	}
+
+	openCmd := exec.Command(binPath, "open", "--profile", "default")
+	openCmd.Dir = wsDir
+	openCmd.Env = append(os.Environ(), "SEC_TEST_MODE=1", "SEC_CONFIG_DIR="+cfgDir)
+	out, err := openCmd.CombinedOutput()
+	outStr := string(out)
+
+	if err != nil {
+		t.Fatalf("expected multi-profile sec open to succeed, got error: %v\nOutput:\n%s", err, outStr)
+	}
+	if !strings.Contains(outStr, "✨ Unlocked profile") {
+		t.Errorf("expected multi-profile success message, got:\n%s", outStr)
+	}
+	if !strings.Contains(outStr, "Session unlocked successfully") {
+		t.Errorf("expected success banner when both profiles unlock, got:\n%s", outStr)
+	}
+}

@@ -317,17 +317,6 @@ func handleStatusAll() {
 	}
 	sort.Strings(profiles)
 
-	fmt.Println("=== sec-agent Global Workstation Status & Inventory ===")
-	fmt.Printf("CLI Version:            %s (Build Date: %s)\n", Version, BuildDate)
-	fmt.Printf("Config Directory:       %s\n", cfgDir)
-	if wsCfg, wsFile, wsDir := loadWorkspaceConfigVerbose(); wsCfg != nil && wsCfg.Profile != "" {
-		fmt.Printf("Workspace Binding:     %s (via %s in %s)\n", wsCfg.Profile, wsFile, wsDir)
-	}
-	fmt.Println()
-
-	fmt.Printf("%-24s %-10s %-20s %-12s %s\n", "PROFILE NAME", "ENV TIER", "SESSION STATUS", "STORED KEYS", "EXPIRED")
-	fmt.Println(strings.Repeat("-", 80))
-
 	type ProfileInfo struct {
 		Name       string
 		Tier       string
@@ -389,6 +378,52 @@ func handleStatusAll() {
 
 		profileInfos = append(profileInfos, info)
 	}
+
+	if jsonErrors {
+		type jsonProfileInfo struct {
+			Name          string   `json:"name"`
+			Tier          string   `json:"tier"`
+			Unlocked      bool     `json:"unlocked"`
+			DaemonRunning bool     `json:"daemon_running"`
+			TotalKeys     int      `json:"total_keys"`
+			ExpiredKeys   int      `json:"expired_keys"`
+			Namespaces    []string `json:"namespaces,omitempty"`
+		}
+		jsonProfiles := make([]jsonProfileInfo, 0, len(profileInfos))
+		for _, info := range profileInfos {
+			jsonProfiles = append(jsonProfiles, jsonProfileInfo{
+				Name:          info.Name,
+				Tier:          info.Tier,
+				Unlocked:      info.Unlocked,
+				DaemonRunning: info.DaemonRun,
+				TotalKeys:     info.TotalKeys,
+				ExpiredKeys:   info.ExpKeys,
+				Namespaces:    info.Namespaces,
+			})
+		}
+		result := map[string]interface{}{
+			"success":                true,
+			"cli_version":            Version,
+			"build_date":             BuildDate,
+			"config_directory":       cfgDir,
+			"profiles":               jsonProfiles,
+			"expiring_within_7_days": totalGlobalExpiring,
+		}
+		data, _ := json.MarshalIndent(result, "", "  ")
+		fmt.Println(string(data))
+		return
+	}
+
+	fmt.Println("=== sec-agent Global Workstation Status & Inventory ===")
+	fmt.Printf("CLI Version:            %s (Build Date: %s)\n", Version, BuildDate)
+	fmt.Printf("Config Directory:       %s\n", cfgDir)
+	if wsCfg, wsFile, wsDir := loadWorkspaceConfigVerbose(); wsCfg != nil && wsCfg.Profile != "" {
+		fmt.Printf("Workspace Binding:     %s (via %s in %s)\n", wsCfg.Profile, wsFile, wsDir)
+	}
+	fmt.Println()
+
+	fmt.Printf("%-24s %-10s %-20s %-12s %s\n", "PROFILE NAME", "ENV TIER", "SESSION STATUS", "STORED KEYS", "EXPIRED")
+	fmt.Println(strings.Repeat("-", 80))
 
 	for _, info := range profileInfos {
 		tierBadge := info.Tier

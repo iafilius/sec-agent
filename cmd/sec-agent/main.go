@@ -488,6 +488,7 @@ func handleOpen(profile string, args []string) {
 	}
 
 	lastToken := ""
+	var succeededProfiles []string
 	for _, p := range openProfiles {
 		getter, setter := keychain.GetKeychainAccessPair(p)
 
@@ -520,12 +521,18 @@ func handleOpen(profile string, args []string) {
 			continue
 		}
 
+		succeededProfiles = append(succeededProfiles, p)
 		if lastToken == "" {
 			lastToken = resp.Token
 		}
 	}
 
-	if len(openProfiles) > 1 {
+	if len(succeededProfiles) == 0 {
+		fmt.Fprintln(os.Stderr, "Error: failed to unlock any requested profile.")
+		os.Exit(1)
+	}
+
+	if len(succeededProfiles) > 1 {
 		fmt.Fprintf(os.Stderr, "✨ Unlocked profile %q and workspace profile %q in 1 Touch ID prompt.\n", openProfiles[0], openProfiles[1])
 	}
 

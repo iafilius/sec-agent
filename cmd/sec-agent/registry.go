@@ -563,7 +563,8 @@ func initRegistry() {
 			Name:        "session",
 			Category:    "Session & Setup",
 			Description: "Recover session from 24-word BIP39 recovery mnemonic",
-			Usage:       "sec session recover",
+			Usage:       "sec session recover [--profile <name>]",
+			Flags:       []string{"--profile"},
 			Handler:     handleSession,
 		},
 		{
@@ -573,10 +574,10 @@ func initRegistry() {
 			Usage:       "sec skill <install|show|status|update> [--target <t>] [--scope <global|workspace>]",
 			Flags:       []string{"--target", "--scope"},
 			Subcommands: []SubcommandSpec{
-				{ Name: "install", Description: "Install sec-agent integration skill across IDEs" },
-				{ Name: "show", Aliases: []string{"view"}, Description: "Display AI integration instructions or manual to stdout" },
-				{ Name: "status", Aliases: []string{"list", "ls"}, Description: "Display installed AI agent skill status" },
-				{ Name: "update", Description: "Sync AI skills across all installed IDE targets" },
+				{Name: "install", Description: "Install sec-agent integration skill across IDEs"},
+				{Name: "show", Aliases: []string{"view"}, Description: "Display AI integration instructions or manual to stdout"},
+				{Name: "status", Aliases: []string{"list", "ls"}, Description: "Display installed AI agent skill status"},
+				{Name: "update", Description: "Sync AI skills across all installed IDE targets"},
 			},
 			Handler: handleSkill,
 		},
@@ -586,8 +587,8 @@ func initRegistry() {
 			Description: "Install alias and autocompletions into shell startup",
 			Usage:       "sec init-shell <zsh|bash>",
 			Subcommands: []SubcommandSpec{
-				{ Name: "zsh", Description: "Install alias sec=sec-agent and Zsh completions" },
-				{ Name: "bash", Description: "Install alias sec=sec-agent and Bash completions" },
+				{Name: "zsh", Description: "Install alias sec=sec-agent and Zsh completions"},
+				{Name: "bash", Description: "Install alias sec=sec-agent and Bash completions"},
 			},
 			Handler: func(profile string, args []string) {
 				handleInitShell(args)
@@ -600,9 +601,9 @@ func initRegistry() {
 			Description: "Generate native shell completion script",
 			Usage:       "sec completion <zsh|bash|fish>",
 			Subcommands: []SubcommandSpec{
-				{ Name: "zsh", Description: "Generate Zsh autocompletion script" },
-				{ Name: "bash", Description: "Generate Bash autocompletion script" },
-				{ Name: "fish", Description: "Generate Fish autocompletion script" },
+				{Name: "zsh", Description: "Generate Zsh autocompletion script"},
+				{Name: "bash", Description: "Generate Bash autocompletion script"},
+				{Name: "fish", Description: "Generate Fish autocompletion script"},
 			},
 			Handler: func(profile string, args []string) {
 				if len(args) < 1 {
