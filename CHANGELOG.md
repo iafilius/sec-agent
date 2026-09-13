@@ -5,6 +5,17 @@ All notable changes to `sec-agent` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v2.13.0] - 2026-09-13
+
+### Fixed
+- **Remote-Session-Hijack False Positive (`remotepairingd`)**: Removed Apple's Continuity/RemotePairing daemon (`remotepairingd`) from the daemon's hijack-detection process list. It runs persistently on most Macs regardless of any active remote-control session, and its mere presence was causing the daemon to wipe its in-memory vault cache and deny every secret-touching command (`get`, `run`, `list`, `audit`, `status`) — even read-only ones.
+- **`sec status --quick` False-Healthy Report**: `handleStatusQuick` now checks the daemon ping response's `Success` field, not just transport-level connectivity, so a hijack-denied or otherwise-denied session is reported as `LOCKED`/`DENIED` instead of `ACTIVE`.
+
+### Added & Enhanced
+- **Hijack-Denial Audit Trail**: Every `ACCESS DENIED` hijack decision now writes an `audit.log` entry recording the triggering signal (process match, SSH environment variable, or SSH process ancestry) and the matched process name/PID, making denials diagnosable after the fact instead of leaving no trace on disk.
+
+---
+
 ## [v2.12.0] - 2026-09-12
 
 ### Added & Enhanced

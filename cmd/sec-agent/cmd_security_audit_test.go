@@ -89,6 +89,85 @@ func TestDaemonSessionHijackingSSHCheck(t *testing.T) {
 	}
 }
 
+// TestDaemonSessionRemotePairingDoesNotBlockAccess is an end-to-end regression
+// check for the reported false positive: a host with Apple's Continuity/
+// RemotePairing daemon (remotepairingd) running must NOT have its real, safe
+// queries denied as a hijacked session. Skips on hosts where remotepairingd is
+// not running, since the condition being guarded against cannot be exercised.
+func TestDaemonSessionRemotePairingDoesNotBlockAccess(t *testing.T) {
+	if err := exec.Command("pgrep", "remotepairingd").Run(); err != nil {
+		t.Skip("remotepairingd not running on this host; false-positive condition cannot be exercised here")
+	}
+
+	profile := "remotepairing-safe-profile"
+
+	sockPath, _ := config.GetSocketPath(profile)
+	dbPath, _ := store.GetStorePath(profile)
+	_ = os.Remove(sockPath)
+	_ = os.Remove(dbPath)
+	defer os.Remove(sockPath)
+	defer os.Remove(dbPath)
+
+	buildCmd := exec.Command("go", "build", "-o", "sec_remotepairing_bin", ".")
+	if err := buildCmd.Run(); err != nil {
+		t.Fatalf("failed to build test binary: %v", err)
+	}
+	defer os.Remove("sec_remotepairing_bin")
+
+	masterKey := []byte("01234567890123456789012345678903")
+	st := &store.EncryptedStore{
+		Secrets: map[store.SecretKey]store.SecretEntry{
+			"test/key": {Value: "safe-val"},
+		},
+	}
+	_ = store.SaveStore(profile, st, masterKey)
+
+	d, err := daemon.NewDaemon(profile, 30*time.Second, Version)
+	if err != nil {
+		t.Fatalf("failed to create test daemon: %v", err)
+	}
+	d.SetMasterKeyForTest(masterKey)
+	d.SetSecretsForTest(map[string]store.SecretEntry{
+		"test/key": {Value: "safe-val"},
+	})
+	token := "remotepairing-token-123"
+	d.SetSessionTokenForTest(token)
+
+	go func() {
+		if err := d.Start(); err != nil {
+			t.Logf("daemon stopped: %v", err)
+		}
+	}()
+	defer d.Stop()
+
+	for i := 0; i < 50; i++ {
+		if _, err := os.Stat(sockPath); err == nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// A normal, non-hijacked query must succeed even though remotepairingd is running.
+	queryCmd := exec.Command("./sec_remotepairing_bin", "get", "test/key", "--profile", profile)
+	queryCmd.Env = append(os.Environ(), "SEC_SESSION_TOKEN="+token)
+	out, err := queryCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("expected safe query to succeed with remotepairingd running, got error: %v, output: %s", err, string(out))
+	}
+	if strings.Contains(string(out), "ACCESS DENIED") {
+		t.Fatalf("expected no hijack denial with remotepairingd running, got: %s", string(out))
+	}
+
+	statusCmd := exec.Command("./sec_remotepairing_bin", "status", "--quick", "--profile", profile)
+	statusOut, err := statusCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("expected status --quick to succeed with remotepairingd running, got error: %v, output: %s", err, string(statusOut))
+	}
+	if strings.Contains(string(statusOut), "ACCESS DENIED") {
+		t.Fatalf("expected status --quick not to report a hijack denial, got: %s", string(statusOut))
+	}
+}
+
 func TestCleanupCommandDryRun(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("SEC_CONFIG_DIR", tmpDir)

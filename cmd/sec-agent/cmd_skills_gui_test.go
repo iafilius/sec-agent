@@ -975,6 +975,101 @@ func TestHandleStatusQuick_SkillReporting(t *testing.T) {
 	}
 }
 
+// TestHandleStatusQuick_HijackDeniedReportsDenied verifies that a ping denied by
+// the daemon's hijack detector is reported as denied/locked, not active - guards
+// against the false-healthy report where status --quick ignored pingResp.Success.
+func TestHandleStatusQuick_HijackDeniedReportsDenied(t *testing.T) {
+	tempDir, err := os.MkdirTemp("/tmp", "sq-hijack-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	origConfig := os.Getenv("SEC_CONFIG_DIR")
+	os.Setenv("SEC_CONFIG_DIR", tempDir)
+	defer func() {
+		if origConfig != "" {
+			os.Setenv("SEC_CONFIG_DIR", origConfig)
+		} else {
+			os.Unsetenv("SEC_CONFIG_DIR")
+		}
+	}()
+
+	profile := "hijack-denied-quick-test"
+	sockPath, err := config.GetSocketPath(profile)
+	if err != nil {
+		t.Fatalf("failed to get socket path: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(sockPath), 0700); err != nil {
+		t.Fatalf("failed to create socket dir: %v", err)
+	}
+	_ = os.Remove(sockPath)
+
+	// Mock daemon that denies every ping, as the hijack detector would.
+	l, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("failed to listen on unix socket: %v", err)
+	}
+	defer l.Close()
+	defer os.Remove(sockPath)
+
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+			var req daemon.IPCRequest
+			_ = json.NewDecoder(conn).Decode(&req)
+			resp := daemon.IPCResponse{Success: false, Error: "ACCESS DENIED: Remote session hijacking or screen sharing detected."}
+			_ = json.NewEncoder(conn).Encode(resp)
+			_ = conn.Close()
+		}
+	}()
+
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	jsonErrors = false
+	handleStatusQuick(profile)
+
+	_ = w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, r)
+	textOut := buf.String()
+
+	if strings.Contains(textOut, "ACTIVE (IPC socket responsive)") {
+		t.Errorf("expected hijack-denied ping not to report ACTIVE, got:\n%s", textOut)
+	}
+	if !strings.Contains(textOut, "DENIED") {
+		t.Errorf("expected hijack-denied ping to report DENIED status, got:\n%s", textOut)
+	}
+
+	r2, w2, _ := os.Pipe()
+	os.Stdout = w2
+
+	jsonErrors = true
+	handleStatusQuick(profile)
+	jsonErrors = false
+
+	_ = w2.Close()
+	os.Stdout = oldStdout
+
+	var buf2 bytes.Buffer
+	_, _ = io.Copy(&buf2, r2)
+
+	var res2 map[string]interface{}
+	if err := json.Unmarshal(buf2.Bytes(), &res2); err != nil {
+		t.Fatalf("failed to parse JSON from handleStatusQuick: %v, raw:\n%s", err, buf2.String())
+	}
+	if res2["status"] == "ACTIVE" {
+		t.Errorf("expected JSON status not to be ACTIVE on hijack denial, got %v", res2["status"])
+	}
+}
+
 func TestHandleStatusQuick_OrphanedSocketDetection(t *testing.T) {
 	tempDir := t.TempDir()
 	profile := "orphaned-socket-test-profile"
@@ -1051,6 +1146,3 @@ func TestSkillStatusScopesAndWorkspaceDiscovery(t *testing.T) {
 		t.Errorf("expected discovered copilot skill to be reported as Up to date, got:\n%s", out)
 	}
 }
-
-
-

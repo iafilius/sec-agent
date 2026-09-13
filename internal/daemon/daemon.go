@@ -111,12 +111,13 @@ const (
 	AuditEventAudit   AuditEventAction = "AUDIT"
 	AuditEventReexec  AuditEventAction = "REEXEC"
 	AuditEventRelabel AuditEventAction = "RELABEL"
+	AuditEventHijack  AuditEventAction = "HIJACK_DENIED"
 )
 
 // Validate checks whether the audit action is valid.
 func (a AuditEventAction) Validate() error {
 	switch a {
-	case AuditEventOpen, AuditEventGet, AuditEventSet, AuditEventDelete, AuditEventClear, AuditEventAudit, AuditEventReexec, AuditEventRelabel:
+	case AuditEventOpen, AuditEventGet, AuditEventSet, AuditEventDelete, AuditEventClear, AuditEventAudit, AuditEventReexec, AuditEventRelabel, AuditEventHijack:
 		return nil
 	default:
 		return fmt.Errorf("unsupported audit event action: %q", a)

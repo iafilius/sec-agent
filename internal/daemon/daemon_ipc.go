@@ -33,14 +33,17 @@ func getPeerPID(conn *net.UnixConn) (int, error) {
 	return peerPID, nil
 }
 
-// isHijacked checks if the client connection is running via SSH or Screensharing is active.
-func (d *Daemon) isHijacked(peerPID int) bool {
-	sharingServices := []string{"screensharingd", "AppleVNCServer", "remotepairingd"}
+// isHijacked checks if the client connection is running via SSH or active screen sharing.
+// It returns the matched signal as a reason string for audit logging, or "" when not hijacked.
+// remotepairingd is intentionally excluded: it's Apple's Continuity/RemotePairing daemon and
+// runs persistently on most Macs regardless of any active remote-control session.
+func (d *Daemon) isHijacked(peerPID int) (bool, string) {
+	sharingServices := []string{"screensharingd", "AppleVNCServer"}
 	for _, svc := range sharingServices {
 		// #nosec G204
 		cmd := exec.Command("pgrep", svc)
 		if err := cmd.Run(); err == nil {
-			return true
+			return true, fmt.Sprintf("process_match:%s", svc)
 		}
 	}
 
@@ -48,10 +51,10 @@ func (d *Daemon) isHijacked(peerPID int) bool {
 	envOut, err := exec.Command("ps", "e", "-ww", "-p", strconv.Itoa(peerPID)).Output()
 	if err == nil {
 		envStr := string(envOut)
-		if strings.Contains(envStr, "SSH_CLIENT=") ||
-			strings.Contains(envStr, "SSH_TTY=") ||
-			strings.Contains(envStr, "SSH_CONNECTION=") {
-			return true
+		for _, sshVar := range []string{"SSH_CLIENT=", "SSH_TTY=", "SSH_CONNECTION="} {
+			if strings.Contains(envStr, sshVar) {
+				return true, fmt.Sprintf("ssh_env:%s pid=%d", strings.TrimSuffix(sshVar, "="), peerPID)
+			}
 		}
 	}
 
@@ -75,13 +78,13 @@ func (d *Daemon) isHijacked(peerPID int) bool {
 
 		comm := parts[1]
 		if strings.Contains(strings.ToLower(comm), "sshd") {
-			return true
+			return true, fmt.Sprintf("ssh_ancestry:%s pid=%d", comm, currentPID)
 		}
 
 		currentPID = ppidVal
 	}
 
-	return false
+	return false, ""
 }
 
 func (d *Daemon) sendError(c net.Conn, msg string) {
@@ -115,10 +118,11 @@ func (d *Daemon) handleConnection(c net.Conn) {
 		return
 	}
 
-	if d.isHijacked(peerPID) {
+	if hijacked, reason := d.isHijacked(peerPID); hijacked {
 		d.mu.Lock()
 		d.wipeMemory()
 		d.mu.Unlock()
+		d.logAudit(AuditEventHijack, "", peerPID, false, reason)
 		d.sendError(c, "ACCESS DENIED: Remote session hijacking or screen sharing detected.")
 		return
 	}

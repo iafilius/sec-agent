@@ -225,8 +225,15 @@ func handleStatusQuick(profile string) {
 	}
 
 	socketStatus := "ACTIVE (IPC socket responsive)"
-	if pingResp != nil && !pingResp.Success && strings.Contains(pingResp.Error, "locked") {
-		socketStatus = "LOCKED (Daemon running, session locked)"
+	statusField := "ACTIVE"
+	if pingResp != nil && !pingResp.Success {
+		if strings.Contains(pingResp.Error, "locked") {
+			socketStatus = "LOCKED (Daemon running, session locked)"
+			statusField = "LOCKED"
+		} else {
+			socketStatus = fmt.Sprintf("DENIED (%s)", pingResp.Error)
+			statusField = "DENIED"
+		}
 	}
 
 	if jsonErrors {
@@ -235,7 +242,10 @@ func handleStatusQuick(profile string) {
 			"profile":      profile,
 			"socket_path":  socketPath,
 			"socket_perms": fmt.Sprintf("%04o", perms),
-			"status":       "ACTIVE",
+			"status":       statusField,
+		}
+		if statusField != "ACTIVE" && pingResp != nil {
+			resMap["status_detail"] = pingResp.Error
 		}
 		if activeSkillPath != "" {
 			resMap["skill_path"] = activeSkillPath
