@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 )
 
@@ -262,6 +263,74 @@ func parseJwtExp(val string) (time.Time, bool) {
 	return time.Time{}, false
 }
 
+// stdinReadTimeout bounds how long an interactive-TTY --stdin read waits for
+// input, so a stuck user gets an informative error instead of an apparent hang.
+// Var (not const) so tests can shrink it instead of waiting the real duration.
+var stdinReadTimeout = 120 * time.Second
+
+// isStdinTerminalFn detects whether stdin is an interactive terminal. Var (not
+// a direct term.IsTerminal call) so tests can simulate an interactive session
+// on a non-TTY fd (e.g. an os.Pipe) without a real pseudo-terminal.
+var isStdinTerminalFn = term.IsTerminal
+
+// readStdinSecretValue reads a secret value from stdin. Piped/redirected
+// input is read directly, unchanged from prior behavior. An interactive
+// terminal is announced, echo-masked, and bounded by stdinReadTimeout.
+func readStdinSecretValue(path string) ([]byte, error) {
+	fd := int(os.Stdin.Fd())
+	if !isStdinTerminalFn(fd) {
+		return io.ReadAll(os.Stdin)
+	}
+
+	fmt.Fprintln(os.Stderr, "Reading secret from stdin... press Ctrl+D (on its own line) when done, or Ctrl+C to cancel.")
+
+	restoreEcho, err := disableTerminalEchoFn(fd)
+	if err != nil {
+		return nil, fmt.Errorf("failed to prepare terminal for masked input: %w", err)
+	}
+	defer restoreEcho()
+
+	type readResult struct {
+		data []byte
+		err  error
+	}
+	resultCh := make(chan readResult, 1)
+	go func() {
+		data, err := io.ReadAll(os.Stdin)
+		resultCh <- readResult{data: data, err: err}
+	}()
+
+	select {
+	case res := <-resultCh:
+		return res.data, res.err
+	case <-time.After(stdinReadTimeout):
+		return nil, fmt.Errorf("timed out after %s waiting for stdin input; retry, or pipe the value instead (e.g. echo <value> | sec set %s --stdin)", stdinReadTimeout, path)
+	}
+}
+
+// disableTerminalEcho clears only the terminal's ECHO flag, leaving canonical
+// line mode and signal generation (ISIG) intact - unlike term.MakeRaw, Ctrl+D
+// still ends input and Ctrl+C still cancels the process. It returns a func
+// that restores the original terminal state.
+func disableTerminalEcho(fd int) (restore func(), err error) {
+	orig, err := unix.IoctlGetTermios(fd, unix.TIOCGETA)
+	if err != nil {
+		return nil, err
+	}
+	masked := *orig
+	masked.Lflag &^= unix.ECHO
+	if err := unix.IoctlSetTermios(fd, unix.TIOCSETA, &masked); err != nil {
+		return nil, err
+	}
+	return func() {
+		_ = unix.IoctlSetTermios(fd, unix.TIOCSETA, orig)
+	}, nil
+}
+
+// disableTerminalEchoFn allows tests to bypass real termios ioctls (which
+// fail on a non-TTY fd like an os.Pipe used to simulate an interactive session).
+var disableTerminalEchoFn = disableTerminalEcho
+
 func handleSet(profile string, path, value string, args []string) {
 	comment := ""
 	metadata := make(map[string]string)
@@ -278,7 +347,7 @@ func handleSet(profile string, path, value string, args []string) {
 	}
 
 	if value == "-" || useStdin {
-		data, err := io.ReadAll(os.Stdin)
+		data, err := readStdinSecretValue(path)
 		if err != nil {
 			fail("STDIN_READ_ERROR", fmt.Errorf("failed to read secret from stdin: %w", err), "")
 		}
@@ -1063,4 +1132,3 @@ func handleClear(profile string) {
 	_ = config.ClearSessionToken(profile)
 	fmt.Println("Session locked. Memory cache cleared.")
 }
-

@@ -187,7 +187,7 @@ This workspace integrates with ` + "`sec-agent`" + ` for zero-plaintext secret m
 | ` + "`sec status --quick`" + ` | Ultra-fast check (<5ms) of daemon session state |
 | ` + "`sec run -- <cmd>`" + ` | Execute command with secrets injected into process memory |
 | ` + "`sec open`" + ` | Unlock vault session via Touch ID (single auth covers full session) |
-| ` + "`sec get <key>`" + ` | Retrieve secret (masked in non-interactive/redacted contexts) |
+| ` + "`sec get <key>`" + ` | Retrieve secret - always prints the real value to stdout, in any context. Prefer ` + "`sec run`" + ` for scripts/agents; reserve ` + "`get`" + ` for deliberate human/` + "`--raw`" + ` use |
 | ` + "`sec set <key>`" + ` | Store secret via secure hidden terminal prompt |
 | ` + "`sec relabel <key> -a <VAR>`" + ` | Update env alias or metadata without retyping secret |
 | ` + "`sec-agent skill show`" + ` | View complete, comprehensive AI integration manual |
@@ -1245,4 +1245,3 @@ func handleCleanup(profile string, dryRun bool) {
 		fmt.Printf("✨ Cleanup complete. %d item(s) removed (approx. %s freed).\n", totalCount, formatBytes(freedBytes))
 	}
 }
-

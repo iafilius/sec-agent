@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -543,3 +545,100 @@ func TestSetStdinAndNoTrim(t *testing.T) {
 	}
 }
 
+// TestReadStdinSecretValue_InteractivePromptsBeforeRead simulates an
+// interactive terminal (via test hooks, since os.Pipe is not a real TTY) and
+// verifies the instructional message is printed before the blocking read
+// completes, and the piped-in value is still read correctly.
+func TestReadStdinSecretValue_InteractivePromptsBeforeRead(t *testing.T) {
+	origIsTerminal := isStdinTerminalFn
+	origDisableEcho := disableTerminalEchoFn
+	defer func() {
+		isStdinTerminalFn = origIsTerminal
+		disableTerminalEchoFn = origDisableEcho
+	}()
+	isStdinTerminalFn = func(int) bool { return true }
+	disableTerminalEchoFn = func(int) (func(), error) { return func() {}, nil }
+
+	oldStdin := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("failed to create stdin pipe: %v", err)
+	}
+	os.Stdin = r
+	defer func() { os.Stdin = oldStdin }()
+
+	oldStderr := os.Stderr
+	rErr, wErr, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("failed to create stderr pipe: %v", err)
+	}
+	os.Stderr = wErr
+
+	type result struct {
+		data []byte
+		err  error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		data, err := readStdinSecretValue("test/path")
+		resultCh <- result{data, err}
+	}()
+
+	// Give the goroutine time to print the prompt before input is supplied.
+	time.Sleep(50 * time.Millisecond)
+	_, _ = w.WriteString("typed-secret")
+	_ = w.Close()
+
+	res := <-resultCh
+	os.Stderr = oldStderr
+	_ = wErr.Close()
+
+	var stderrBuf bytes.Buffer
+	_, _ = io.Copy(&stderrBuf, rErr)
+
+	if res.err != nil {
+		t.Fatalf("expected read to succeed, got error: %v", res.err)
+	}
+	if string(res.data) != "typed-secret" {
+		t.Errorf("expected data %q, got %q", "typed-secret", string(res.data))
+	}
+	if !strings.Contains(stderrBuf.String(), "Reading secret from stdin") {
+		t.Errorf("expected instructional message on stderr, got: %q", stderrBuf.String())
+	}
+}
+
+// TestReadStdinSecretValue_TimesOutWithInformativeError simulates an
+// interactive terminal that never sends input and verifies the read aborts
+// with an informative timeout error instead of blocking indefinitely.
+func TestReadStdinSecretValue_TimesOutWithInformativeError(t *testing.T) {
+	origIsTerminal := isStdinTerminalFn
+	origDisableEcho := disableTerminalEchoFn
+	origTimeout := stdinReadTimeout
+	defer func() {
+		isStdinTerminalFn = origIsTerminal
+		disableTerminalEchoFn = origDisableEcho
+		stdinReadTimeout = origTimeout
+	}()
+	isStdinTerminalFn = func(int) bool { return true }
+	disableTerminalEchoFn = func(int) (func(), error) { return func() {}, nil }
+	stdinReadTimeout = 30 * time.Millisecond
+
+	oldStdin := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("failed to create stdin pipe: %v", err)
+	}
+	os.Stdin = r
+	defer func() {
+		os.Stdin = oldStdin
+		_ = w.Close() // unblocks the abandoned reader goroutine after the test
+	}()
+
+	_, err = readStdinSecretValue("test/path")
+	if err == nil {
+		t.Fatalf("expected a timeout error, got nil")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Errorf("expected an informative timeout error, got: %v", err)
+	}
+}

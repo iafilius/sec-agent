@@ -244,6 +244,7 @@ sec-agent relabel myapp/token --clear-alias
 sec-agent get my-project/terraform/acceptance/ --prefix [--json]
 sec-agent mv old-path/ new-path/ --prefix
 ```
+* **`sec get` always prints the real value to stdout, in any context** — there is no automatic masking for non-interactive/piped consumers (including AI agent tool-call terminals). Prefer `sec run -- <cmd>` or env-injection for scripts/agents; reserve `sec get` for deliberate human/`--raw` use.
 
 ### 5.6. Environment Isolation & Safety Badges
 ```bash
