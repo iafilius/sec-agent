@@ -35,7 +35,7 @@ func getProfileEnvTier(profile store.ProfileName) config.EnvironmentTier {
 	if err == nil && resp.Success && resp.Value != "" {
 		return config.ParseEnvironmentTier(resp.Value)
 	}
-	return config.TierUnset
+	return config.ParseEnvironmentTier(profile.String())
 }
 
 func printEnvBadge(profile store.ProfileName) {
@@ -52,29 +52,58 @@ func printEnvBadge(profile store.ProfileName) {
 
 func checkProductionGuard(profile store.ProfileName, args []string) {
 	tier := getProfileEnvTier(profile)
-	if tier.IsProduction() {
-		hasConfirm := false
-		for _, arg := range args {
-			if arg == "--confirm-prod" {
-				hasConfirm = true
-				break
-			}
-		}
-		if !hasConfirm {
-			if !term.IsTerminal(int(os.Stdin.Fd())) {
-				fail("PRODUCTION_GUARD_BLOCKED", fmt.Errorf("command execution against PRODUCTION profile %q requires --confirm-prod flag in non-interactive mode", profile), "Pass --confirm-prod flag to confirm execution.")
-			}
-			fmt.Printf("\n\033[1;31m⚠️  WARNING: You are executing a command against PRODUCTION profile %q!\033[0m\n", profile)
-			fmt.Print("Type 'prod' or press Enter to confirm execution: ")
-			var input string
-			_, _ = fmt.Scanln(&input)
-			input = strings.ToLower(strings.TrimSpace(input))
-			if input != "" && input != "prod" && input != "y" && input != "yes" {
-				fmt.Fprintln(os.Stderr, "Execution cancelled by production safety guard.")
-				os.Exit(1)
-			}
+	if !tier.IsProduction() {
+		return
+	}
+
+	for _, arg := range args {
+		if arg == "--dry-run" {
+			return // Dry-run is non-mutating and safe; bypass production guard
 		}
 	}
+
+	hasConfirm := false
+	for _, arg := range args {
+		if arg == "--confirm-prod" {
+			hasConfirm = true
+			break
+		}
+	}
+
+	if hasConfirm {
+		// Propagate confirmation to background daemon session if available
+		_, _ = queryDaemonRaw(profile.String(), daemon.IPCRequest{
+			Action: daemon.IPCActionConfirmProd,
+			Token:  os.Getenv("SEC_SESSION_TOKEN"),
+		})
+		return
+	}
+
+	// Check if the current daemon session has already been confirmed for production
+	resp, err := queryDaemonRaw(profile.String(), daemon.IPCRequest{Action: daemon.IPCActionPing})
+	if err == nil && resp != nil && resp.ProductionConfirmed {
+		return // Already confirmed for this session
+	}
+
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		fail("PRODUCTION_GUARD_BLOCKED", fmt.Errorf("command execution against PRODUCTION profile %q requires --confirm-prod flag in non-interactive mode", profile), "Pass --confirm-prod flag to confirm execution.")
+	}
+
+	fmt.Printf("\n\033[1;31m⚠️  WARNING: You are executing a command against PRODUCTION profile %q!\033[0m\n", profile)
+	fmt.Print("Type 'prod' or press Enter to confirm execution: ")
+	var input string
+	_, _ = fmt.Scanln(&input)
+	input = strings.ToLower(strings.TrimSpace(input))
+	if input != "" && input != "prod" && input != "y" && input != "yes" {
+		fmt.Fprintln(os.Stderr, "Execution cancelled by production safety guard.")
+		os.Exit(1)
+	}
+
+	// Record confirmation in daemon session memory for subsequent invocations
+	_, _ = queryDaemonRaw(profile.String(), daemon.IPCRequest{
+		Action: daemon.IPCActionConfirmProd,
+		Token:  os.Getenv("SEC_SESSION_TOKEN"),
+	})
 }
 
 func checkExpirationWarnings(secrets map[string]store.SecretEntry) {
@@ -900,6 +929,7 @@ func handleRun(profile string, args []string) {
 	// #nosec G204 G702
 	subProcess := exec.Command(targetCmd, targetArgs...)
 	subProcess.Env = finalEnv
+	subProcess.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	var stdoutRedact, stderrRedact *redactWriter
 	if noRedact {
@@ -917,8 +947,13 @@ func handleRun(profile string, args []string) {
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	go func() {
 		for sig := range sigChan {
-			if subProcess.Process != nil {
-				_ = subProcess.Process.Signal(sig)
+			if subProcess.Process != nil && subProcess.Process.Pid > 0 {
+				pgid := -subProcess.Process.Pid
+				if sysSig, ok := sig.(syscall.Signal); ok {
+					_ = syscall.Kill(pgid, sysSig)
+				} else {
+					_ = subProcess.Process.Signal(sig)
+				}
 			}
 		}
 	}()

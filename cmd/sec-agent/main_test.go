@@ -377,18 +377,40 @@ func TestMainIntegration(t *testing.T) {
 		t.Fatalf("sec profile set-env failed: %v", err)
 	}
 
-	// Non-interactive run without --confirm-prod MUST fail
+	// sec run --help MUST document --confirm-prod
+	helpCmd := exec.Command("./sec_test_bin", "run", "--help")
+	helpOut, _ := helpCmd.CombinedOutput()
+	if !strings.Contains(string(helpOut), "--confirm-prod") {
+		t.Fatalf("expected sec run --help to document --confirm-prod, got: %s", string(helpOut))
+	}
+
+	// Non-interactive run without --confirm-prod MUST fail on unconfirmed prod session
 	unconfirmedRun := exec.Command("./sec_test_bin", "run", "--profile", profile, "--", "echo", "hello")
 	unconfirmedRun.Env = testEnv
 	if err := unconfirmedRun.Run(); err == nil {
 		t.Fatalf("expected sec run without --confirm-prod on prod profile to fail, but succeeded")
 	}
 
-	// Non-interactive run WITH --confirm-prod MUST succeed
+	// sec run --dry-run on unconfirmed prod session MUST succeed without --confirm-prod
+	dryRunUnconfirmed := exec.Command("./sec_test_bin", "run", "--dry-run", "--profile", profile, "--", "echo", "hello")
+	dryRunUnconfirmed.Env = testEnv
+	dryOut, err := dryRunUnconfirmed.CombinedOutput()
+	if err != nil || !strings.Contains(string(dryOut), "Subprocess Secret Injection Plan") {
+		t.Fatalf("expected sec run --dry-run on unconfirmed prod profile to succeed, but failed: %v, out: %s", err, string(dryOut))
+	}
+
+	// Non-interactive run WITH --confirm-prod MUST succeed and persist confirmation in session
 	confirmedRun := exec.Command("./sec_test_bin", "run", "--confirm-prod", "--profile", profile, "--", "echo", "hello")
 	confirmedRun.Env = testEnv
 	if err := confirmedRun.Run(); err != nil {
 		t.Fatalf("sec run --confirm-prod on prod profile failed: %v", err)
+	}
+
+	// Subsequent non-interactive run WITHOUT --confirm-prod MUST succeed because session remembered it
+	subsequentRun := exec.Command("./sec_test_bin", "run", "--profile", profile, "--", "echo", "hello")
+	subsequentRun.Env = testEnv
+	if err := subsequentRun.Run(); err != nil {
+		t.Fatalf("subsequent sec run without --confirm-prod failed even though session was confirmed: %v", err)
 	}
 
 	// 6r. Test v1.5.0 features: JWT auto-exp, stream redactor, profile diffing, and leases
@@ -477,7 +499,7 @@ func TestMainIntegration(t *testing.T) {
 	}
 
 	// 6u. Test v1.8.0 features: sec run --allow-keys, sec run --dry-run, and sec check --scan-weak
-	dryRunCmd := exec.Command("./sec_test_bin", "run", "--dry-run", "--confirm-prod", "--profile", profile, "--", "echo", "hello")
+	dryRunCmd := exec.Command("./sec_test_bin", "run", "--dry-run", "--profile", profile, "--", "echo", "hello")
 	dryRunCmd.Env = testEnv
 	dryRunOut, err := dryRunCmd.Output()
 	if err != nil || !strings.Contains(string(dryRunOut), "Subprocess Secret Injection Plan") {
@@ -509,6 +531,24 @@ func TestMainIntegration(t *testing.T) {
 	resetProfCmd := exec.Command("./sec_test_bin", "profile", "set-env", "dev", "--profile", profile)
 	resetProfCmd.Env = testEnv
 	_ = resetProfCmd.Run()
+
+	// Test daemon list and ps commands via compiled binary
+	daemonListCmd := exec.Command("./sec_test_bin", "daemon", "list")
+	daemonListCmd.Env = testEnv
+	daemonListOut, err := daemonListCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sec daemon list failed: %v, out: %s", err, string(daemonListOut))
+	}
+
+	daemonPsCmd := exec.Command("./sec_test_bin", "daemon", "ps", "--json")
+	daemonPsCmd.Env = testEnv
+	daemonPsOut, err := daemonPsCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sec daemon ps --json failed: %v, out: %s", err, string(daemonPsOut))
+	}
+	if !strings.Contains(string(daemonPsOut), "[") {
+		t.Errorf("expected JSON array from sec daemon ps --json, got: %s", string(daemonPsOut))
+	}
 
 	rmPrefixCmd := exec.Command("./sec_test_bin", "rm", "provider-v2", "--prefix", "--profile", profile)
 	rmPrefixCmd.Env = testEnv

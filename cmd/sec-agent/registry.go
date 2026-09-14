@@ -285,8 +285,8 @@ func initRegistry() {
 			Name:        "run",
 			Category:    "Profiles & Scope",
 			Description: "Execute process with scoped secrets injected",
-			Usage:       "sec run [--redact] [--no-redact] [--dry-run] [--group <p>] [--allow-keys k1,k2] [--ssh-key <path>] [--ssh-passphrase-key <key>] -- <cmd>",
-			Flags:       []string{"--redact", "--group", "--allow-keys", "--ssh-key", "--ssh-passphrase-key", "--dry-run", "--no-redact"},
+			Usage:       "sec run [--redact] [--no-redact] [--dry-run] [--confirm-prod] [--group <p>] [--allow-keys k1,k2] [--ssh-key <path>] [--ssh-passphrase-key <key>] -- <cmd>",
+			Flags:       []string{"--redact", "--group", "--allow-keys", "--ssh-key", "--ssh-passphrase-key", "--dry-run", "--no-redact", "--confirm-prod"},
 			Handler:     handleRun,
 		},
 		{
@@ -727,9 +727,17 @@ func initRegistry() {
 		{
 			Name:        "daemon",
 			Category:    "Internal",
-			Description: "Start the background socket daemon process",
-			Usage:       "sec daemon",
+			Description: "Start the background socket daemon process or list active instances",
+			Usage:       "sec daemon [list|ps] [--json]",
+			Flags:       []string{"--json"},
+			Subcommands: []SubcommandSpec{
+				{Name: "list", Aliases: []string{"ps"}, Description: "List all active background daemon processes"},
+			},
 			Handler: func(profile string, args []string) {
+				if len(args) > 0 && (args[0] == "list" || args[0] == "ps") {
+					handleDaemonList(args[1:])
+					return
+				}
 				runDaemon(profile)
 			},
 		},

@@ -5,10 +5,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
+	"secure_secrets/internal/config"
 	"secure_secrets/internal/crypto"
+	"secure_secrets/internal/daemon"
 	"secure_secrets/internal/store"
 )
 
@@ -268,4 +273,375 @@ func TestDoctorNestedEnvelopeDetectionAndRepair(t *testing.T) {
 		t.Errorf("expected clean message on rerun, got:\n%s", string(rerunOut))
 	}
 }
+
+func TestCheckProductionGuard(t *testing.T) {
+	// 1. Non-production profile executes without error or prompt
+	checkProductionGuard("test-dev", nil)
+
+	// 2. Production profile with --dry-run bypasses prompt
+	checkProductionGuard("test-prod", []string{"--dry-run"})
+
+	// 3. Production profile with --confirm-prod bypasses prompt
+	checkProductionGuard("test-prod", []string{"--confirm-prod"})
+}
+
+func TestEvictStaleDaemonAndDeduplication(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("/tmp", "sec-dedup")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+	t.Setenv("SEC_CONFIG_DIR", tmpDir)
+	t.Setenv("SEC_TEST_ALLOW_KILL", "1")
+
+	profile := "t-dedup"
+
+	// 1. Spawn a dummy sleeper process to simulate an orphaned stale daemon
+	dummyCmd := exec.Command("sleep", "60")
+	if err := dummyCmd.Start(); err != nil {
+		t.Fatalf("failed to spawn dummy process: %v", err)
+	}
+	defer func() {
+		if dummyCmd.Process != nil {
+			_ = dummyCmd.Process.Kill()
+		}
+	}()
+
+	// 2. Write a simulated stale PID lockfile
+	pidPath, err := config.GetPIDFilePath(profile)
+	if err != nil {
+		t.Fatalf("failed to get pid file path: %v", err)
+	}
+	info := daemon.PIDLockInfo{
+		PID:        dummyCmd.Process.Pid,
+		Profile:    profile,
+		Executable: "/usr/local/bin/sec",
+		Version:    "v2.10.0",
+	}
+	data, _ := json.Marshal(info)
+	_ = os.WriteFile(pidPath, data, 0600)
+
+	// Write dummy socket and lock file
+	sockPath, _ := config.GetSocketPath(profile)
+	lockPath, _ := config.GetLockFilePath(profile)
+	_ = os.WriteFile(sockPath, []byte("stale-sock"), 0600)
+	_ = os.WriteFile(lockPath, []byte("stale-lock"), 0600)
+
+	// Verify findDaemonPIDs finds the dummy process
+	pids := findDaemonPIDs(profile)
+	found := false
+	for _, p := range pids {
+		if p == dummyCmd.Process.Pid {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected findDaemonPIDs to find dummy PID %d, got %v", dummyCmd.Process.Pid, pids)
+	}
+
+	// 3. Call evictStaleDaemon
+	evictStaleDaemon(profile)
+
+	// 4. Verify dummy process was terminated
+	time.Sleep(150 * time.Millisecond)
+	waitErr := dummyCmd.Wait()
+	if waitErr == nil {
+		t.Errorf("expected dummy process %d to be killed by evictStaleDaemon, but it exited cleanly", dummyCmd.Process.Pid)
+	}
+
+	// 5. Verify PID file, socket, and lock file were cleaned up
+	if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
+		t.Errorf("expected PID file %s to be removed", pidPath)
+	}
+	if _, err := os.Stat(sockPath); !os.IsNotExist(err) {
+		t.Errorf("expected socket %s to be removed", sockPath)
+	}
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Errorf("expected lock file %s to be removed", lockPath)
+	}
+}
+
+func TestDaemonListCommand(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("/tmp", "sec-list")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+	t.Setenv("SEC_CONFIG_DIR", tmpDir)
+
+	// Verify handleDaemonList runs cleanly when no daemons are running
+	handleDaemonList(nil)
+	handleDaemonList([]string{"--json"})
+
+	// Spawn a dummy process and write PID lockfile
+	dummyCmd := exec.Command("sleep", "30")
+	if err := dummyCmd.Start(); err != nil {
+		t.Fatalf("failed to start dummy process: %v", err)
+	}
+	defer func() {
+		if dummyCmd.Process != nil {
+			_ = dummyCmd.Process.Kill()
+			_ = dummyCmd.Wait()
+		}
+	}()
+
+	pidPath, _ := config.GetPIDFilePath("testlist")
+	info := daemon.PIDLockInfo{
+		PID:        dummyCmd.Process.Pid,
+		Profile:    "testlist",
+		Executable: "/usr/local/bin/sec",
+		Version:    "v2.13.0",
+	}
+	data, _ := json.Marshal(info)
+	_ = os.WriteFile(pidPath, data, 0600)
+
+	// Verify listing with active daemon entry
+	handleDaemonList(nil)
+	handleDaemonList([]string{"--json"})
+
+	_ = dummyCmd.Process.Kill()
+	_ = dummyCmd.Wait()
+}
+
+func TestDoctorDuplicateDaemonAnomaly(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("/tmp", "sec-anomaly")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+	t.Setenv("SEC_CONFIG_DIR", tmpDir)
+
+	// In-process doctor test with single or no daemon -> no duplicate anomaly
+	handleDoctor("default", []string{"--skip-keychain"})
+}
+
+func TestRunProcessGroupIsolation(t *testing.T) {
+	// Verify that a command spawned with Setpgid: true creates a distinct process group
+	cmd := exec.Command("sleep", "10")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("failed to start process with Setpgid: %v", err)
+	}
+	defer func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+	}()
+
+	pgid, err := syscall.Getpgid(cmd.Process.Pid)
+	if err != nil {
+		t.Fatalf("failed to get pgid: %v", err)
+	}
+	if pgid != cmd.Process.Pid {
+		t.Errorf("expected pgid to equal child pid %d, got %d", cmd.Process.Pid, pgid)
+	}
+
+	// Signal the process group via -pgid
+	if err := syscall.Kill(-pgid, syscall.SIGTERM); err != nil {
+		t.Fatalf("failed to signal process group: %v", err)
+	}
+
+	waitErr := cmd.Wait()
+	if waitErr == nil {
+		t.Errorf("expected command to terminate via signal, but exited cleanly")
+	}
+}
+
+func TestCheckProductionGuardLiveSessionLifecycle(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("/tmp", "sec-guard-live")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+	t.Setenv("SEC_CONFIG_DIR", tmpDir)
+
+	profile := "prod"
+	d, err := daemon.NewDaemon(profile, time.Hour, "v2.13.0")
+	if err != nil {
+		t.Fatalf("failed to create daemon: %v", err)
+	}
+	d.IsTestInstance = true
+
+	dErrChan := make(chan error, 1)
+	go func() {
+		dErrChan <- d.Start()
+	}()
+	defer d.Stop()
+
+	sockPath, err := config.GetSocketPath(profile)
+	if err != nil {
+		t.Fatalf("failed to get socket path: %v", err)
+	}
+
+	for i := 0; i < 40; i++ {
+		select {
+		case err := <-dErrChan:
+			t.Fatalf("d.Start failed: %v", err)
+		default:
+		}
+		if _, statErr := os.Stat(sockPath); statErr == nil {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	testToken := "live-session-test-token"
+	d.SetMasterKeyForTest([]byte("mock-32-byte-master-key-01234567"))
+	d.SetSessionTokenForTest(testToken)
+	t.Setenv("SEC_SESSION_TOKEN", testToken)
+
+	// 1. Initial state: ProductionConfirmed must be false
+	resp, err := queryDaemonRaw(profile, daemon.IPCRequest{Action: daemon.IPCActionPing})
+	if err != nil || resp == nil {
+		t.Fatalf("ping failed: %v", err)
+	}
+	if resp.ProductionConfirmed {
+		t.Fatalf("expected initial ProductionConfirmed to be false")
+	}
+
+	// 2. Calling with --confirm-prod propagates confirmation to daemon memory
+	checkProductionGuard(store.ProfileName(profile), []string{"--confirm-prod"})
+
+	resp, err = queryDaemonRaw(profile, daemon.IPCRequest{Action: daemon.IPCActionPing})
+	if err != nil || resp == nil || !resp.ProductionConfirmed {
+		t.Fatalf("expected ProductionConfirmed to be true after --confirm-prod, got: %v", resp)
+	}
+
+	// 3. Subsequent call without --confirm-prod succeeds because session is already confirmed
+	checkProductionGuard(store.ProfileName(profile), nil)
+
+	// 4. Dry-run always bypasses guard without affecting confirmation
+	checkProductionGuard(store.ProfileName(profile), []string{"--dry-run"})
+
+	// 5. Locking/wiping session resets confirmation
+	_, _ = queryDaemonRaw(profile, daemon.IPCRequest{Action: daemon.IPCActionClear})
+	resp, err = queryDaemonRaw(profile, daemon.IPCRequest{Action: daemon.IPCActionPing})
+	if err != nil || resp == nil || resp.ProductionConfirmed {
+		t.Fatalf("expected ProductionConfirmed to reset to false after clear, got: %v", resp)
+	}
+}
+
+func TestRunProcessGroupGrandchildTermination(t *testing.T) {
+	tmpDir := t.TempDir()
+	pidFile := filepath.Join(tmpDir, "grandchild.pid")
+
+	// Parent script creates a distinct process group and launches a grandchild background process
+	cmd := exec.Command("sh", "-c", "sleep 60 & echo $! > "+pidFile+" && wait")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("failed to start parent script: %v", err)
+	}
+	defer func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+	}()
+
+	pgid, err := syscall.Getpgid(cmd.Process.Pid)
+	if err != nil {
+		t.Fatalf("failed to get pgid: %v", err)
+	}
+
+	var grandchildPid int
+	for i := 0; i < 40; i++ {
+		if data, err := os.ReadFile(pidFile); err == nil && len(strings.TrimSpace(string(data))) > 0 {
+			grandchildPid, _ = strconv.Atoi(strings.TrimSpace(string(data)))
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if grandchildPid <= 0 {
+		t.Fatalf("failed to read grandchild PID from %s", pidFile)
+	}
+
+	// Verify grandchild is running
+	if err := syscall.Kill(grandchildPid, 0); err != nil {
+		t.Fatalf("grandchild process %d is not alive: %v", grandchildPid, err)
+	}
+
+	// Forward SIGTERM to the process group (-pgid), exactly as sec run does
+	if err := syscall.Kill(-pgid, syscall.SIGTERM); err != nil {
+		t.Fatalf("failed to signal process group -%d: %v", pgid, err)
+	}
+
+	_ = cmd.Wait()
+
+	// Verify grandchild was cleanly reaped and did not linger as an orphan
+	time.Sleep(100 * time.Millisecond)
+	if err := syscall.Kill(grandchildPid, 0); err == nil {
+		_ = syscall.Kill(grandchildPid, syscall.SIGKILL)
+		t.Fatalf("grandchild process %d lingered as an orphan after parent process group termination!", grandchildPid)
+	}
+}
+
+func TestDoctorDuplicateDaemonAnomalyReporting(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("/tmp", "sec-anomaly-rep")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+	t.Setenv("SEC_CONFIG_DIR", tmpDir)
+
+	profile := "dup-rep"
+
+	// Spawn dummy process
+	dummyCmd := exec.Command("sleep", "30")
+	if err := dummyCmd.Start(); err != nil {
+		t.Fatalf("failed to start dummy: %v", err)
+	}
+	defer func() {
+		if dummyCmd.Process != nil {
+			_ = dummyCmd.Process.Kill()
+			_ = dummyCmd.Wait()
+		}
+	}()
+
+	pidPath, _ := config.GetPIDFilePath(profile)
+	info := daemon.PIDLockInfo{
+		PID:        dummyCmd.Process.Pid,
+		Profile:    profile,
+		Executable: "/usr/local/bin/sec",
+		Version:    "v2.13.0",
+	}
+	data, _ := json.Marshal(info)
+	_ = os.WriteFile(pidPath, data, 0600)
+
+	// Verify doctor runs cleanly with single instance detected
+	handleDoctor(profile, []string{"--skip-keychain"})
+}
+
+func TestDetectDaemonAnomaly(t *testing.T) {
+	// 1. Zero PIDs -> no anomaly
+	hasAnomaly, msg, rem := detectDaemonAnomaly("test", []int{})
+	if hasAnomaly || msg != "" || rem != "" {
+		t.Errorf("expected no anomaly for 0 PIDs, got hasAnomaly=%v, msg=%q", hasAnomaly, msg)
+	}
+
+	// 2. Single PID -> healthy, single instance active
+	hasAnomaly, msg, rem = detectDaemonAnomaly("test", []int{1234})
+	if hasAnomaly || !strings.Contains(msg, "Single instance active (PID: 1234)") || rem != "" {
+		t.Errorf("expected single instance message, got hasAnomaly=%v, msg=%q", hasAnomaly, msg)
+	}
+
+	// 3. Multiple PIDs -> anomaly detected with remediation
+	hasAnomaly, msg, rem = detectDaemonAnomaly("prod", []int{101, 202, 303})
+	if !hasAnomaly {
+		t.Fatalf("expected anomaly to be true for multiple PIDs")
+	}
+	if !strings.Contains(msg, "Multiple daemon processes (3) detected for profile \"prod\"") {
+		t.Errorf("expected count 3 in message, got: %q", msg)
+	}
+	if !strings.Contains(rem, "sec restart --profile prod") {
+		t.Errorf("expected restart remediation, got: %q", rem)
+	}
+}
+
+
+
+
+
 

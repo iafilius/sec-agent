@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // IPCAction represents a strongly-typed IPC command action.
@@ -43,6 +45,7 @@ const (
 	IPCActionReexec         IPCAction = "reexec"
 	IPCActionLease          IPCAction = "lease"
 	IPCActionRelabel        IPCAction = "relabel"
+	IPCActionConfirmProd    IPCAction = "confirm_prod"
 )
 
 // String returns the string representation of IPCAction.
@@ -80,7 +83,7 @@ func (req *IPCRequest) Validate() error {
 	case IPCActionOpen, IPCActionPing, IPCActionGet, IPCActionSet, IPCActionDelete,
 		IPCActionRestore, IPCActionBackup, IPCActionRestoreDeleted, IPCActionAudit,
 		IPCActionList, IPCActionGetGroup, IPCActionRename, IPCActionCopy,
-		IPCActionClear, IPCActionStatus, IPCActionHistory, IPCActionRollback, IPCActionReexec, IPCActionLease, IPCActionRelabel:
+		IPCActionClear, IPCActionStatus, IPCActionHistory, IPCActionRollback, IPCActionReexec, IPCActionLease, IPCActionRelabel, IPCActionConfirmProd:
 		return nil
 	default:
 		return fmt.Errorf("unknown or unsupported IPC action: %q", req.Action)
@@ -89,35 +92,37 @@ func (req *IPCRequest) Validate() error {
 
 // DaemonStatePayload defines the in-memory payload transferred across kernel pipe during hot-reload.
 type DaemonStatePayload struct {
-	MasterKey    []byte                                `json:"master_key"`
-	Profile      string                                `json:"profile"`
-	SessionStart time.Time                             `json:"session_start"`
-	SessionTTL   time.Duration                         `json:"session_ttl"`
-	GraceTTL     time.Duration                         `json:"grace_ttl"`
-	LastUsed     time.Time                             `json:"last_used"`
-	SessionToken string                                `json:"session_token"`
-	Secrets      map[store.SecretKey]store.SecretEntry `json:"secrets,omitempty"`
+	MasterKey           []byte                                `json:"master_key"`
+	Profile             string                                `json:"profile"`
+	SessionStart        time.Time                             `json:"session_start"`
+	SessionTTL          time.Duration                         `json:"session_ttl"`
+	GraceTTL            time.Duration                         `json:"grace_ttl"`
+	LastUsed            time.Time                             `json:"last_used"`
+	SessionToken        string                                `json:"session_token"`
+	ProductionConfirmed bool                                  `json:"production_confirmed"`
+	Secrets             map[store.SecretKey]store.SecretEntry `json:"secrets,omitempty"`
 }
 
 // AuditEventAction represents a strongly-typed security audit event action.
 type AuditEventAction string
 
 const (
-	AuditEventOpen    AuditEventAction = "OPEN"
-	AuditEventGet     AuditEventAction = "GET"
-	AuditEventSet     AuditEventAction = "SET"
-	AuditEventDelete  AuditEventAction = "DELETE"
-	AuditEventClear   AuditEventAction = "CLEAR"
-	AuditEventAudit   AuditEventAction = "AUDIT"
-	AuditEventReexec  AuditEventAction = "REEXEC"
-	AuditEventRelabel AuditEventAction = "RELABEL"
-	AuditEventHijack  AuditEventAction = "HIJACK_DENIED"
+	AuditEventOpen        AuditEventAction = "OPEN"
+	AuditEventGet         AuditEventAction = "GET"
+	AuditEventSet         AuditEventAction = "SET"
+	AuditEventDelete      AuditEventAction = "DELETE"
+	AuditEventClear       AuditEventAction = "CLEAR"
+	AuditEventAudit       AuditEventAction = "AUDIT"
+	AuditEventReexec      AuditEventAction = "REEXEC"
+	AuditEventRelabel     AuditEventAction = "RELABEL"
+	AuditEventHijack      AuditEventAction = "HIJACK_DENIED"
+	AuditEventConfirmProd AuditEventAction = "CONFIRM_PROD"
 )
 
 // Validate checks whether the audit action is valid.
 func (a AuditEventAction) Validate() error {
 	switch a {
-	case AuditEventOpen, AuditEventGet, AuditEventSet, AuditEventDelete, AuditEventClear, AuditEventAudit, AuditEventReexec, AuditEventRelabel, AuditEventHijack:
+	case AuditEventOpen, AuditEventGet, AuditEventSet, AuditEventDelete, AuditEventClear, AuditEventAudit, AuditEventReexec, AuditEventRelabel, AuditEventHijack, AuditEventConfirmProd:
 		return nil
 	default:
 		return fmt.Errorf("unsupported audit event action: %q", a)
@@ -145,39 +150,41 @@ type AuditLogEntry struct {
 
 // DaemonStatusInfo represents strongly-typed diagnostic status metadata.
 type DaemonStatusInfo struct {
-	Profile        string `json:"profile"`
-	Version        string `json:"version"`
-	SocketPath     string `json:"socket_path"`
-	StorePath      string `json:"store_path"`
-	StoreSizeBytes int64  `json:"store_size_bytes"`
-	IsUnlocked     bool   `json:"is_unlocked"`
-	TotalSecrets   int    `json:"total_secrets"`
-	ExpiredSecrets int    `json:"expired_secrets"`
-	SessionStart   string `json:"session_start"`
-	LastUsed       string `json:"last_used"`
-	SessionTTL     string `json:"session_ttl"`
-	GraceTTL       string `json:"grace_ttl"`
+	Profile             string `json:"profile"`
+	Version             string `json:"version"`
+	SocketPath          string `json:"socket_path"`
+	StorePath           string `json:"store_path"`
+	StoreSizeBytes      int64  `json:"store_size_bytes"`
+	IsUnlocked          bool   `json:"is_unlocked"`
+	ProductionConfirmed bool   `json:"production_confirmed"`
+	TotalSecrets        int    `json:"total_secrets"`
+	ExpiredSecrets      int    `json:"expired_secrets"`
+	SessionStart        string `json:"session_start"`
+	LastUsed            string `json:"last_used"`
+	SessionTTL          string `json:"session_ttl"`
+	GraceTTL            string `json:"grace_ttl"`
 }
 
 // IPCResponse defines the format for replies from the daemon.
 type IPCResponse struct {
-	Success      bool                         `json:"success"`
-	Value        string                       `json:"value,omitempty"`
-	Comment      string                       `json:"comment,omitempty"`
-	Metadata     map[string]string            `json:"metadata,omitempty"`
-	Error        string                       `json:"error,omitempty"`
-	ErrorCode    store.ErrorCode              `json:"error_code,omitempty"`
-	Secrets      map[string]store.SecretEntry `json:"secrets,omitempty"`
-	Created      time.Time                    `json:"created,omitempty"`
-	LastModified time.Time                    `json:"last_modified,omitempty"`
-	LastAccessed time.Time                    `json:"last_accessed,omitempty"`
-	AccessCount  uint64                       `json:"access_count,omitempty"`
-	Expires      time.Time                    `json:"expires,omitempty"`
-	Token        string                       `json:"token,omitempty"`
-	Version      string                       `json:"version,omitempty"`
-	StatusInfo   *DaemonStatusInfo            `json:"status_info,omitempty"`
-	History      []store.SecretVersion        `json:"history,omitempty"`
-	ItemVersion  int                          `json:"item_version,omitempty"`
+	Success             bool                         `json:"success"`
+	Value               string                       `json:"value,omitempty"`
+	Comment             string                       `json:"comment,omitempty"`
+	Metadata            map[string]string            `json:"metadata,omitempty"`
+	Error               string                       `json:"error,omitempty"`
+	ErrorCode           store.ErrorCode              `json:"error_code,omitempty"`
+	Secrets             map[string]store.SecretEntry `json:"secrets,omitempty"`
+	Created             time.Time                    `json:"created,omitempty"`
+	LastModified        time.Time                    `json:"last_modified,omitempty"`
+	LastAccessed        time.Time                    `json:"last_accessed,omitempty"`
+	AccessCount         uint64                       `json:"access_count,omitempty"`
+	Expires             time.Time                    `json:"expires,omitempty"`
+	Token               string                       `json:"token,omitempty"`
+	Version             string                       `json:"version,omitempty"`
+	ProductionConfirmed bool                         `json:"production_confirmed,omitempty"`
+	StatusInfo          *DaemonStatusInfo            `json:"status_info,omitempty"`
+	History             []store.SecretVersion        `json:"history,omitempty"`
+	ItemVersion         int                          `json:"item_version,omitempty"`
 }
 
 // Daemon represents the background secrets agent.
@@ -194,6 +201,11 @@ type Daemon struct {
 	profile        string
 	sessionToken   string
 	version        string
+	prodConfirmed  bool
+	lockFile       *os.File
+	lastActivity   time.Time
+	idleTimeout    time.Duration
+	socketFileInfo os.FileInfo
 	IsTestInstance bool
 }
 
@@ -257,6 +269,7 @@ func (d *Daemon) checkAndRestoreReexecState() error {
 		d.graceTTL = payload.GraceTTL
 		d.lastUsed = payload.LastUsed
 		d.sessionToken = payload.SessionToken
+		d.prodConfirmed = payload.ProductionConfirmed
 		d.mu.Unlock()
 		d.logAudit(AuditEventReexec, d.profile, 0, true, "")
 	}
@@ -266,6 +279,37 @@ func (d *Daemon) checkAndRestoreReexecState() error {
 // Start runs the IPC Unix socket server.
 func (d *Daemon) Start() error {
 	_ = d.checkAndRestoreReexecState()
+
+	lockPath, err := config.GetLockFilePath(d.profile)
+	if err != nil {
+		return fmt.Errorf("failed to resolve lockfile path: %w", err)
+	}
+
+	// #nosec G304 G703
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return fmt.Errorf("failed to open daemon lockfile %s: %w", lockPath, err)
+	}
+	d.lockFile = lockFile
+
+	// Acquire exclusive non-blocking advisory file lock.
+	// If this is a reexec child, wait briefly for parent to hand over lock.
+	var lockErr error
+	maxAttempts := 1
+	if os.Getenv("SEC_REEXEC_FD") != "" {
+		maxAttempts = 20
+	}
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		lockErr = unix.Flock(int(lockFile.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+		if lockErr == nil {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if lockErr != nil {
+		_ = lockFile.Close()
+		return fmt.Errorf("another daemon instance is already running for profile %q (advisory lock held on %s): %w", d.profile, lockPath, lockErr)
+	}
 
 	if err := os.Remove(d.socketPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to remove old socket: %w", err)
@@ -283,6 +327,11 @@ func (d *Daemon) Start() error {
 		_ = l.Close()
 		return fmt.Errorf("failed to secure socket permissions: %w", err)
 	}
+
+	d.mu.Lock()
+	d.socketFileInfo, _ = os.Stat(d.socketPath)
+	d.lastActivity = time.Now()
+	d.mu.Unlock()
 
 	d.writePIDLockfile()
 	defer d.removePIDLockfile()
@@ -308,11 +357,35 @@ func (d *Daemon) Stop() {
 	}
 	_ = os.Remove(d.socketPath)
 	d.removePIDLockfile()
+	if d.lockFile != nil {
+		_ = unix.Flock(int(d.lockFile.Fd()), unix.LOCK_UN)
+		_ = d.lockFile.Close()
+		d.lockFile = nil
+	}
+	if lockPath, err := config.GetLockFilePath(d.profile); err == nil {
+		_ = os.Remove(lockPath)
+	}
+}
+
+// SetIdleTimeout sets the duration of inactivity before an expired/locked daemon terminates.
+func (d *Daemon) SetIdleTimeout(dur time.Duration) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.idleTimeout = dur
+}
+
+// ShouldAutoTerminate reports whether the daemon meets auto-termination conditions.
+func (d *Daemon) ShouldAutoTerminate() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.shouldAutoTerminateLocked()
 }
 
 func (d *Daemon) processRequest(c net.Conn, req IPCRequest, peerPID int) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+
+	d.lastActivity = time.Now()
 
 	if err := req.Validate(); err != nil {
 		d.sendErrorCode(c, err.Error(), store.ErrCodeInternalError)
@@ -337,9 +410,9 @@ func (d *Daemon) processRequest(c net.Conn, req IPCRequest, peerPID int) {
 	switch req.Action {
 	case IPCActionPing:
 		if d.masterKey == nil {
-			d.sendResponse(c, IPCResponse{Success: false, Error: "Session locked", Version: d.version})
+			d.sendResponse(c, IPCResponse{Success: false, Error: "Session locked", Version: d.version, ProductionConfirmed: d.prodConfirmed})
 		} else {
-			d.sendResponse(c, IPCResponse{Success: true, Value: "Active", Version: d.version})
+			d.sendResponse(c, IPCResponse{Success: true, Value: "Active", Version: d.version, ProductionConfirmed: d.prodConfirmed})
 		}
 
 	case IPCActionReexec:
@@ -364,14 +437,15 @@ func (d *Daemon) processRequest(c net.Conn, req IPCRequest, peerPID int) {
 		}
 
 		payload := DaemonStatePayload{
-			MasterKey:    d.masterKey,
-			Profile:      d.profile,
-			SessionStart: d.sessionStart,
-			SessionTTL:   d.sessionTTL,
-			GraceTTL:     d.graceTTL,
-			LastUsed:     d.lastUsed,
-			SessionToken: d.sessionToken,
-			Secrets:      activeSecrets,
+			MasterKey:           d.masterKey,
+			Profile:             d.profile,
+			SessionStart:        d.sessionStart,
+			SessionTTL:          d.sessionTTL,
+			GraceTTL:            d.graceTTL,
+			LastUsed:            d.lastUsed,
+			SessionToken:        d.sessionToken,
+			ProductionConfirmed: d.prodConfirmed,
+			Secrets:             activeSecrets,
 		}
 
 		// #nosec G117
@@ -398,6 +472,9 @@ func (d *Daemon) processRequest(c net.Conn, req IPCRequest, peerPID int) {
 
 		if d.listener != nil {
 			_ = d.listener.Close()
+		}
+		if d.lockFile != nil {
+			_ = unix.Flock(int(d.lockFile.Fd()), unix.LOCK_UN)
 		}
 
 		// #nosec G204
@@ -984,6 +1061,17 @@ func (d *Daemon) processRequest(c net.Conn, req IPCRequest, peerPID int) {
 			Value:   fmt.Sprintf("Rolled back secret %q to version %d (new active version: v%d)", req.Path, targetVer, entry.Version),
 		})
 
+	case IPCActionConfirmProd:
+		d.prodConfirmed = true
+		d.lastUsed = time.Now()
+		d.logAudit(AuditEventConfirmProd, d.profile, peerPID, true, "Production execution confirmed for active session")
+		d.sendResponse(c, IPCResponse{
+			Success:             true,
+			ProductionConfirmed: true,
+			Value:               "Production execution confirmed for active session",
+		})
+		return
+
 	case IPCActionStatus:
 		d.lastUsed = time.Now()
 		totalSecrets := 0
@@ -1004,22 +1092,24 @@ func (d *Daemon) processRequest(c net.Conn, req IPCRequest, peerPID int) {
 		}
 
 		info := &DaemonStatusInfo{
-			Profile:        d.profile,
-			Version:        d.version,
-			SocketPath:     d.socketPath,
-			StorePath:      storePath,
-			StoreSizeBytes: fileSize,
-			IsUnlocked:     d.masterKey != nil,
-			TotalSecrets:   totalSecrets,
-			ExpiredSecrets: expiredSecrets,
-			SessionStart:   d.sessionStart.Format(time.RFC3339),
-			LastUsed:       d.lastUsed.Format(time.RFC3339),
-			SessionTTL:     d.sessionTTL.String(),
-			GraceTTL:       d.graceTTL.String(),
+			Profile:             d.profile,
+			Version:             d.version,
+			SocketPath:          d.socketPath,
+			StorePath:           storePath,
+			StoreSizeBytes:      fileSize,
+			IsUnlocked:          d.masterKey != nil,
+			ProductionConfirmed: d.prodConfirmed,
+			TotalSecrets:        totalSecrets,
+			ExpiredSecrets:      expiredSecrets,
+			SessionStart:        d.sessionStart.Format(time.RFC3339),
+			LastUsed:            d.lastUsed.Format(time.RFC3339),
+			SessionTTL:          d.sessionTTL.String(),
+			GraceTTL:            d.graceTTL.String(),
 		}
 		d.sendResponse(c, IPCResponse{
-			Success:    true,
-			StatusInfo: info,
+			Success:             true,
+			ProductionConfirmed: d.prodConfirmed,
+			StatusInfo:          info,
 		})
 
 	case IPCActionAudit:

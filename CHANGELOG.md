@@ -5,6 +5,29 @@ All notable changes to `sec-agent` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v2.13.1] - 2026-09-14
+
+### Fixed
+- **PROD Confirmation Gate Fatigue**:
+  - Interactive production confirmation is now session-bound; confirming production execution persists in daemon memory for the duration of the session TTL rather than prompting on every single invocation.
+  - Formally registered `--confirm-prod` in `registry.go` and synchronized shell completions for Zsh, Bash, and Fish.
+  - `--dry-run` now bypasses production confirmation entirely, ensuring dry-runs and secret injection inspections are never blocked.
+  - Profile environment detection now correctly falls back to parsing profile names (e.g. `prod`, `production`) when explicit `__profile_env__` tags are absent.
+- **Daemon Deduplication & Mutual Exclusion**:
+  - Added advisory file locking (`unix.Flock`) on `~/.config/sec-agent/sec-agent_<profile>.lock` preventing multiple concurrent daemon processes for the same profile.
+  - Implemented automatic idle termination after 30 minutes of inactivity while unauthenticated/locked.
+  - Added socket inode displacement and removal monitoring to automatically terminate orphaned daemons.
+  - Fixed `ensureDaemonRunning` to always pass `--profile <profile>` when spawning daemons for non-default profiles.
+- **Subprocess Tree & Orphaned Process Reaping**:
+  - `sec run` now assigns subprocesses to their own dedicated process group (`Setpgid: true`) and forwards termination signals to `-pgid`, ensuring background scripts, child processes, and grandchildren are cleanly reaped upon exit rather than lingering as orphans.
+
+### Added & Enhanced
+- **Daemon Diagnostics (`sec daemon list` / `sec daemon ps`)**:
+  - Added `sec daemon list` and `sec daemon ps` (with optional `--json`) for fast, non-blocking visibility into all running and stale daemon processes.
+  - Enhanced `sec doctor` to detect duplicate daemon anomalies across running processes and display actionable `sec restart --profile <profile>` remediation.
+
+---
+
 ## [v2.13.0] - 2026-09-13
 
 ### Fixed

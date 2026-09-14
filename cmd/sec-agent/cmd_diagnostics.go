@@ -1,14 +1,18 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"secure_secrets/internal/config"
@@ -17,6 +21,18 @@ import (
 	"secure_secrets/internal/keychain"
 	"secure_secrets/internal/store"
 )
+
+func detectDaemonAnomaly(profile string, pids []int) (bool, string, string) {
+	if len(pids) > 1 {
+		msg := fmt.Sprintf("[⚠️] Daemon Anomaly: Multiple daemon processes (%d) detected for profile %q (PIDs: %v)", len(pids), profile, pids)
+		rem := fmt.Sprintf("Run 'sec restart --profile %s' to terminate duplicate processes and restart a clean instance.", profile)
+		return true, msg, rem
+	}
+	if len(pids) == 1 {
+		return false, fmt.Sprintf("[✓] Daemon Process: Single instance active (PID: %d)", pids[0]), ""
+	}
+	return false, "", ""
+}
 
 func handleDoctor(profile string, args []string) {
 	skipKeychain := false
@@ -94,7 +110,15 @@ func handleDoctor(profile string, args []string) {
 		fmt.Println("[!] Secure Enclave: Non-macOS system (using fallback software key storage)")
 	}
 
-	// 5. Active Daemon Health
+	// 5. Active Daemon Health & Anomaly Detection
+	daemonPIDs := findDaemonPIDs(profile)
+	if hasAnomaly, msg, rem := detectDaemonAnomaly(profile, daemonPIDs); hasAnomaly {
+		fmt.Println(msg)
+		fmt.Fprintf(os.Stderr, "    Remediation: %s\n", rem)
+	} else if msg != "" {
+		fmt.Println(msg)
+	}
+
 	resp, err := queryDaemon(profile, daemon.IPCRequest{Action: daemon.IPCActionStatus})
 	if err == nil && resp.Success && resp.StatusInfo != nil {
 		fmt.Printf("[✓] Daemon Health: Active (Secrets Stored: %d)\n", resp.StatusInfo.TotalSecrets)
@@ -737,5 +761,184 @@ func handleAudit(profile string, args []string) {
 		fmt.Println("─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────")
 		fmt.Println("To view full filesystem paths: run 'sec audit --verbose'")
 		fmt.Println("To view structured JSON output: run 'sec audit --json'")
+	}
+}
+
+type DaemonProcessEntry struct {
+	PID        int    `json:"pid"`
+	Profile    string `json:"profile"`
+	Status     string `json:"status"`
+	Uptime     string `json:"uptime,omitempty"`
+	Socket     string `json:"socket"`
+	Executable string `json:"executable"`
+}
+
+func handleDaemonList(args []string) {
+	jsonOut := false
+	for _, a := range args {
+		if a == "--json" {
+			jsonOut = true
+		}
+	}
+
+	entriesMap := make(map[int]*DaemonProcessEntry)
+
+	// 1. Scan config directory for .pid files
+	cfgDir, err := config.GetConfigDir()
+	if err == nil && cfgDir != "" {
+		files, _ := os.ReadDir(cfgDir)
+		for _, f := range files {
+			name := f.Name()
+			if strings.HasPrefix(name, "sec-agent") && strings.HasSuffix(name, ".pid") {
+				profile := "default"
+				if name != "sec-agent.pid" {
+					profile = strings.TrimPrefix(name, "sec-agent_")
+					profile = strings.TrimSuffix(profile, ".pid")
+				}
+				pidPath := filepath.Join(cfgDir, name)
+				// #nosec G304 G703
+				if data, err := os.ReadFile(pidPath); err == nil {
+					var info daemon.PIDLockInfo
+					if json.Unmarshal(data, &info) == nil && info.PID > 0 {
+						if syscall.Kill(info.PID, 0) == nil {
+							sock, _ := config.GetSocketPath(profile)
+							entriesMap[info.PID] = &DaemonProcessEntry{
+								PID:        info.PID,
+								Profile:    profile,
+								Executable: info.Executable,
+								Socket:     sock,
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// 2. Scan process table using ps -eo pid,etime,command
+	psCmd := exec.Command("ps", "-eo", "pid,etime,command")
+	if out, err := psCmd.Output(); err == nil {
+		scanner := bufio.NewScanner(strings.NewReader(string(out)))
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" || strings.HasPrefix(line, "PID") {
+				continue
+			}
+			fields := strings.Fields(line)
+			if len(fields) < 3 {
+				continue
+			}
+			pid, err := strconv.Atoi(fields[0])
+			if err != nil || pid <= 0 || pid == os.Getpid() || pid == os.Getppid() {
+				continue
+			}
+			etime := fields[1]
+			cmdLine := strings.Join(fields[2:], " ")
+			base := filepath.Base(fields[2])
+
+			if strings.Contains(cmdLine, "grep") || strings.Contains(cmdLine, "go test") {
+				continue
+			}
+
+			isSecBin := base == "sec" || base == "sec-agent" || strings.Contains(fields[2], "sec-agent") || strings.Contains(fields[2], "/sec")
+			if !isSecBin {
+				if !strings.Contains(cmdLine, "sec daemon") && !strings.Contains(cmdLine, "sec-agent daemon") {
+					continue
+				}
+			}
+
+			hasDaemon := false
+			for _, f := range fields[2:] {
+				if f == "daemon" {
+					hasDaemon = true
+					break
+				}
+			}
+			if !hasDaemon {
+				continue
+			}
+
+			procProfile := "default"
+			for i := 2; i < len(fields); i++ {
+				if (fields[i] == "--profile" || fields[i] == "-P") && i+1 < len(fields) {
+					procProfile = fields[i+1]
+					break
+				}
+				if strings.HasPrefix(fields[i], "--profile=") {
+					procProfile = strings.TrimPrefix(fields[i], "--profile=")
+					break
+				}
+			}
+
+			sock, _ := config.GetSocketPath(procProfile)
+			if entry, ok := entriesMap[pid]; ok {
+				entry.Uptime = etime
+				if entry.Executable == "" {
+					entry.Executable = fields[2]
+				}
+			} else {
+				entriesMap[pid] = &DaemonProcessEntry{
+					PID:        pid,
+					Profile:    procProfile,
+					Uptime:     etime,
+					Executable: fields[2],
+					Socket:     sock,
+				}
+			}
+		}
+	}
+
+	// 3. Query status for each profile using fast probe
+	var entries []*DaemonProcessEntry
+	for _, entry := range entriesMap {
+		sock := entry.Socket
+		if sock == "" {
+			sock, _ = config.GetSocketPath(entry.Profile)
+			entry.Socket = sock
+		}
+		// Fast single dial attempt (20ms timeout) without sleep/retries
+		conn, err := net.DialTimeout("unix", sock, 20*time.Millisecond)
+		if err == nil {
+			_ = conn.SetDeadline(time.Now().Add(50 * time.Millisecond))
+			_ = json.NewEncoder(conn).Encode(daemon.IPCRequest{Action: daemon.IPCActionPing})
+			var resp daemon.IPCResponse
+			if err := json.NewDecoder(conn).Decode(&resp); err == nil {
+				if resp.Success {
+					entry.Status = "Active (unlocked)"
+				} else {
+					entry.Status = "Active (locked)"
+				}
+			} else {
+				entry.Status = "Stale / Unresponsive"
+			}
+			_ = conn.Close()
+		} else {
+			entry.Status = "Stale / Unresponsive"
+		}
+		entries = append(entries, entry)
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Profile != entries[j].Profile {
+			return entries[i].Profile < entries[j].Profile
+		}
+		return entries[i].PID < entries[j].PID
+	})
+
+	if jsonOut {
+		data, _ := json.MarshalIndent(entries, "", "  ")
+		fmt.Println(string(data))
+		return
+	}
+
+	if len(entries) == 0 {
+		fmt.Println("No active background daemon processes found.")
+		return
+	}
+
+	fmt.Printf("%-8s %-16s %-22s %-12s %s\n", "PID", "PROFILE", "STATUS", "UPTIME", "SOCKET")
+	fmt.Println(strings.Repeat("-", 80))
+	for _, e := range entries {
+		fmt.Printf("%-8d %-16s %-22s %-12s %s\n", e.PID, e.Profile, e.Status, e.Uptime, e.Socket)
 	}
 }

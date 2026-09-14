@@ -17,6 +17,7 @@ import (
 	"secure_secrets/internal/daemon"
 	"secure_secrets/internal/keychain"
 	"secure_secrets/internal/store"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -32,7 +33,7 @@ var embeddedSkillBytes []byte
 
 var jsonErrors bool
 var (
-	Version   = "v2.13.0"
+	Version   = "v2.13.1"
 	BuildDate = "unknown"
 )
 
@@ -339,29 +340,145 @@ func queryDaemonRaw(profile string, req daemon.IPCRequest) (*daemon.IPCResponse,
 	return &resp, nil
 }
 
-func evictStaleDaemon(profile string) {
-	_, _ = queryDaemonRaw(profile, daemon.IPCRequest{Action: daemon.IPCActionClear})
-	socketPath, _ := config.GetSocketPath(profile)
-	pidPath, _ := config.GetPIDFilePath(profile)
-	if pidPath != "" {
+func findDaemonPIDs(profile string) []int {
+	pidsMap := make(map[int]bool)
+
+	// 1. Inspect PID lockfile
+	if pidPath, err := config.GetPIDFilePath(profile); err == nil && pidPath != "" {
 		// #nosec G304 G703
 		if data, err := os.ReadFile(pidPath); err == nil {
 			var info daemon.PIDLockInfo
-			if json.Unmarshal(data, &info) == nil && info.PID > 0 && info.PID != os.Getpid() && info.PID != os.Getppid() {
-				if os.Getenv("SEC_TEST_MODE") != "1" {
-					proc, err := os.FindProcess(info.PID)
-					if err == nil && proc != nil {
-						_ = proc.Kill()
+			if json.Unmarshal(data, &info) == nil && info.PID > 0 {
+				if info.PID != os.Getpid() && info.PID != os.Getppid() {
+					if syscall.Kill(info.PID, 0) == nil {
+						pidsMap[info.PID] = true
 					}
 				}
 			}
 		}
+	}
+
+	// 2. Scan process table using ps -eo pid,command
+	cmd := exec.Command("ps", "-eo", "pid,command")
+	out, err := cmd.Output()
+	if err == nil {
+		scanner := bufio.NewScanner(strings.NewReader(string(out)))
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" || strings.HasPrefix(line, "PID") {
+				continue
+			}
+			fields := strings.Fields(line)
+			if len(fields) < 2 {
+				continue
+			}
+			pid, err := strconv.Atoi(fields[0])
+			if err != nil || pid <= 0 || pid == os.Getpid() || pid == os.Getppid() {
+				continue
+			}
+
+			cmdLine := strings.Join(fields[1:], " ")
+			base := filepath.Base(fields[1])
+
+			// Exclude common false positives
+			if strings.Contains(cmdLine, "grep") || strings.Contains(cmdLine, "go test") {
+				continue
+			}
+
+			isSecBin := base == "sec" || base == "sec-agent" || strings.Contains(fields[1], "sec-agent") || strings.Contains(fields[1], "/sec")
+			if !isSecBin {
+				if !strings.Contains(cmdLine, "sec daemon") && !strings.Contains(cmdLine, "sec-agent daemon") {
+					continue
+				}
+			}
+
+			// Must contain "daemon" subcommand as a discrete word
+			hasDaemon := false
+			for _, f := range fields[1:] {
+				if f == "daemon" {
+					hasDaemon = true
+					break
+				}
+			}
+			if !hasDaemon {
+				continue
+			}
+
+			// Determine profile
+			procProfile := "default"
+			for i := 1; i < len(fields); i++ {
+				if (fields[i] == "--profile" || fields[i] == "-P") && i+1 < len(fields) {
+					procProfile = fields[i+1]
+					break
+				}
+				if strings.HasPrefix(fields[i], "--profile=") {
+					procProfile = strings.TrimPrefix(fields[i], "--profile=")
+					break
+				}
+			}
+
+			// If profile was not explicit, check environment for SEC_PROFILE
+			if procProfile == "default" && profile != "default" {
+				// #nosec G204
+				envCmd := exec.Command("ps", "-E", "-p", strconv.Itoa(pid))
+				if envOut, err := envCmd.Output(); err == nil {
+					if strings.Contains(string(envOut), fmt.Sprintf("SEC_PROFILE=%s", profile)) {
+						procProfile = profile
+					}
+				}
+			}
+
+			if procProfile == profile {
+				pidsMap[pid] = true
+			}
+		}
+	}
+
+	var pids []int
+	for pid := range pidsMap {
+		pids = append(pids, pid)
+	}
+	sort.Ints(pids)
+	return pids
+}
+
+func evictStaleDaemon(profile string) {
+	_, _ = queryDaemonRaw(profile, daemon.IPCRequest{Action: daemon.IPCActionClear})
+	pids := findDaemonPIDs(profile)
+	allowKill := os.Getenv("SEC_TEST_MODE") != "1" || os.Getenv("SEC_TEST_ALLOW_KILL") == "1"
+
+	if allowKill {
+		for _, pid := range pids {
+			if pid > 0 && pid != os.Getpid() && pid != os.Getppid() {
+				_ = syscall.Kill(pid, syscall.SIGTERM)
+			}
+		}
+		if len(pids) > 0 {
+			time.Sleep(100 * time.Millisecond)
+			for _, pid := range pids {
+				if pid > 0 && pid != os.Getpid() && pid != os.Getppid() {
+					if syscall.Kill(pid, 0) == nil {
+						_ = syscall.Kill(pid, syscall.SIGKILL)
+					}
+				}
+			}
+		}
+	}
+
+	socketPath, _ := config.GetSocketPath(profile)
+	pidPath, _ := config.GetPIDFilePath(profile)
+	lockPath, _ := config.GetLockFilePath(profile)
+	if pidPath != "" {
 		// #nosec G703
 		_ = os.Remove(pidPath)
 	}
 	if socketPath != "" {
 		// #nosec G703
 		_ = os.Remove(socketPath)
+	}
+	if lockPath != "" {
+		// #nosec G703
+		_ = os.Remove(lockPath)
 	}
 }
 
@@ -372,11 +489,13 @@ func ensureDaemonRunning(profile string) error {
 		versionMismatch := resp.Version != "" && resp.Version != Version
 		execMismatch := false
 		pidPath, _ := config.GetPIDFilePath(profile)
+		activePID := 0
 		if pidPath != "" {
 			// #nosec G304 G703
 			if data, err := os.ReadFile(pidPath); err == nil {
 				var info daemon.PIDLockInfo
 				if json.Unmarshal(data, &info) == nil {
+					activePID = info.PID
 					if info.Executable != "" && currentExec != "" && info.Executable != currentExec {
 						execMismatch = true
 					}
@@ -385,12 +504,27 @@ func ensureDaemonRunning(profile string) error {
 		}
 
 		if versionMismatch || execMismatch {
-			fmt.Printf("DEBUG ensureDaemonRunning versionMismatch=%v (resp.Version=%q, Version=%q), execMismatch=%v\n", versionMismatch, resp.Version, Version, execMismatch)
 			fmt.Fprintln(os.Stderr, "[NOTICE] Mismatched background daemon detected. Evicting and restarting fresh daemon...")
 			evictStaleDaemon(profile)
 		} else {
+			// Daemon is running and healthy. Clean up any rogue duplicate daemon processes claiming this profile.
+			pids := findDaemonPIDs(profile)
+			if len(pids) > 1 {
+				allowKill := os.Getenv("SEC_TEST_MODE") != "1" || os.Getenv("SEC_TEST_ALLOW_KILL") == "1"
+				if allowKill {
+					for _, pid := range pids {
+						if pid != activePID && pid > 0 && pid != os.Getpid() && pid != os.Getppid() {
+							_ = syscall.Kill(pid, syscall.SIGTERM)
+						}
+					}
+				}
+			}
 			return nil // Running and parity verified
 		}
+	} else {
+		// Socket is unresponsive, broken, or not running.
+		// Sweep and evict any lingering stale daemon processes for this profile before spawning a new one.
+		evictStaleDaemon(profile)
 	}
 
 	bin, err := os.Executable()
@@ -398,8 +532,8 @@ func ensureDaemonRunning(profile string) error {
 		return err
 	}
 
-	// #nosec G204
-	cmd := exec.Command(bin, "daemon")
+	// #nosec G204 G702
+	cmd := exec.Command(bin, "--profile", profile, "daemon")
 	cmd.Env = append(os.Environ(), fmt.Sprintf("SEC_PROFILE=%s", profile))
 	cmd.Stdout = nil
 	cmd.Stderr = nil

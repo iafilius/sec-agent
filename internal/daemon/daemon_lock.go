@@ -54,6 +54,7 @@ func (d *Daemon) wipeMemory() {
 	d.sessionStart = time.Time{}
 	d.lastUsed = time.Time{}
 	d.sessionToken = ""
+	d.prodConfirmed = false
 }
 
 func (d *Daemon) expiryTicker() {
@@ -65,8 +66,39 @@ func (d *Daemon) expiryTicker() {
 		if d.isExpired() {
 			d.wipeMemory()
 		}
+		autoTerminate := d.shouldAutoTerminateLocked()
 		d.mu.Unlock()
+
+		if autoTerminate {
+			d.Stop()
+			return
+		}
 	}
+}
+
+func (d *Daemon) shouldAutoTerminateLocked() bool {
+	// 1. Socket displaced or deleted from disk
+	if d.socketPath != "" {
+		fi, err := os.Stat(d.socketPath)
+		if err != nil {
+			return true
+		}
+		if d.socketFileInfo != nil && !os.SameFile(fi, d.socketFileInfo) {
+			return true
+		}
+	}
+
+	// 2. Inactivity timeout check (default 1 hour) when session is expired or locked/unauthenticated
+	idleLimit := d.idleTimeout
+	if idleLimit <= 0 {
+		idleLimit = 1 * time.Hour
+	}
+
+	if (d.sessionStart.IsZero() || d.isExpired()) && !d.lastActivity.IsZero() && time.Since(d.lastActivity) > idleLimit {
+		return true
+	}
+
+	return false
 }
 
 func (d *Daemon) isExpired() bool {
