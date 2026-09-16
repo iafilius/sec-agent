@@ -5,6 +5,28 @@ All notable changes to `sec-agent` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v2.13.2] - 2026-09-16
+
+### Added & Enhanced
+- **In-Flight Session Extension (`sec extend`)**:
+  - Added the `sec extend [--ttl <duration>] [--grace <duration>] [--profile <name>]` subcommand and daemon IPC action (`IPCActionExtend`).
+  - Allows an authenticated client holding a valid session token to push back daemon expiration in memory without triggering Touch ID biometric prompts.
+  - Automatically resets and extends auto-termination and grace period deadlines.
+- **Workspace `.secrc` Duration Fallback**:
+  - `WorkspaceConfig` now parses optional `ttl` and `grace` duration parameters (e.g. `"ttl": "24h"`, `"grace": "2h"`).
+  - `sec open` automatically inherits these workspace-configured durations when explicit command-line flags are omitted.
+- **Turn-1 Long-Job Session Longevity Protocol**:
+  - Integrated explicit rules and instructions across `cmd/sec-agent/SKILL.md`, `cmd_skills_init.go`, and `.agents/AGENTS.md`.
+  - Mandates AI agents verify session TTL at Turn 1 and proactively extend session lifetime or guide the operator to unlock with sufficient duration prior to running unattended tasks (e.g. `/goal`, overnight builds, migrations).
+- **Synchronized Shell Autocompletions**:
+  - Registered `extend` with `--ttl`, `--grace`, and `--profile` options in `registry.go`, automatically providing autocompletion scripts for Zsh, Bash, and Fish.
+
+### Fixed
+- **macOS SDK Tapi Linker Resilience**:
+  - Added automatic SDK detection and fallback in `Makefile` to prevent linker tapi architecture errors (`arm64e.x1-macos`) during builds on macOS systems.
+
+---
+
 ## [v2.13.1] - 2026-09-14
 
 ### Fixed

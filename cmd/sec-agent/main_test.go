@@ -1124,3 +1124,146 @@ func TestOpenWorkspaceLinkedMultiProfileSuccessBanner(t *testing.T) {
 		t.Errorf("expected success banner when both profiles unlock, got:\n%s", outStr)
 	}
 }
+
+// TestSecrcDurationFallbackAndExtendCommand verifies:
+// 1. .secrc "ttl" and "grace" settings are inherited by sec open when CLI flags are absent.
+// 2. Explicit CLI flags override .secrc defaults.
+// 3. 'sec extend' extends an active session over IPC without biometric prompts.
+func TestSecrcDurationFallbackAndExtendCommand(t *testing.T) {
+	profile := "ext-test-profile"
+	sockPath, _ := config.GetSocketPath(profile)
+	dbPath, _ := store.GetStorePath(profile)
+	pidPath, _ := config.GetPIDFilePath(profile)
+	lockPath, _ := config.GetLockFilePath(profile)
+
+	for _, p := range []string{sockPath, dbPath, pidPath, lockPath} {
+		if p != "" {
+			_ = os.Remove(p)
+			defer os.Remove(p)
+		}
+	}
+
+	tmpDir := t.TempDir()
+	binPath := filepath.Join(tmpDir, "sec_test_bin")
+	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build test binary: %v\nOutput: %s", err, out)
+	}
+
+	masterKey := []byte("01234567890123456789012345678901")
+
+	// Pre-populate store
+	st := &store.EncryptedStore{Secrets: map[store.SecretKey]store.SecretEntry{
+		store.SecretKey("test/key"): {Value: "test-val", Version: 1},
+	}}
+	if err := store.SaveStore(profile, st, masterKey); err != nil {
+		t.Fatalf("failed to save store: %v", err)
+	}
+
+	// Start daemon
+	d, err := daemon.NewDaemon(profile, 2*time.Hour, Version)
+	if err != nil {
+		t.Fatalf("failed to create daemon: %v", err)
+	}
+	d.IsTestInstance = true
+	d.SetMasterKeyForTest(masterKey)
+	go func() {
+		if err := d.Start(); err != nil {
+			t.Logf("daemon stopped: %v", err)
+		}
+	}()
+	defer d.Stop()
+
+	for i := 0; i < 50; i++ {
+		if _, err := os.Stat(sockPath); err == nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	wsDir := t.TempDir()
+	secrcContent := `{"ttl": "24h", "grace": "2h"}`
+	if err := os.WriteFile(filepath.Join(wsDir, ".secrc"), []byte(secrcContent), 0600); err != nil {
+		t.Fatalf("failed to write .secrc: %v", err)
+	}
+
+	// 1. Test handleOpen duration resolution via .secrc
+	// Run sec open in wsDir (SEC_TEST_MODE=1 auto-accepts biometrics)
+	openCmd := exec.Command(binPath, "open", "--profile", profile)
+	openCmd.Dir = wsDir
+	openCmd.Env = append(os.Environ(), "SEC_TEST_MODE=1")
+	out, err := openCmd.CombinedOutput()
+	outStr := string(out)
+	if err != nil {
+		t.Fatalf("sec open failed: %v\nOutput: %s", err, outStr)
+	}
+	if !strings.Contains(outStr, "TTL: 24h") {
+		t.Errorf("expected sec open to inherit TTL: 24h from .secrc, got:\n%s", outStr)
+	}
+	if !strings.Contains(outStr, "Inactivity Grace: 2h") {
+		t.Errorf("expected sec open to inherit Grace: 2h from .secrc, got:\n%s", outStr)
+	}
+
+	// Extract session token
+	var token string
+	for _, line := range strings.Split(outStr, "\n") {
+		if strings.HasPrefix(line, "export SEC_SESSION_TOKEN=") {
+			token = strings.Trim(strings.TrimPrefix(line, "export SEC_SESSION_TOKEN="), "\"")
+			break
+		}
+	}
+	if token == "" {
+		t.Fatalf("failed to extract session token from sec open output:\n%s", outStr)
+	}
+
+	// 2. Test explicit CLI flag overrides .secrc
+	openCmd2 := exec.Command(binPath, "open", "--profile", profile, "--ttl", "4h")
+	openCmd2.Dir = wsDir
+	openCmd2.Env = append(os.Environ(), "SEC_TEST_MODE=1")
+	out2, err := openCmd2.CombinedOutput()
+	out2Str := string(out2)
+	if err != nil {
+		t.Fatalf("sec open --ttl 4h failed: %v\nOutput: %s", err, out2Str)
+	}
+	if !strings.Contains(out2Str, "TTL: 4h") {
+		t.Errorf("expected CLI flag to override .secrc with TTL: 4h, got:\n%s", out2Str)
+	}
+
+	// 3. Test 'sec extend' with valid token
+	extendCmd := exec.Command(binPath, "extend", "--profile", profile, "--ttl", "16h", "--token", token)
+	extendCmd.Dir = wsDir
+	extendCmd.Env = append(os.Environ(), "SEC_TEST_MODE=1")
+	extOut, extErr := extendCmd.CombinedOutput()
+	extStr := string(extOut)
+	if extErr != nil {
+		t.Fatalf("sec extend failed: %v\nOutput: %s", extErr, extStr)
+	}
+	if !strings.Contains(extStr, "Session extended until") {
+		t.Errorf("expected success message from sec extend, got:\n%s", extStr)
+	}
+
+	// 4. Test 'sec extend' via SEC_SESSION_TOKEN environment variable
+	extendEnvCmd := exec.Command(binPath, "extend", "--profile", profile, "--ttl", "10h")
+	extendEnvCmd.Dir = wsDir
+	extendEnvCmd.Env = append(os.Environ(), "SEC_TEST_MODE=1", "SEC_SESSION_TOKEN="+token)
+	extEnvOut, extEnvErr := extendEnvCmd.CombinedOutput()
+	extEnvStr := string(extEnvOut)
+	if extEnvErr != nil {
+		t.Fatalf("sec extend via env token failed: %v\nOutput: %s", extEnvErr, extEnvStr)
+	}
+	if !strings.Contains(extEnvStr, "Session extended until") {
+		t.Errorf("expected success message from sec extend via env token, got:\n%s", extEnvStr)
+	}
+
+	// 5. Test 'sec extend' with invalid token fails with actionable error
+	badTokenCmd := exec.Command(binPath, "extend", "--profile", profile, "--ttl", "10h", "--token", "invalid-token")
+	badTokenCmd.Dir = wsDir
+	badTokenCmd.Env = append(os.Environ(), "SEC_TEST_MODE=1")
+	badOut, badErr := badTokenCmd.CombinedOutput()
+	if badErr == nil {
+		t.Fatalf("expected sec extend with bad token to fail, but succeeded with:\n%s", string(badOut))
+	}
+	if !strings.Contains(string(badOut), "ACCESS DENIED") {
+		t.Errorf("expected ACCESS DENIED error, got:\n%s", string(badOut))
+	}
+}

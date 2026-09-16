@@ -288,3 +288,110 @@ func TestDaemonAutoTermination(t *testing.T) {
 	}
 }
 
+// TestDaemonSessionExtension verifies that IPCActionExtend extends an active session
+// with a valid session token, rejects invalid tokens, rejects locked/expired sessions,
+// and properly resets auto-termination.
+func TestDaemonSessionExtension(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("SEC_CONFIG_DIR", tmpDir)
+
+	d := &Daemon{
+		profile:        "extend-test",
+		version:        "v2.13.0",
+		masterKey:      make([]byte, 32),
+		sessionToken:   "valid-session-token",
+		sessionStart:   time.Now().Add(-1 * time.Hour),
+		sessionTTL:     2 * time.Hour,
+		graceTTL:       30 * time.Minute,
+		lastUsed:       time.Now().Add(-1 * time.Hour),
+		lastActivity:   time.Now().Add(-1 * time.Hour),
+		IsTestInstance: true,
+	}
+
+	sendReq := func(req IPCRequest) IPCResponse {
+		clientConn, serverConn := net.Pipe()
+		defer clientConn.Close()
+
+		var resp IPCResponse
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			_ = json.NewDecoder(clientConn).Decode(&resp)
+		}()
+
+		d.processRequest(serverConn, req, 1234)
+		_ = serverConn.Close()
+		<-done
+		return resp
+	}
+
+	// 1. Missing or invalid token should be rejected with ACCESS DENIED
+	respNoToken := sendReq(IPCRequest{Action: IPCActionExtend})
+	if respNoToken.Success || !strings.Contains(respNoToken.Error, "ACCESS DENIED") {
+		t.Fatalf("expected ACCESS DENIED for missing token, got: %+v", respNoToken)
+	}
+
+	respBadToken := sendReq(IPCRequest{Action: IPCActionExtend, Token: "wrong-token"})
+	if respBadToken.Success || !strings.Contains(respBadToken.Error, "ACCESS DENIED") {
+		t.Fatalf("expected ACCESS DENIED for invalid token, got: %+v", respBadToken)
+	}
+
+	// 2. Invalid TTL format rejected
+	respBadTTL := sendReq(IPCRequest{Action: IPCActionExtend, Token: "valid-session-token", TTL: "not-a-duration"})
+	if respBadTTL.Success || !strings.Contains(respBadTTL.Error, "invalid duration") {
+		t.Fatalf("expected error for invalid duration string, got: %+v", respBadTTL)
+	}
+
+	// 3. Valid extension with custom TTL (e.g. 12h) and Grace (e.g. 1h)
+	respOK := sendReq(IPCRequest{
+		Action: IPCActionExtend,
+		Token:  "valid-session-token",
+		TTL:    "12h",
+		Grace:  "1h",
+	})
+	if !respOK.Success {
+		t.Fatalf("expected extension success, got error: %s", respOK.Error)
+	}
+	if !strings.Contains(respOK.Value, "Session extended until") {
+		t.Errorf("expected response value to announce extension, got: %q", respOK.Value)
+	}
+	if respOK.Expires.IsZero() {
+		t.Errorf("expected non-zero Expires time in response")
+	}
+
+	// Verify internal daemon state was updated
+	d.mu.Lock()
+	if d.sessionTTL != 12*time.Hour {
+		t.Errorf("expected sessionTTL=12h, got %v", d.sessionTTL)
+	}
+	if d.graceTTL != 1*time.Hour {
+		t.Errorf("expected graceTTL=1h, got %v", d.graceTTL)
+	}
+	if time.Since(d.sessionStart) > 5*time.Second {
+		t.Errorf("expected sessionStart reset to now, got %v", d.sessionStart)
+	}
+	if d.isExpired() {
+		t.Errorf("expected daemon not to be expired after extension")
+	}
+	d.mu.Unlock()
+
+	// 4. Test ExtendSession method directly
+	newExp, err := d.ExtendSession("valid-session-token", 24*time.Hour, 2*time.Hour)
+	if err != nil {
+		t.Fatalf("d.ExtendSession failed: %v", err)
+	}
+	if newExp.Before(time.Now().Add(23 * time.Hour)) {
+		t.Errorf("expected new expiry at least 23h in future, got: %v", newExp)
+	}
+
+	// 5. Expired/locked session cannot be extended
+	d.mu.Lock()
+	d.wipeMemory()
+	d.mu.Unlock()
+
+	respLocked := sendReq(IPCRequest{Action: IPCActionExtend, Token: "valid-session-token", TTL: "4h"})
+	if respLocked.Success || !strings.Contains(respLocked.Error, "Session locked or expired") {
+		t.Fatalf("expected failure extending wiped session, got: %+v", respLocked)
+	}
+}
+

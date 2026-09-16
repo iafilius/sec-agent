@@ -1,10 +1,10 @@
 ---
 name: sec-agent-integration
 description: Use the sec-agent CLI utility to start background daemons, store secrets, run applications in isolated environments, migrate dotenv files, install AI skills, inspect snapshots, and manage backups.
-version: v2.13.1
+version: v2.13.2
 ---
 
-# sec-agent Secrets Management Integration (v2.13.1)
+# sec-agent Secrets Management Integration (v2.13.2)
 
 This skill enables AI coding agents and autonomous assistants to use the `sec-agent` CLI tool (v1.9.4+) to securely retrieve credentials, run application build/test/terraform pipelines in isolated process environments, migrate dotenv configuration files, install integration skills across IDEs, inspect point-in-time snapshots (`sec snapshot`), and manage KeePassXC `.kdbx` backups on macOS.
 
@@ -27,6 +27,17 @@ When operating in a workspace that uses `sec-agent` (indicated by a `.secrc` fil
      > 🔑 **`sec-agent` session is currently locked.**
      > Please approve the Touch ID prompt (or run `eval $(sec open)`) to retain session access for the execution run.
    * **Decryption Authentication Errors**: If unlocking or recovery returns `cipher: message authentication failed`, immediately run `sec-agent doctor` to check for nested envelope depth anomalies before advising the user to re-enter their 24-word recovery seed.
+4. **Long-Running & Unattended Task Longevity Protocol**:
+   * **Anticipated Long Jobs**: When the agent is tasked with executing long-running, multi-step, batch, or unattended workflows (such as `/goal`, lengthy test suites, kernel/code compilation, data migrations, or overnight background tasks), the agent **MUST proactively verify remaining session TTL** at Turn 1 via `sec status`.
+   * **In-Flight Session Extension (`sec extend`)**: If the session is active but remaining TTL is insufficient for the anticipated workload, the agent SHALL run:
+     ```bash
+     sec extend --ttl <duration> # e.g. sec extend --ttl 24h
+     ```
+     This pushes back daemon expiration in memory **without triggering Touch ID**, preventing mid-run failures while the human operator is away or asleep.
+   * **Upfront Extended Unlock**: If the session is currently locked and a long unattended task is about to begin, prompt the user or execute `sec open` with an explicit duration:
+     ```bash
+     sec open --ttl 24h # or configured in .secrc: {"ttl": "24h"}
+     ```
 
 ### 1.2. Pre-flight Initialization Guard (`sec-agent init`)
 When running `sec-agent` on a fresh workstation or uninitialized environment:
@@ -68,8 +79,8 @@ When `sec-agent` is updated on the workstation (e.g. via Homebrew or source rebu
 
 **CRITICAL RULE FOR AI ASSISTANTS**:
 1. **Dynamic Version Drift Detection**: When executing `sec status`, `sec status --quick`, or any CLI command, if the CLI output indicates:
-   * A structured upgrade notice (`[sec-agent] ⚡ Upgraded AI agent skill from ... to v2.13.1`), or
-   * A CLI version newer than this document's declared version (`v2.13.1`),
+   * A structured upgrade notice (`[sec-agent] ⚡ Upgraded AI agent skill from ... to v2.13.2`), or
+   * A CLI version newer than this document's declared version (`v2.13.2`),
 2. **Immediate Re-Read Obligation**: The AI agent **MUST IMMEDIATELY INVOKE its file viewing tool** (e.g. `view_file`) on the installed skill path (such as `.agents/skills/sec-agent-integration/SKILL.md` or `~/.gemini/config/skills/sec-agent-integration/SKILL.md`) before taking further action. This purges stale cached instructions from the LLM conversation context and equips the agent with new commands, flags, and security rules.
 
 ### 1.5. Guided Profile Onboarding Wizard (`sec profile new <name>`)
@@ -125,7 +136,7 @@ sec-agent skill update
 
 ### 2.2. Automatic Upgrade Sync (`skills_manifest.json`)
 When `sec-agent` is updated (e.g. via `brew upgrade sec-agent`), the next CLI execution compares `skills_manifest.json` manifest version with binary `Version` and automatically updates installed skill files across all tracked IDE locations in-place, printing:
-`[sec-agent] Automatically upgraded AI agent skills (v2.13.1) across N location(s).`
+`[sec-agent] Automatically upgraded AI agent skills (v2.13.2) across N location(s).`
 
 ---
 
@@ -436,6 +447,7 @@ When initializing secret management for a new workspace or migrating an existing
 5. **Zero Disk Tokens & Automatic Subshell Resolution**: Zero token files are written to disk. The daemon automatically authorizes subshell executions via socket peer credentials (`LOCAL_PEERCRED`) and unlocked RAM state. Never attempt to read `session_*.token` files from disk.
 6. **In-Memory Hot-Reload (`sec restart --hot-reload`)**: During CLI upgrades, execute `sec restart --hot-reload` to hot-reload the daemon process image in memory via kernel pipe handoff without clearing active session state or requiring Touch ID re-authentication.
 7. **Workspace `.secrc` Auto-Open & Native Cross-Profile Copy**: `eval $(sec open)` auto-detects workspace `.secrc` / `.secenv` targets to unlock `default` and workspace target profiles in 1 Touch ID tap. Use `sec copy <src> <dst> --from-profile <p1> --to-profile <p2>` to safely copy credentials across vault profiles in memory.
+8. **Long-Running & Autonomous Job Safety**: Before launching unattended or long tasks (e.g. `/goal`, multi-hour builds, batch migrations), AI agents MUST check session TTL via `sec status` and proactively run `sec extend --ttl <dur>` (e.g. `24h`) without Touch ID or guide the user to unlock with sufficient duration at Turn 1 to avoid mid-session timeouts.
 
 ---
 

@@ -46,6 +46,7 @@ const (
 	IPCActionLease          IPCAction = "lease"
 	IPCActionRelabel        IPCAction = "relabel"
 	IPCActionConfirmProd    IPCAction = "confirm_prod"
+	IPCActionExtend         IPCAction = "extend"
 )
 
 // String returns the string representation of IPCAction.
@@ -83,7 +84,7 @@ func (req *IPCRequest) Validate() error {
 	case IPCActionOpen, IPCActionPing, IPCActionGet, IPCActionSet, IPCActionDelete,
 		IPCActionRestore, IPCActionBackup, IPCActionRestoreDeleted, IPCActionAudit,
 		IPCActionList, IPCActionGetGroup, IPCActionRename, IPCActionCopy,
-		IPCActionClear, IPCActionStatus, IPCActionHistory, IPCActionRollback, IPCActionReexec, IPCActionLease, IPCActionRelabel, IPCActionConfirmProd:
+		IPCActionClear, IPCActionStatus, IPCActionHistory, IPCActionRollback, IPCActionReexec, IPCActionLease, IPCActionRelabel, IPCActionConfirmProd, IPCActionExtend:
 		return nil
 	default:
 		return fmt.Errorf("unknown or unsupported IPC action: %q", req.Action)
@@ -100,7 +101,7 @@ type DaemonStatePayload struct {
 	LastUsed            time.Time                             `json:"last_used"`
 	SessionToken        string                                `json:"session_token"`
 	ProductionConfirmed bool                                  `json:"production_confirmed"`
-	Secrets             map[store.SecretKey]store.SecretEntry `json:"secrets,omitempty"`
+	Secrets             map[store.SecretKey]store.SecretEntry `json:"secrets"`
 }
 
 // AuditEventAction represents a strongly-typed security audit event action.
@@ -117,15 +118,16 @@ const (
 	AuditEventRelabel     AuditEventAction = "RELABEL"
 	AuditEventHijack      AuditEventAction = "HIJACK_DENIED"
 	AuditEventConfirmProd AuditEventAction = "CONFIRM_PROD"
+	AuditEventExtend      AuditEventAction = "EXTEND"
 )
 
-// Validate checks whether the audit action is valid.
+// Validate checks whether the AuditEventAction is supported.
 func (a AuditEventAction) Validate() error {
 	switch a {
-	case AuditEventOpen, AuditEventGet, AuditEventSet, AuditEventDelete, AuditEventClear, AuditEventAudit, AuditEventReexec, AuditEventRelabel, AuditEventHijack, AuditEventConfirmProd:
+	case AuditEventOpen, AuditEventGet, AuditEventSet, AuditEventDelete, AuditEventClear, AuditEventAudit, AuditEventReexec, AuditEventRelabel, AuditEventHijack, AuditEventConfirmProd, AuditEventExtend:
 		return nil
 	default:
-		return fmt.Errorf("unsupported audit event action: %q", a)
+		return fmt.Errorf("unknown or unsupported audit event action: %q", a)
 	}
 }
 
@@ -1151,9 +1153,80 @@ func (d *Daemon) processRequest(c net.Conn, req IPCRequest, peerPID int) {
 		}
 		d.sendResponse(c, resp)
 
+	case IPCActionExtend:
+		if req.Token == "" || req.Token != d.sessionToken {
+			d.sendResponse(c, IPCResponse{Success: false, Error: "ACCESS DENIED: Invalid or missing session token"})
+			return
+		}
+		if d.masterKey == nil || d.sessionStart.IsZero() || d.isExpired() {
+			d.sendResponse(c, IPCResponse{Success: false, Error: "Session locked or expired. Please run 'sec open' to authorize."})
+			return
+		}
+
+		newTTL := 8 * time.Hour
+		if req.TTL != "" {
+			parsedTTL, err := time.ParseDuration(req.TTL)
+			if err != nil || parsedTTL <= 0 {
+				d.sendError(c, fmt.Sprintf("invalid duration string for --ttl: %q", req.TTL))
+				return
+			}
+			newTTL = parsedTTL
+		}
+
+		graceDuration := d.graceTTL
+		if req.Grace != "" {
+			if parsedGrace, err := time.ParseDuration(req.Grace); err == nil && parsedGrace > 0 {
+				graceDuration = parsedGrace
+			}
+		}
+
+		d.sessionStart = time.Now()
+		d.sessionTTL = newTTL
+		d.graceTTL = graceDuration
+		d.lastUsed = time.Now()
+		d.lastActivity = time.Now()
+
+		newExpiry := d.sessionStart.Add(d.sessionTTL)
+		remaining := time.Until(newExpiry).Round(time.Second)
+		msg := fmt.Sprintf("Session extended until %s (%s remaining)", newExpiry.Format(time.RFC3339), remaining.String())
+		d.logAudit(AuditEventExtend, d.profile, peerPID, true, msg)
+
+		d.sendResponse(c, IPCResponse{
+			Success: true,
+			Value:   msg,
+			Expires: newExpiry,
+		})
+
 	default:
 		d.sendError(c, "unknown action")
 	}
+}
+
+// ExtendSession updates session lifetime by setting sessionStart to now and sessionTTL to ttl.
+func (d *Daemon) ExtendSession(token string, ttl time.Duration, grace time.Duration) (time.Time, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if token == "" || token != d.sessionToken {
+		return time.Time{}, fmt.Errorf("ACCESS DENIED: Invalid or missing session token")
+	}
+	if d.masterKey == nil || d.sessionStart.IsZero() || d.isExpired() {
+		return time.Time{}, fmt.Errorf("Session locked or expired. Please run 'sec open' to authorize.")
+	}
+	if ttl <= 0 {
+		return time.Time{}, fmt.Errorf("invalid TTL duration: %v", ttl)
+	}
+
+	d.sessionStart = time.Now()
+	d.sessionTTL = ttl
+	if grace > 0 {
+		d.graceTTL = grace
+	}
+	d.lastUsed = time.Now()
+	d.lastActivity = time.Now()
+
+	newExpiry := d.sessionStart.Add(d.sessionTTL)
+	return newExpiry, nil
 }
 
 type OperationLogEntry struct {

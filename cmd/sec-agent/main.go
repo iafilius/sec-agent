@@ -33,7 +33,7 @@ var embeddedSkillBytes []byte
 
 var jsonErrors bool
 var (
-	Version   = "v2.13.1"
+	Version   = "v2.13.2"
 	BuildDate = "unknown"
 )
 
@@ -117,6 +117,8 @@ type WorkspaceConfig struct {
 	Extends     string               `json:"extends,omitempty"`
 	FlagAliases map[string]string    `json:"flag_aliases,omitempty"`
 	SSHTargets  map[string]SSHTarget `json:"ssh_targets,omitempty"`
+	TTL         string               `json:"ttl,omitempty"`
+	Grace       string               `json:"grace,omitempty"`
 }
 
 func findWorkspaceConfigFile() string {
@@ -580,6 +582,20 @@ func handleOpen(profile string, args []string) {
 		}
 	}
 
+	wsCfg, wsCfgFile, _ := loadWorkspaceConfigVerbose()
+	if ttlStr == "" && wsCfg != nil && wsCfg.TTL != "" {
+		ttlStr = wsCfg.TTL
+	}
+	if graceStr == "" && wsCfg != nil && wsCfg.Grace != "" {
+		graceStr = wsCfg.Grace
+	}
+	if ttlStr == "" {
+		ttlStr = "8h"
+	}
+	if graceStr == "" {
+		graceStr = "30m"
+	}
+
 	if ttlStr != "" {
 		if _, err := time.ParseDuration(ttlStr); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: invalid TTL duration format %q: %v\n", ttlStr, err)
@@ -593,7 +609,6 @@ func handleOpen(profile string, args []string) {
 		}
 	}
 
-	wsCfg, wsCfgFile, _ := loadWorkspaceConfigVerbose()
 	openProfiles := []string{profile}
 	if profile == "default" && wsCfg != nil && wsCfg.Profile != "" && wsCfg.Profile != "default" {
 		openProfiles = append(openProfiles, wsCfg.Profile.String())
@@ -689,6 +704,90 @@ func handleOpen(profile string, args []string) {
 	} else {
 		fmt.Fprintln(os.Stderr, "Tip: Run 'eval $(sec open)' to automatically authorize this shell session.")
 	}
+}
+
+func handleExtend(profile string, args []string) {
+	ttlStr := ""
+	graceStr := ""
+	tokenStr := ""
+
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--ttl" || args[i] == "-t" {
+			if i+1 < len(args) {
+				ttlStr = args[i+1]
+				i++
+			} else {
+				fmt.Fprintln(os.Stderr, "Error: --ttl requires a duration value (e.g. 8h, 24h)")
+				os.Exit(1)
+			}
+		} else if args[i] == "--grace" || args[i] == "-g" {
+			if i+1 < len(args) {
+				graceStr = args[i+1]
+				i++
+			} else {
+				fmt.Fprintln(os.Stderr, "Error: --grace requires a duration value (e.g. 30m, 1h)")
+				os.Exit(1)
+			}
+		} else if args[i] == "--token" {
+			if i+1 < len(args) {
+				tokenStr = args[i+1]
+				i++
+			} else {
+				fmt.Fprintln(os.Stderr, "Error: --token requires a token string")
+				os.Exit(1)
+			}
+		}
+	}
+
+	wsCfg := loadWorkspaceConfig()
+	if ttlStr == "" && wsCfg != nil && wsCfg.TTL != "" {
+		ttlStr = wsCfg.TTL
+	}
+	if graceStr == "" && wsCfg != nil && wsCfg.Grace != "" {
+		graceStr = wsCfg.Grace
+	}
+	if ttlStr == "" {
+		ttlStr = "8h"
+	}
+
+	if _, err := time.ParseDuration(ttlStr); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: invalid TTL duration format %q: %v\n", ttlStr, err)
+		os.Exit(1)
+	}
+	if graceStr != "" {
+		if _, err := time.ParseDuration(graceStr); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: invalid Grace duration format %q: %v\n", graceStr, err)
+			os.Exit(1)
+		}
+	}
+
+	if tokenStr == "" {
+		tokenStr = os.Getenv("SEC_SESSION_TOKEN")
+	}
+
+	req := daemon.IPCRequest{
+		Action: daemon.IPCActionExtend,
+		TTL:    ttlStr,
+		Grace:  graceStr,
+		Token:  tokenStr,
+	}
+
+	resp, err := queryDaemon(profile, req)
+	if err != nil {
+		fail("DAEMON_UNREACHABLE", fmt.Errorf("could not connect to background daemon for profile %q: %w", profile, err), "Ensure the daemon is running with 'sec open'")
+	}
+
+	if !resp.Success {
+		if strings.Contains(resp.Error, "ACCESS DENIED") {
+			fail("SESSION_UNAUTHORIZED", fmt.Errorf("%s", resp.Error), "Run 'eval $(sec open)' to authenticate and set SEC_SESSION_TOKEN in your environment")
+		}
+		if strings.Contains(resp.Error, "Session locked or expired") {
+			fail("SESSION_EXPIRED", fmt.Errorf("%s", resp.Error), "Run 'sec open' to authorize with Touch ID")
+		}
+		fail("EXTEND_FAILED", fmt.Errorf("%s", resp.Error), "Check daemon status with 'sec status'")
+	}
+
+	fmt.Println(resp.Value)
 }
 
 func handleGen(profile string, path string, args []string) {

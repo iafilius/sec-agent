@@ -179,7 +179,8 @@ This workspace integrates with ` + "`sec-agent`" + ` for zero-plaintext secret m
 1. **Zero Plaintext Exposure**: Never print, log, or commit secret values to files, history, or chat output.
 2. **Conditional Pre-flight**: If ` + "`.secrc`" + ` exists in this repository or the task requires credentials, run ` + "`sec status --quick`" + ` (<5ms) to verify daemon session state. If locked and secrets are required, prompt the user:
    > 🔑 ` + "`sec-agent`" + ` session is locked. Run ` + "`eval $(sec open)`" + ` or approve Touch ID to retain session access.
-3. **Isolated Process Execution**: Run pipelines and scripts using ` + "`sec run -- <cmd>`" + ` to inject secrets directly into memory without touching disk or shell history.
+3. **Long-Running & Unattended Task Longevity**: Before launching long-running or autonomous jobs (e.g. ` + "`/goal`" + `, batch builds, migrations), verify session TTL via ` + "`sec status`" + `. Proactively run ` + "`sec extend --ttl <duration>`" + ` (e.g. ` + "`24h`" + `) without Touch ID or request extended unlock at Turn 1 to prevent unattended mid-job timeouts.
+4. **Isolated Process Execution**: Run pipelines and scripts using ` + "`sec run -- <cmd>`" + ` to inject secrets directly into memory without touching disk or shell history.
 
 ## Essential Commands
 | Command | Purpose |
@@ -187,6 +188,7 @@ This workspace integrates with ` + "`sec-agent`" + ` for zero-plaintext secret m
 | ` + "`sec status --quick`" + ` | Ultra-fast check (<5ms) of daemon session state |
 | ` + "`sec run -- <cmd>`" + ` | Execute command with secrets injected into process memory |
 | ` + "`sec open`" + ` | Unlock vault session via Touch ID (single auth covers full session) |
+| ` + "`sec extend [--ttl <dur>]`" + ` | Extend active session lifetime without Touch ID |
 | ` + "`sec get <key>`" + ` | Retrieve secret - always prints the real value to stdout, in any context. Prefer ` + "`sec run`" + ` for scripts/agents; reserve ` + "`get`" + ` for deliberate human/` + "`--raw`" + ` use |
 | ` + "`sec set <key>`" + ` | Store secret via secure hidden terminal prompt |
 | ` + "`sec relabel <key> -a <VAR>`" + ` | Update env alias or metadata without retyping secret |

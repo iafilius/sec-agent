@@ -40,6 +40,14 @@ func initRegistry() {
 			Handler:     handleOpen,
 		},
 		{
+			Name:        "extend",
+			Category:    "Session & Setup",
+			Description: "Extend the lifetime of the active secrets session without Touch ID",
+			Usage:       "sec extend [--ttl <duration>] [--grace <duration>] [--token <token>]",
+			Flags:       []string{"--ttl", "-t", "--grace", "-g", "--token"},
+			Handler:     handleExtend,
+		},
+		{
 			Name:        "init",
 			Aliases:     []string{"setup"},
 			Category:    "Session & Setup",

@@ -25,7 +25,7 @@ func PlayAlertSound() bool {
 func FormatReason(version, action, profile string) string {
 	v := strings.TrimSpace(version)
 	if v == "" {
-		v = "v2.13.1"
+		v = "v2.13.2"
 	}
 	p := strings.TrimSpace(profile)
 	if p == "" {
