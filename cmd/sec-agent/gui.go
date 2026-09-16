@@ -30,7 +30,7 @@ func ensureUnlocked(profile string) (*daemon.IPCResponse, error) {
 	}
 
 	if os.Getenv("SEC_TEST_MODE") != "1" {
-		if !biometrics.Authenticate("Unlock sec-agent vault session") {
+		if !biometrics.Authenticate(biometrics.FormatReason(Version, "gui", profile)) {
 			return nil, fmt.Errorf("Biometric authentication failed or cancelled")
 		}
 	}

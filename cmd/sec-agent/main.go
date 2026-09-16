@@ -260,7 +260,7 @@ func queryDaemon(profile string, req daemon.IPCRequest) (*daemon.IPCResponse, er
 
 func handleOpenGUI(profile string) bool {
 	if os.Getenv("SEC_TEST_MODE") != "1" {
-		if !biometrics.Authenticate(fmt.Sprintf("Authorize sec-agent session (%s)", profile)) {
+		if !biometrics.Authenticate(biometrics.FormatReason(Version, "gui", profile)) {
 			return false
 		}
 	}
@@ -615,7 +615,7 @@ func handleOpen(profile string, args []string) {
 	fmt.Fprintln(os.Stderr, "Authorizing session via Touch ID...")
 
 	if os.Getenv("SEC_TEST_MODE") != "1" {
-		if !biometrics.Authenticate("Authorize sec session") {
+		if !biometrics.Authenticate(biometrics.FormatReason(Version, "open", profile)) {
 			fmt.Fprintln(os.Stderr, "Authentication failed: Biometric verification failed.")
 			os.Exit(1)
 		}
@@ -768,18 +768,17 @@ func handleRestart(profile string, args []string) {
 	}
 
 	if hotReload {
+		if !config.IsConfigDirInitialized() {
+			fmt.Printf("[INFO] sec-agent configuration directory is uninitialized; nothing to hot-reload.\n")
+			return
+		}
 		resp, err := queryDaemon(profile, daemon.IPCRequest{Action: daemon.IPCActionReexec})
 		if err == nil && resp != nil && resp.Success {
 			fmt.Printf("[✓] sec-agent daemon (%s) hot-reloaded in memory via kernel pipe handoff (Zero Touch ID required).\n", profile)
 			return
 		}
-		errMsg := "Daemon not running or locked"
-		if resp != nil && resp.Error != "" {
-			errMsg = resp.Error
-		} else if err != nil {
-			errMsg = err.Error()
-		}
-		fmt.Fprintf(os.Stderr, "[NOTICE] In-memory hot-reload unavailable (%s). Performing standard Touch ID restart...\n", errMsg)
+		fmt.Printf("[INFO] sec-agent daemon (%s) is not currently running; nothing to hot-reload.\n", profile)
+		return
 	}
 
 	_, _ = queryDaemon(profile, daemon.IPCRequest{Action: daemon.IPCActionClear})
@@ -949,6 +948,7 @@ func printCommandHelp(spec CommandSpec) {
 }
 
 func main() {
+	keychain.SetVersion(Version)
 	profile, cleanArgs := extractGlobalFlags()
 	os.Args = cleanArgs
 
@@ -975,7 +975,17 @@ func main() {
 			os.Exit(0)
 		}
 
-		if cmd != "init" && cmd != "setup" && cmd != "version" && cmd != "completion" && cmd != "shell-completion" {
+		isHotReload := false
+		if cmd == "restart" {
+			for _, a := range os.Args[2:] {
+				if a == "--hot-reload" || a == "-H" || a == "--force" {
+					isHotReload = true
+					break
+				}
+			}
+		}
+
+		if cmd != "init" && cmd != "setup" && cmd != "version" && cmd != "completion" && cmd != "shell-completion" && !isHotReload {
 			if !config.IsConfigDirInitialized() {
 				fail("VAULT_UNINITIALIZED", fmt.Errorf("sec-agent configuration directory (~/.config/sec-agent/) is missing or uninitialized"), "Please initialize your vault environment by running: sec-agent init")
 			}

@@ -297,6 +297,14 @@ func TestMainIntegration(t *testing.T) {
 		t.Fatalf("sec get after hot-reload failed: %v, output: %q", err, string(postOut))
 	}
 
+	// Test hot-reload on inactive profile: must exit 0 and report inactive without failing or prompting
+	inactiveReloadCmd := exec.Command("./sec_test_bin", "restart", "--hot-reload", "--profile", "inactive-test-profile")
+	inactiveReloadCmd.Env = testEnv
+	inactiveOut, err := inactiveReloadCmd.CombinedOutput()
+	if err != nil || !strings.Contains(string(inactiveOut), "is not currently running; nothing to hot-reload") {
+		t.Fatalf("expected inactive profile hot-reload to exit 0 cleanly, got err: %v, out: %s", err, string(inactiveOut))
+	}
+
 	// 6l. Test 'sec doctor' diagnostics
 	docCmd := exec.Command("./sec_test_bin", "doctor", "--profile", profile)
 	docCmd.Env = testEnv

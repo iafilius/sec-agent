@@ -111,7 +111,7 @@ int set_secret_current_set(const char* service, const char* account, const unsig
 }
 
 
-int get_secret(const char* service, const char* account, unsigned char** out_bytes, int* out_len) {
+int get_secret(const char* service, const char* account, const char* prompt, unsigned char** out_bytes, int* out_len) {
     CFStringRef cfService = CFStringCreateWithCString(kCFAllocatorDefault, service, kCFStringEncodingUTF8);
     CFStringRef cfAccount = CFStringCreateWithCString(kCFAllocatorDefault, account, kCFStringEncodingUTF8);
 
@@ -120,6 +120,17 @@ int get_secret(const char* service, const char* account, unsigned char** out_byt
     CFDictionarySetValue(query, kSecAttrService, cfService);
     CFDictionarySetValue(query, kSecAttrAccount, cfAccount);
     CFDictionarySetValue(query, kSecReturnData, kCFBooleanTrue);
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    if (prompt != NULL && strlen(prompt) > 0) {
+        CFStringRef cfPrompt = CFStringCreateWithCString(kCFAllocatorDefault, prompt, kCFStringEncodingUTF8);
+        if (cfPrompt != NULL) {
+            CFDictionarySetValue(query, kSecUseOperationPrompt, cfPrompt);
+            CFRelease(cfPrompt);
+        }
+    }
+#pragma clang diagnostic pop
 
     CFTypeRef result = NULL;
     OSStatus status = SecItemCopyMatching(query, &result);
@@ -262,18 +273,29 @@ func Set(service, account string, secret []byte) error {
 	return nil
 }
 
-// Get retrieves a secret, triggering a hardware Touch ID validation.
-func Get(service, account string) ([]byte, error) {
+var currentVersion = "v2.13.1"
+
+// SetVersion sets the active binary version string used in Keychain operation prompts.
+func SetVersion(v string) {
+	if strings.TrimSpace(v) != "" {
+		currentVersion = strings.TrimSpace(v)
+	}
+}
+
+// GetWithPrompt retrieves a secret, triggering a hardware Touch ID/password validation with a custom operation prompt.
+func GetWithPrompt(service, account, prompt string) ([]byte, error) {
 	service = sanitizeServiceName(service)
 	cService := C.CString(service)
 	cAccount := C.CString(account)
+	cPrompt := C.CString(prompt)
 	defer C.free(unsafe.Pointer(cService))
 	defer C.free(unsafe.Pointer(cAccount))
+	defer C.free(unsafe.Pointer(cPrompt))
 
 	var outBytes *C.uchar
 	var outLen C.int
 
-	status := C.get_secret(cService, cAccount, &outBytes, &outLen)
+	status := C.get_secret(cService, cAccount, cPrompt, &outBytes, &outLen)
 	if status != ErrSecSuccess {
 		if status == ErrSecItemNotFound {
 			return nil, fmt.Errorf("secret not found in keychain")
@@ -287,6 +309,11 @@ func Get(service, account string) ([]byte, error) {
 
 	data := C.GoBytes(unsafe.Pointer(outBytes), outLen)
 	return data, nil
+}
+
+// Get retrieves a secret, triggering a hardware Touch ID validation with a default action-focused versioned prompt.
+func Get(service, account string) ([]byte, error) {
+	return GetWithPrompt(service, account, fmt.Sprintf("sec-agent %s: Unlock vault master key", currentVersion))
 }
 
 // Delete removes a secret from the keychain.
@@ -374,8 +401,13 @@ func GetKeychainAccessPair(profile string) (getter func() ([]byte, error), sette
 	}
 	acc := "master"
 
+	prompt := fmt.Sprintf("sec-agent %s: Unlock vault master key", currentVersion)
+	if profile != "" && profile != "default" {
+		prompt = fmt.Sprintf("sec-agent %s: Unlock vault master key (profile: '%s')", currentVersion, profile)
+	}
+
 	getter = func() ([]byte, error) {
-		return Get(svc, acc)
+		return GetWithPrompt(svc, acc, prompt)
 	}
 	setter = func(k []byte) error {
 		return Set(svc, acc, k)

@@ -337,7 +337,7 @@ func handleProfileNew(args []string) {
 	}
 
 	if os.Getenv("SEC_TEST_MODE") != "1" {
-		if !biometrics.Authenticate("Authorize Creation of Profile " + pName.String()) {
+		if !biometrics.Authenticate(biometrics.FormatReason(Version, "create_profile", pName.String())) {
 			fmt.Fprintln(os.Stderr, "❌ Touch ID biometric authorization required for profile creation.")
 			os.Exit(1)
 		}

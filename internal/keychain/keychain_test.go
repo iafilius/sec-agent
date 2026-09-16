@@ -58,3 +58,49 @@ func TestKeychainLifecycle(t *testing.T) {
 		t.Fatalf("Failed to delete secret: %v", err)
 	}
 }
+
+func TestKeychainVersionedPromptsAndAccessPair(t *testing.T) {
+	t.Setenv("SEC_TEST_MODE", "1")
+
+	// Verify SetVersion updates package state
+	SetVersion("v9.9.9")
+	if currentVersion != "v9.9.9" {
+		t.Errorf("expected currentVersion to be 'v9.9.9', got %q", currentVersion)
+	}
+
+	// Verify GetKeychainAccessPair for default profile
+	getterDef, setterDef := GetKeychainAccessPair("default")
+	if getterDef == nil || setterDef == nil {
+		t.Fatalf("expected non-nil getter and setter for default profile")
+	}
+
+	// Verify GetKeychainAccessPair for custom named profile
+	getterNamed, setterNamed := GetKeychainAccessPair("work-profile")
+	if getterNamed == nil || setterNamed == nil {
+		t.Fatalf("expected non-nil getter and setter for work-profile")
+	}
+
+	testSecret := []byte("versioned-prompt-test-key-32bytes!")
+	if err := setterNamed(testSecret); err != nil {
+		t.Fatalf("setterNamed failed: %v", err)
+	}
+
+	// Verify listing under isolated test profile
+	accounts, err := List("sec-test-session:profile_work-profile")
+	if err != nil {
+		t.Fatalf("failed to list accounts: %v", err)
+	}
+	found := false
+	for _, a := range accounts {
+		if a == "master" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected 'master' account in test profile accounts, got: %v", accounts)
+	}
+
+	// Clean up
+	_ = Delete("sec-test-session:profile_work-profile", "master")
+}

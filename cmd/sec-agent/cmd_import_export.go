@@ -479,7 +479,7 @@ func handleMigrateV2(profile string, args []string) {
 	mnemonic := seedInput
 	if mnemonic == "" {
 		if os.Getenv("SEC_TEST_MODE") != "1" {
-			if !biometrics.Authenticate("Authorize v2.0 Dual-Slot Vault Migration") {
+			if !biometrics.Authenticate(biometrics.FormatReason(Version, "migrate_v2", "")) {
 				fmt.Fprintln(os.Stderr, "❌ Touch ID biometric authorization required for vault migration.")
 				os.Exit(1)
 			}

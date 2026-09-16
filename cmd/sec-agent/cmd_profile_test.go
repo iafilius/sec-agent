@@ -640,6 +640,42 @@ func TestDetectDaemonAnomaly(t *testing.T) {
 	}
 }
 
+func TestRestartHotReloadSafeNonInteractive(t *testing.T) {
+	tmpDir := t.TempDir()
+	emptyConfigDir := filepath.Join(tmpDir, "nonexistent-config-dir")
+
+	binPath := filepath.Join(tmpDir, "sec_restart_test_bin")
+	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build test binary: %v, output: %s", err, string(out))
+	}
+
+	// 1. Test when config dir is uninitialized: must exit 0 and not fail with VAULT_UNINITIALIZED
+	cmdUninit := exec.Command(binPath, "restart", "--hot-reload")
+	cmdUninit.Env = append(os.Environ(), "SEC_CONFIG_DIR="+emptyConfigDir)
+	outUninit, err := cmdUninit.CombinedOutput()
+	if err != nil {
+		t.Fatalf("expected sec restart --hot-reload to exit 0 on uninitialized config, got error: %v, output: %s", err, string(outUninit))
+	}
+	if !strings.Contains(string(outUninit), "nothing to hot-reload") {
+		t.Errorf("expected notice that nothing to hot-reload, got: %s", string(outUninit))
+	}
+
+	// 2. Test when config dir exists but daemon is not running: must exit 0 and not prompt for Touch ID
+	initializedDir := filepath.Join(tmpDir, "init-dir")
+	_ = os.MkdirAll(initializedDir, 0700)
+	cmdNoDaemon := exec.Command(binPath, "restart", "--hot-reload", "--profile", "test-inactive")
+	cmdNoDaemon.Env = append(os.Environ(), "SEC_CONFIG_DIR="+initializedDir)
+	outNoDaemon, err := cmdNoDaemon.CombinedOutput()
+	if err != nil {
+		t.Fatalf("expected sec restart --hot-reload to exit 0 when daemon inactive, got error: %v, output: %s", err, string(outNoDaemon))
+	}
+	if !strings.Contains(string(outNoDaemon), "is not currently running; nothing to hot-reload") {
+		t.Errorf("expected inactive daemon notice, got: %s", string(outNoDaemon))
+	}
+}
+
+
 
 
 
