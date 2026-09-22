@@ -1,10 +1,10 @@
 ---
 name: sec-agent-integration
 description: Use the sec-agent CLI utility to start background daemons, store secrets, run applications in isolated environments, migrate dotenv files, install AI skills, inspect snapshots, and manage backups.
-version: v2.13.4
+version: v2.14.0
 ---
 
-# sec-agent Secrets Management Integration (v2.13.4)
+# sec-agent Secrets Management Integration (v2.14.0)
 
 This skill enables AI coding agents and autonomous assistants to use the `sec-agent` CLI tool (v1.9.4+) to securely retrieve credentials, run application build/test/terraform pipelines in isolated process environments, migrate dotenv configuration files, install integration skills across IDEs, inspect point-in-time snapshots (`sec snapshot`), and manage KeePassXC `.kdbx` backups on macOS.
 
@@ -78,7 +78,7 @@ When `sec-agent` is updated on the workstation (e.g. via Homebrew or source rebu
 **CRITICAL RULE FOR AI ASSISTANTS**:
 1. **Dynamic Version Drift Detection**: When executing `sec status`, `sec status --quick`, or any CLI command, if the CLI output indicates:
    * An advisory upgrade notice (`[sec-agent] 💡 Active workspace AI skill instructions trail CLI version ... Run 'sec-agent skill update' to refresh.`), or
-   * A CLI version newer than this document's declared version (`v2.13.4`),
+   * A CLI version newer than this document's declared version (`v2.14.0`),
 2. **Immediate Update & Re-Read Obligation**:
    * Execute `sec-agent skill update` to refresh installed skills to the latest binary version.
    * Then **IMMEDIATELY INVOKE your file viewing tool** (e.g. `view_file`) on the installed skill path (such as `.agents/skills/sec-agent-integration/SKILL.md` or `~/.gemini/config/skills/sec-agent-integration/SKILL.md`) before taking further action. This purges stale cached instructions from the LLM conversation context and equips the agent with new commands, flags, and security rules.
@@ -435,6 +435,73 @@ When initializing secret management for a new workspace or migrating an existing
 4. **Transparent Multi-Profile Migration**: `sec-agent migrate-v2` supports `--profile <name>` and `--all-profiles`, logs individual vault progress, and displays actionable Keychain access warnings.
 5. **AI Skill Drift Diagnostics**: `sec-agent status` and `sec-agent version` automatically warn when an installed AI assistant skill document trails the CLI version and recommend running `sec-agent skill update`.
 
+### 5.28. Multi-Environment Workspace Contexts & Zero-Disk Switching (v2.14.0)
+1. **Schema v2 Multi-Environment Configuration (`.secrc`)**:
+   Projects can declare multiple environment aliases and safety tiers in `.secrc` while preserving 100% backward compatibility for legacy v1 files (`{"profile": "<name>"}`):
+   ```json
+   {
+     "environments": {
+       "sandbox": { "profile": "proj-sandbox", "tier": "dev" },
+       "staging": { "profile": "proj-staging", "tier": "staging" },
+       "prod": { "profile": "proj-prod", "tier": "prod" }
+     },
+     "default": "sandbox"
+   }
+   ```
+2. **Process-Isolated Switching (`sec use`)**:
+   Zero disk files are written. Context switching strictly modifies calling process environment variables:
+   ```bash
+   # Switch active shell context to an environment alias
+   eval $(sec use staging)
+   # Exports: SEC_ENV="staging" and SEC_PROFILE="proj-staging"
+
+   # Clear environment context back to workspace default
+   eval $(sec use --clear)
+   ```
+3. **Workspace Environment Inspection (`sec env ls` / `sec env`)**:
+   ```bash
+   # Inspect discovered environments with active indicator (*) and tier badges
+   sec env ls
+   # Output:
+   #   ALIAS     PROFILE       TIER      STATUS
+   # * sandbox   proj-sandbox  dev       active
+   #   staging   proj-staging  staging
+   #   prod      proj-prod     prod 🔴
+
+   # Machine-readable JSON output for scripts and AI tooling
+   sec env ls --json
+   ```
+   *Note*: If executed with an argument that matches a secret namespace path or in a legacy workspace, `sec env <prefix>` safely falls back to exporting secrets as environment variables.
+4. **Command-Level Environment Flag Overrides (`-E` / `--env`)**:
+   Pass `-E <alias>` or `--env <alias>` to direct any command to a specific environment alias without altering shell context:
+   ```bash
+   sec -E staging run -- npm test
+   sec -E prod get db/password
+   ```
+
+### 5.29. Production Blast-Radius Mutation Guardrails (v2.14.0)
+1. **Protected Mutating Commands**:
+   Any operation that modifies or deletes vault state (`set`, `rm`, `mv`, `rollback`, `restore-deleted`, `rotate`) targeting an environment or profile with `tier: "prod"` is strictly intercepted.
+2. **Non-Interactive Abort Protocol**:
+   * In scripts, CI/CD runners, and AI agent tool invocations (non-TTY), mutations targeting production fail immediately with **exit code 2** and structured JSON error code `PROD_MUTATION_CONFIRMATION_REQUIRED`.
+   * To proceed, callers must supply the explicit `--confirm-prod` flag or set `SEC_CONFIRM_PROD=1`:
+   ```bash
+   sec set app/key "val" --confirm-prod
+   sec rm app/key --confirm-prod
+   ```
+3. **Interactive TTY Safeguards**:
+   In human interactive terminals, `sec-agent` prints a warning badge (`⚠️ PRODUCTION MUTATION`) and requires typing the confirmation string `yes` before committing mutations.
+4. **Read Operations Pass Freely**:
+   Read commands (`get`, `ls`, `history`, `export`, `run`, `stream`) never prompt or block, ensuring automation pipelines inspect safely without friction.
+
+### 5.30. Cross-Profile Template Interpolation in `sec stream` (v2.14.0)
+`sec stream` supports cross-profile placeholder syntax using the `@<alias_or_profile>:` namespace prefix:
+```bash
+# Stream template interpolating both local environment and cross-profile secrets
+sec stream --template "export APP_KEY='{{db/password}}' GLOBAL_CA='{{@global-shared:pki/ca_cert}}'" | sh
+```
+* If the target profile daemon is stopped or locked, `sec stream` halts execution before outputting partial templates and prints actionable diagnostic remediation directing the operator to run `sec -P <target> open`.
+
 ---
 
 ## 6. Key Takeaways for AI Assistants
@@ -451,6 +518,8 @@ When initializing secret management for a new workspace or migrating an existing
 6. **In-Memory Hot-Reload (`sec restart --hot-reload`)**: During CLI upgrades, execute `sec restart --hot-reload` to hot-reload the daemon process image in memory via kernel pipe handoff without clearing active session state or requiring Touch ID re-authentication.
 7. **Workspace `.secrc` Auto-Open & Native Cross-Profile Copy**: `eval $(sec open)` auto-detects workspace `.secrc` / `.secenv` targets to unlock `default` and workspace target profiles in 1 Touch ID tap. Use `sec copy <src> <dst> --from-profile <p1> --to-profile <p2>` to safely copy credentials across vault profiles in memory.
 8. **Long-Running & Autonomous Job Safety**: Before launching unattended or long tasks (e.g. `/goal`, multi-hour builds, batch migrations), AI agents MUST check session TTL via `sec status` and proactively run `sec extend --ttl <dur>` (e.g. `24h`) without Touch ID or guide the user to unlock with sufficient duration at Turn 1 to avoid mid-session timeouts.
+9. **Process-Isolated Context Switching**: Use `eval $(sec use <alias>)` to switch subshell contexts across multi-environment `.secrc` setups, or pass `-E <alias>` for one-off commands. Inspect environments with `sec env ls --json`.
+10. **Production Mutation Guardrail Awareness**: When modifying secrets in production tiers (`tier: "prod"`), automated scripts and AI tools MUST explicitly pass `--confirm-prod` to avoid non-interactive failure (`PROD_MUTATION_CONFIRMATION_REQUIRED`, exit code 2).
 
 ---
 

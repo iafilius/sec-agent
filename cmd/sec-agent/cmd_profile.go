@@ -70,7 +70,7 @@ func checkProductionGuard(profile store.ProfileName, args []string) {
 		}
 	}
 
-	hasConfirm := false
+	hasConfirm := confirmProdFlag || os.Getenv("SEC_CONFIRM_PROD") == "1"
 	for _, arg := range args {
 		if arg == "--confirm-prod" {
 			hasConfirm = true
@@ -493,7 +493,7 @@ func handleProfileNew(args []string) {
 	}
 }
 
-func handleEnv(profile string, args []string) {
+func handleLegacyExportEnv(profile string, args []string) {
 	prefix := ""
 	if len(args) > 0 {
 		prefix = args[0]
@@ -1062,40 +1062,6 @@ func handleRun(profile string, args []string) {
 	}
 }
 
-func handleStream(profile string, args []string) {
-	templateStr := ""
-	for i := 0; i < len(args); i++ {
-		if (args[i] == "--template" || args[i] == "-t") && i+1 < len(args) {
-			templateStr = args[i+1]
-			i++
-		}
-	}
-
-	if templateStr == "" {
-		data, err := io.ReadAll(os.Stdin)
-		if err != nil {
-			fail("STDIN_READ_ERROR", fmt.Errorf("failed reading stream input: %v", err), "")
-		}
-		templateStr = string(data)
-	}
-
-	resp, err := queryDaemon(profile, daemon.IPCRequest{Action: "backup"})
-	if err != nil || !resp.Success {
-		failDaemonNotRunning(profile)
-	}
-
-	re := regexp.MustCompile(`\{\{\s*([a-zA-Z0-9_\-\./]+)\s*\}\}`)
-	rendered := re.ReplaceAllStringFunc(templateStr, func(match string) string {
-		keyPath := strings.TrimSpace(match[2 : len(match)-2])
-		if entry, ok := resp.Secrets[keyPath]; ok {
-			return entry.Value
-		}
-		return match
-	})
-
-	fmt.Print(rendered)
-}
-
 func handlePrompt(profile string, args []string) {
 	format := "plain"
 	for i := 0; i < len(args); i++ {
@@ -1105,6 +1071,24 @@ func handlePrompt(profile string, args []string) {
 		}
 	}
 
+	wsCfg := loadWorkspaceConfig()
+	envAlias := activeEnvAlias
+	if envAlias == "" {
+		envAlias = os.Getenv("SEC_ENV")
+	}
+	if envAlias == "" && wsCfg != nil {
+		envAlias = wsCfg.Default
+	}
+
+	tier := activeEnvTier
+	if tier == config.TierUnset && wsCfg != nil && wsCfg.Environments != nil && envAlias != "" {
+		if env, ok := wsCfg.Environments[envAlias]; ok {
+			tier = env.ParsedTier()
+		}
+	}
+
+	isMultiEnv := wsCfg != nil && len(wsCfg.Environments) > 0 && envAlias != ""
+
 	activeProfile := profile
 	if activeProfile == "" {
 		activeProfile = "default"
@@ -1113,13 +1097,13 @@ func handlePrompt(profile string, args []string) {
 	// High-speed non-blocking probe to daemon socket
 	sockPath, err := config.GetSocketPath(activeProfile)
 	if err != nil {
-		printPromptFormat(format, activeProfile, "unknown", false)
+		printPromptFormat(format, activeProfile, envAlias, tier, isMultiEnv, "unknown", false)
 		return
 	}
 
 	conn, err := net.DialTimeout("unix", sockPath, 10*time.Millisecond)
 	if err != nil {
-		printPromptFormat(format, activeProfile, "locked", false)
+		printPromptFormat(format, activeProfile, envAlias, tier, isMultiEnv, "locked", false)
 		return
 	}
 	_ = conn.SetDeadline(time.Now().Add(20 * time.Millisecond))
@@ -1133,20 +1117,56 @@ func handlePrompt(profile string, args []string) {
 	_ = conn.Close()
 
 	if err != nil {
-		printPromptFormat(format, activeProfile, "locked", false)
+		printPromptFormat(format, activeProfile, envAlias, tier, isMultiEnv, "locked", false)
 		return
 	}
 
 	var resp daemon.IPCResponse
 	if err := json.Unmarshal(respBytes, &resp); err != nil || !resp.Success {
-		printPromptFormat(format, activeProfile, "locked", false)
+		printPromptFormat(format, activeProfile, envAlias, tier, isMultiEnv, "locked", false)
 		return
 	}
 
-	printPromptFormat(format, activeProfile, "unlocked", true)
+	printPromptFormat(format, activeProfile, envAlias, tier, isMultiEnv, "unlocked", true)
 }
 
-func printPromptFormat(format, profile, status string, unlocked bool) {
+func printPromptFormat(format, profile, envAlias string, tier config.EnvironmentTier, isMultiEnv bool, status string, unlocked bool) {
+	if isMultiEnv && envAlias != "" {
+		tierBadge := ""
+		if tier.IsProduction() {
+			tierBadge = " 🔴"
+		}
+		statusSuffix := ""
+		if !unlocked {
+			statusSuffix = " (" + status + ")"
+		}
+		label := fmt.Sprintf("%s (%s%s)%s", envAlias, profile, tierBadge, statusSuffix)
+
+		switch format {
+		case "starship":
+			color := "bold green"
+			if !unlocked {
+				color = "bold yellow"
+			}
+			if tier.IsProduction() {
+				color = "bold red"
+			}
+			fmt.Printf("[ sec: %s ](%s)", label, color)
+		case "p10k":
+			color := "green"
+			if !unlocked {
+				color = "yellow"
+			}
+			if tier.IsProduction() {
+				color = "red"
+			}
+			fmt.Printf("%%F{%s}sec: %s%%f", color, label)
+		default:
+			fmt.Printf("[sec: %s]\n", label)
+		}
+		return
+	}
+
 	badge := ""
 	switch status {
 	case "unlocked":

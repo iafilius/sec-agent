@@ -275,10 +275,23 @@ func initRegistry() {
 			Handler: handleProfile,
 		},
 		{
+			Name:        "use",
+			Category:    "Profiles & Scope",
+			Description: "Switch active workspace environment context in current shell (zero disk writes)",
+			Usage:       "sec use [<alias>] [--clear] [--export]",
+			Flags:       []string{"--clear", "-c", "--export"},
+			Handler:     handleUse,
+		},
+		{
 			Name:        "env",
 			Category:    "Profiles & Scope",
-			Description: "Output shell exports for secrets under prefix",
-			Usage:       "sec env [<prefix>]",
+			Description: "Introspect and list workspace environments or export secrets under prefix",
+			Usage:       "sec env [ls] [<prefix>] [--json]",
+			Flags:       []string{"--json"},
+			Subcommands: []SubcommandSpec{
+				{Name: "ls", Description: "List all workspace environments"},
+				{Name: "list", Description: "List all workspace environments"},
+			},
 			Handler:     handleEnv,
 		},
 		{

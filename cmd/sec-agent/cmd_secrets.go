@@ -335,6 +335,16 @@ func disableTerminalEcho(fd int) (restore func(), err error) {
 var disableTerminalEchoFn = disableTerminalEcho
 
 func handleSet(profile string, path, value string, args []string) {
+	confirm := confirmProdFlag
+	for _, a := range args {
+		if a == "--confirm-prod" {
+			confirm = true
+		}
+	}
+	if err := validateProdMutationSafety(profile, true, confirm); err != nil {
+		fail("PROD_MUTATION_CANCELLED", err, "")
+	}
+
 	comment := ""
 	metadata := make(map[string]string)
 	expiresStr := ""
@@ -673,6 +683,16 @@ func handleDiff(profile string, args []string) {
 }
 
 func handleRename(profile string, oldPath, newPath string, args []string) {
+	confirm := confirmProdFlag
+	for _, a := range args {
+		if a == "--confirm-prod" {
+			confirm = true
+		}
+	}
+	if err := validateProdMutationSafety(profile, true, confirm); err != nil {
+		fail("PROD_MUTATION_CANCELLED", err, "")
+	}
+
 	isPrefix := false
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--prefix" {
@@ -1012,6 +1032,16 @@ func handleList(profile string, args []string) {
 }
 
 func handleDelete(profile string, path string, args []string) {
+	confirm := confirmProdFlag
+	for _, a := range args {
+		if a == "--confirm-prod" {
+			confirm = true
+		}
+	}
+	if err := validateProdMutationSafety(profile, true, confirm); err != nil {
+		fail("PROD_MUTATION_CANCELLED", err, "")
+	}
+
 	isPrefix := false
 	permanent := false
 	for _, arg := range args {
@@ -1074,6 +1104,16 @@ func handleHistory(profile string, path string) {
 }
 
 func handleRollback(profile string, path string, args []string) {
+	confirm := confirmProdFlag
+	for _, a := range args {
+		if a == "--confirm-prod" {
+			confirm = true
+		}
+	}
+	if err := validateProdMutationSafety(profile, true, confirm); err != nil {
+		fail("PROD_MUTATION_CANCELLED", err, "")
+	}
+
 	targetVer := 0
 	for i := 0; i < len(args); i++ {
 		if (args[i] == "--version" || args[i] == "-v") && i+1 < len(args) {
@@ -1105,6 +1145,10 @@ func handleRollback(profile string, path string, args []string) {
 }
 
 func handleRestoreDeleted(profile string, path string) {
+	if err := validateProdMutationSafety(profile, true, confirmProdFlag); err != nil {
+		fail("PROD_MUTATION_CANCELLED", err, "")
+	}
+
 	resp, err := queryDaemon(profile, daemon.IPCRequest{
 		Action: "restore_deleted",
 		Path:   path,

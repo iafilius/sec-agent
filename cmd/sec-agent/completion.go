@@ -36,6 +36,9 @@ _sec() {
 
     _arguments -C \
         '--profile[Target secret profile]:profile:' \
+        '--env[Target environment alias]:env:' \
+        '-E[Target environment alias]:env:' \
+        '--confirm-prod[Confirm mutation against production profile]' \
         '--json[Output results in JSON format]' \
         '--verbose[Enable extended diagnostic messages on stderr]' \
         '-V[Enable extended diagnostic messages on stderr]' \
@@ -117,7 +120,7 @@ _sec_completions() {
 		}
 		bashBuf.WriteString(fmt.Sprintf("    local cmds=\"%s\"\n\n", strings.Join(topCmds, " ")))
 		bashBuf.WriteString(`    if [ $COMP_CWORD -eq 1 ]; then
-        COMPREPLY=( $(compgen -W "${cmds} --profile --json --verbose -V" -- ${cur}) )
+        COMPREPLY=( $(compgen -W "${cmds} --profile --env -E --confirm-prod --json --verbose -V" -- ${cur}) )
         return 0
     fi
 
@@ -188,6 +191,9 @@ complete -F _sec_completions sec sec-agent
 			}
 		}
 		fishBuf.WriteString("\ncomplete -c sec -l profile -d \"Target secret profile\"\n")
+		fishBuf.WriteString("complete -c sec -l env -d \"Target environment alias\"\n")
+		fishBuf.WriteString("complete -c sec -s E -d \"Target environment alias\"\n")
+		fishBuf.WriteString("complete -c sec -l confirm-prod -d \"Confirm mutation against production profile\"\n")
 		fishBuf.WriteString("complete -c sec -l json -d \"Output results in JSON format\"\n")
 		fishBuf.WriteString("complete -c sec -l verbose -d \"Enable extended diagnostic messages on stderr\"\n")
 		fishBuf.WriteString("complete -c sec -s V -d \"Enable extended diagnostic messages on stderr\"\n")

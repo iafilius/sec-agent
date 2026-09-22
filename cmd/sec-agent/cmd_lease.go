@@ -82,6 +82,16 @@ func handleLease(profile, secretPath string, args []string) {
 }
 
 func handleRotate(profile, secretPath string, args []string) {
+	confirm := confirmProdFlag
+	for _, a := range args {
+		if a == "--confirm-prod" {
+			confirm = true
+		}
+	}
+	if err := validateProdMutationSafety(profile, true, confirm); err != nil {
+		fail("PROD_MUTATION_CANCELLED", err, "")
+	}
+
 	resp, err := queryDaemon(profile, daemon.IPCRequest{
 		Action: "get",
 		Path:   secretPath,

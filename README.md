@@ -294,13 +294,64 @@ sec lock
 # Session locked. Memory cache cleared.
 ```
 
+### 10. Multi-Environment Workspace Contexts (`sec use` & `sec env ls`)
+Switch active environment context in memory without touching disk or affecting other terminals:
+```bash
+# List discovered workspace environments with active marker (*) and tier badges
+sec env ls
+
+# Switch active subshell context to an environment alias
+eval $(sec use staging)
+
+# Clear environment override back to workspace default
+eval $(sec use --clear)
+
+# One-off command override without altering shell context
+sec -E prod run -- npm test
+```
+
+### 11. Production Blast-Radius Mutation Guardrails (`--confirm-prod`)
+Mutating commands targeting `tier: "prod"` require interactive confirmation or `--confirm-prod`:
+```bash
+# In CI/CD or non-interactive automation:
+sec set app/db_password "val" --confirm-prod
+sec rm app/old_key --confirm-prod
+```
+
+### 12. Cross-Profile Template Streaming (`sec stream`)
+Evaluate configuration templates in-memory with local and cross-profile vault secrets:
+```bash
+sec stream --template "export LOCAL='{{db/password}}' GLOBAL_CA='{{@global-shared:pki/ca}}'" | sh
+```
+
 ---
 
 ## ⚙️ Workspace Configuration Files (`.secrc` / `.secenv` / `.sec.json`)
 
-To bind a codebase repository or directory tree to a dedicated `sec-agent` vault profile, place a `.secrc` (or `.secenv` / `.sec.json`) configuration file in your project root directory.
+To bind a codebase repository or directory tree to `sec-agent` vault profiles, place a `.secrc` (or `.secenv` / `.sec.json`) configuration file in your project root directory.
 
-### 📄 File Schema & Format
+### 📄 Schema v2: Multi-Environment Workspace Configuration
+```json
+{
+  "environments": {
+    "sandbox": {
+      "profile": "router-ax3600-sandbox",
+      "tier": "dev"
+    },
+    "staging": {
+      "profile": "router-ax3600-staging",
+      "tier": "staging"
+    },
+    "prod": {
+      "profile": "router-ax3600-prod",
+      "tier": "prod"
+    }
+  },
+  "default": "sandbox"
+}
+```
+
+### 📄 Schema v1: Legacy Single-Profile Binding (100% Backward Compatible)
 ```json
 {
   "profile": "router-ax3600-prod",
@@ -310,7 +361,9 @@ To bind a codebase repository or directory tree to a dedicated `sec-agent` vault
 
 | Configuration Field | Type | Description | Default |
 | :--- | :--- | :--- | :--- |
-| **`profile`** | `string` | The target `sec-agent` vault profile for this workspace (e.g. `router-ax3600-prod`, `dev`, `staging`). | `"default"` |
+| **`environments`** | `object` | Map of named environment aliases to their target vault profile and safety tier. | `{}` |
+| **`default`** | `string` | The default environment alias when no explicit `-E` flag or `SEC_ENV` is set. | First entry |
+| **`profile`** | `string` | Target vault profile for single-profile workspaces. | `"default"` |
 | **`prefix`** | `string` | Optional path prefix filter when injecting environment variables via `sec run`. | `""` |
 
 ---
@@ -328,11 +381,13 @@ To bind a codebase repository or directory tree to a dedicated `sec-agent` vault
    `sec-agent` automatically traverses upward from the current working directory to parent directories (up to workspace root) to discover `.secrc`.
 
 3. **Subprocess Scoping (`sec run -- <cmd>`)**:
-   `sec run` automatically reads `.secrc` to inject vault credentials from the workspace target profile into child processes without requiring explicit `--profile` CLI flags.
+   `sec run` automatically reads `.secrc` to inject vault credentials from the resolved workspace environment profile into child processes without requiring explicit `--profile` CLI flags.
 
+4. **Process-Isolated Context Switching (`sec use <alias>`)**:
+   Running `eval $(sec use <alias>)` exports `SEC_ENV="<alias>"` and `SEC_PROFILE="<profile>"` into the calling shell, isolating context changes to the current terminal window. Zero shared disk state is written.
 
-
----
+5. **Production Safety Interceptor**:
+   Mutating commands (`set`, `rm`, `mv`, `rollback`, `restore-deleted`, `rotate`) against any environment or profile tagged `tier: "prod"` require typing `yes` in interactive terminals or passing `--confirm-prod` in automated scripts, aborting with exit code 2 (`PROD_MUTATION_CONFIRMATION_REQUIRED`) otherwise.
 
 ## 🧹 Local Dotenv Migration & Git Security Protocol
 

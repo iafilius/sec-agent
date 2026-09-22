@@ -442,7 +442,7 @@ func TestMainIntegration(t *testing.T) {
 	// Test stream redaction opt-out (--no-redact)
 	noRedactRunCmd := exec.Command("./sec_test_bin", "run", "--confirm-prod", "--no-redact", "--profile", profile, "--", "sh", "-c", "echo secret-value")
 	noRedactRunCmd.Env = testEnv
-	noRedactOut, err := noRedactRunCmd.Output()
+	noRedactOut, err := noRedactRunCmd.CombinedOutput()
 	if err != nil || strings.Contains(string(noRedactOut), "[REDACTED_BY_SEC]") || !strings.Contains(string(noRedactOut), "secret-value") {
 		t.Fatalf("sec run --no-redact failed opt-out: %v, out: %s", err, string(noRedactOut))
 	}

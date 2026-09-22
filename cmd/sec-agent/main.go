@@ -32,11 +32,14 @@ import (
 var embeddedSkillBytes []byte
 
 var (
-	jsonErrors bool
-	Verbose    bool
+	jsonErrors      bool
+	Verbose         bool
+	activeEnvAlias  string
+	activeEnvTier   config.EnvironmentTier = config.TierUnset
+	confirmProdFlag bool
 )
 var (
-	Version   = "v2.13.4"
+	Version   = "v2.14.0"
 	BuildDate = "unknown"
 )
 
@@ -120,7 +123,22 @@ type SSHTarget struct {
 	PasswordKey   string `json:"password_key,omitempty"`
 }
 
+// WorkspaceEnvironment represents an environment configuration within a v2 .secrc workspace file.
+type WorkspaceEnvironment struct {
+	Profile     store.ProfileName `json:"profile"`
+	Tier        string            `json:"tier,omitempty"` // "dev", "dta", "staging", "prod"
+	Description string            `json:"description,omitempty"`
+	TTL         string            `json:"ttl,omitempty"`
+	Grace       string            `json:"grace,omitempty"`
+}
+
+// ParsedTier returns the normalized config.EnvironmentTier.
+func (e WorkspaceEnvironment) ParsedTier() config.EnvironmentTier {
+	return config.ParseEnvironmentTier(e.Tier)
+}
+
 type WorkspaceConfig struct {
+	// V1 legacy fields
 	Profile     store.ProfileName    `json:"profile,omitempty"`
 	Prefix      string               `json:"prefix,omitempty"`
 	AutoOpen    bool                 `json:"auto_open,omitempty"`
@@ -129,6 +147,224 @@ type WorkspaceConfig struct {
 	SSHTargets  map[string]SSHTarget `json:"ssh_targets,omitempty"`
 	TTL         string               `json:"ttl,omitempty"`
 	Grace       string               `json:"grace,omitempty"`
+
+	// V2 multi-environment fields
+	Version      int                             `json:"version,omitempty"`
+	Default      string                          `json:"default,omitempty"`
+	Environments map[string]WorkspaceEnvironment `json:"environments,omitempty"`
+}
+
+func normalizeWorkspaceConfig(cfg *WorkspaceConfig) {
+	if cfg == nil {
+		return
+	}
+	if cfg.Environments == nil {
+		cfg.Environments = make(map[string]WorkspaceEnvironment)
+	}
+
+	// Backward compatibility: If v1 Profile is provided but Environments is empty, synthesize a default environment
+	if cfg.Profile != "" && len(cfg.Environments) == 0 {
+		envName := "dev"
+		cfg.Environments[envName] = WorkspaceEnvironment{
+			Profile: cfg.Profile,
+			Tier:    string(config.TierDev),
+			TTL:     cfg.TTL,
+			Grace:   cfg.Grace,
+		}
+		if cfg.Default == "" {
+			cfg.Default = envName
+		}
+	}
+
+	// Forward compatibility: If Environments are defined but legacy Profile is empty, populate Profile from default
+	if cfg.Profile == "" && len(cfg.Environments) > 0 {
+		defName := cfg.Default
+		if defName == "" {
+			if _, ok := cfg.Environments["dev"]; ok {
+				defName = "dev"
+			} else {
+				var keys []string
+				for k := range cfg.Environments {
+					keys = append(keys, k)
+				}
+				sort.Strings(keys)
+				if len(keys) > 0 {
+					defName = keys[0]
+				}
+			}
+			cfg.Default = defName
+		}
+		if env, ok := cfg.Environments[defName]; ok {
+			cfg.Profile = env.Profile
+		}
+	}
+}
+
+// ResolvedContext holds the resolution details for an environment and target profile.
+type ResolvedContext struct {
+	Profile     store.ProfileName
+	EnvAlias    string
+	Tier        config.EnvironmentTier
+	Description string
+	Source      string
+}
+
+// ResolveWorkspaceEnvironment resolves the target vault profile across CLI flags,
+// environment variables, workspace configurations, and global fallbacks in strict descending priority order:
+// 1. Explicit CLI profile flag (-P <profile> or --profile <profile>)
+// 2. Explicit CLI environment alias flag (-E <alias> or --env <alias>)
+// 3. Shell environment variable SEC_ENV (resolved against .secrc environments) or SEC_PROFILE
+// 4. Workspace .secrc default environment alias (environments[default].profile) or legacy profile
+// 5. Global fallback profile "default"
+func ResolveWorkspaceEnvironment(cliProfile string, cliEnv string, wsCfg *WorkspaceConfig) (ResolvedContext, error) {
+	if wsCfg != nil {
+		normalizeWorkspaceConfig(wsCfg)
+	}
+
+	// Rule 1: Explicit CLI profile flag
+	if cliProfile != "" {
+		pn, err := store.NewProfileName(cliProfile)
+		if err != nil {
+			return ResolvedContext{}, fmt.Errorf("invalid profile name %q: %w", cliProfile, err)
+		}
+		ctx := ResolvedContext{
+			Profile: pn,
+			Source:  "cli_profile",
+			Tier:    config.TierUnset,
+		}
+		if wsCfg != nil && wsCfg.Environments != nil {
+			for alias, env := range wsCfg.Environments {
+				if env.Profile == pn || alias == cliProfile {
+					ctx.EnvAlias = alias
+					ctx.Tier = env.ParsedTier()
+					ctx.Description = env.Description
+					break
+				}
+			}
+		}
+		return ctx, nil
+	}
+
+	// Rule 2: Explicit CLI environment alias flag (-E / --env)
+	if cliEnv != "" {
+		if wsCfg == nil || len(wsCfg.Environments) == 0 {
+			return ResolvedContext{}, fmt.Errorf("environment alias %q specified via -E/--env, but no environments are configured in .secrc", cliEnv)
+		}
+		env, ok := wsCfg.Environments[cliEnv]
+		if !ok {
+			var available []string
+			for k := range wsCfg.Environments {
+				available = append(available, k)
+			}
+			sort.Strings(available)
+			return ResolvedContext{}, fmt.Errorf("environment alias %q not found in .secrc (available: %s)", cliEnv, strings.Join(available, ", "))
+		}
+		if env.Profile == "" {
+			return ResolvedContext{}, fmt.Errorf("environment alias %q has no profile configured in .secrc", cliEnv)
+		}
+		return ResolvedContext{
+			Profile:     env.Profile,
+			EnvAlias:    cliEnv,
+			Tier:        env.ParsedTier(),
+			Description: env.Description,
+			Source:      "cli_env",
+		}, nil
+	}
+
+	// Rule 3: Shell environment variable SEC_ENV (resolved against .secrc) or SEC_PROFILE
+	secEnv := strings.TrimSpace(os.Getenv("SEC_ENV"))
+	if secEnv != "" {
+		if wsCfg != nil && wsCfg.Environments != nil {
+			if env, ok := wsCfg.Environments[secEnv]; ok && env.Profile != "" {
+				return ResolvedContext{
+					Profile:     env.Profile,
+					EnvAlias:    secEnv,
+					Tier:        env.ParsedTier(),
+					Description: env.Description,
+					Source:      "sec_env",
+				}, nil
+			}
+		}
+		// If SEC_ENV is set but not in .secrc environments, check SEC_PROFILE fallback
+		secProfile := strings.TrimSpace(os.Getenv("SEC_PROFILE"))
+		if secProfile != "" {
+			pn, err := store.NewProfileName(secProfile)
+			if err == nil {
+				return ResolvedContext{
+					Profile:  pn,
+					EnvAlias: secEnv,
+					Tier:     config.TierUnset,
+					Source:   "sec_profile",
+				}, nil
+			}
+		}
+		// If neither matched .secrc, allow SEC_ENV as direct profile if valid
+		pn, err := store.NewProfileName(secEnv)
+		if err == nil {
+			return ResolvedContext{
+				Profile:  pn,
+				EnvAlias: secEnv,
+				Tier:     config.TierUnset,
+				Source:   "sec_env_direct",
+			}, nil
+		}
+	}
+
+	secProfile := strings.TrimSpace(os.Getenv("SEC_PROFILE"))
+	if secProfile != "" {
+		pn, err := store.NewProfileName(secProfile)
+		if err != nil {
+			return ResolvedContext{}, fmt.Errorf("invalid SEC_PROFILE %q: %w", secProfile, err)
+		}
+		ctx := ResolvedContext{
+			Profile: pn,
+			Source:  "sec_profile",
+			Tier:    config.TierUnset,
+		}
+		if wsCfg != nil && wsCfg.Environments != nil {
+			for alias, env := range wsCfg.Environments {
+				if env.Profile == pn {
+					ctx.EnvAlias = alias
+					ctx.Tier = env.ParsedTier()
+					ctx.Description = env.Description
+					break
+				}
+			}
+		}
+		return ctx, nil
+	}
+
+	// Rule 4: Workspace .secrc default environment alias or legacy profile
+	if wsCfg != nil {
+		if wsCfg.Default != "" && wsCfg.Environments != nil {
+			if env, ok := wsCfg.Environments[wsCfg.Default]; ok && env.Profile != "" {
+				return ResolvedContext{
+					Profile:     env.Profile,
+					EnvAlias:    wsCfg.Default,
+					Tier:        env.ParsedTier(),
+					Description: env.Description,
+					Source:      "secrc_default",
+				}, nil
+			}
+		}
+		if wsCfg.Profile != "" {
+			return ResolvedContext{
+				Profile:     wsCfg.Profile,
+				EnvAlias:    "dev",
+				Tier:        config.TierDev,
+				Source:      "secrc_legacy",
+			}, nil
+		}
+	}
+
+	// Rule 5: Global fallback "default"
+	defaultPN, _ := store.NewProfileName("default")
+	return ResolvedContext{
+		Profile:  defaultPN,
+		EnvAlias: "default",
+		Tier:     config.TierDev,
+		Source:   "global_default",
+	}, nil
 }
 
 func findWorkspaceConfigFile() string {
@@ -171,6 +407,7 @@ func loadWorkspaceConfigVerbose() (*WorkspaceConfig, string, string) {
 			if err == nil {
 				var cfg WorkspaceConfig
 				if err := json.Unmarshal(data, &cfg); err == nil {
+					normalizeWorkspaceConfig(&cfg)
 					return &cfg, filepath.Base(path), dir
 				}
 			}
@@ -211,14 +448,6 @@ func printInteractiveBlocker(command string, reason string) {
 
 func extractGlobalFlags() (string, []string) {
 	wsCfg := loadWorkspaceConfig()
-	profile := os.Getenv("SEC_PROFILE")
-	if profile == "" {
-		if wsCfg != nil && wsCfg.Profile != "" {
-			profile = wsCfg.Profile.String()
-		} else {
-			profile = "default"
-		}
-	}
 	if wsCfg != nil && wsCfg.AutoOpen {
 		_ = os.Setenv("SEC_AUTO_OPEN", "1")
 	}
@@ -227,12 +456,30 @@ func extractGlobalFlags() (string, []string) {
 	var cleanArgs []string
 	cleanArgs = append(cleanArgs, args[0])
 
+	var cliProfile string
+	var cliEnv string
+
 	for i := 1; i < len(args); i++ {
+		if args[i] == "--" {
+			cleanArgs = append(cleanArgs, args[i:]...)
+			break
+		}
 		if args[i] == "--profile" || args[i] == "-P" {
 			if i+1 < len(args) {
-				profile = args[i+1]
+				cliProfile = args[i+1]
 				i++ // skip next arg
 			}
+			continue
+		}
+		if args[i] == "--env" || args[i] == "-E" {
+			if i+1 < len(args) {
+				cliEnv = args[i+1]
+				i++ // skip next arg
+			}
+			continue
+		}
+		if args[i] == "--confirm-prod" {
+			confirmProdFlag = true
 			continue
 		}
 		if args[i] == "--auto-open" || args[i] == "--gui" {
@@ -251,7 +498,19 @@ func extractGlobalFlags() (string, []string) {
 		}
 		cleanArgs = append(cleanArgs, args[i])
 	}
-	return profile, cleanArgs
+
+	if os.Getenv("SEC_CONFIRM_PROD") == "1" {
+		confirmProdFlag = true
+	}
+
+	resolved, err := ResolveWorkspaceEnvironment(cliProfile, cliEnv, wsCfg)
+	if err != nil {
+		fail("ENVIRONMENT_RESOLUTION_ERROR", err, "Verify environment configuration in .secrc or check profile name.")
+	}
+	activeEnvAlias = resolved.EnvAlias
+	activeEnvTier = resolved.Tier
+
+	return resolved.Profile.String(), cleanArgs
 }
 
 func queryDaemon(profile string, req daemon.IPCRequest) (*daemon.IPCResponse, error) {

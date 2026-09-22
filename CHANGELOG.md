@@ -5,6 +5,32 @@ All notable changes to `sec-agent` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v2.14.0] - 2026-09-22
+
+### Added & Enhanced
+- **Multi-Environment Workspace Contexts (`.secrc` Schema v2)**:
+  - Extended workspace configuration (`.secrc` / `.secenv` / `.sec.json`) to support schema v2 with `environments` map and `default` selection, preserving 100% backward compatibility for legacy v1 single-profile configurations.
+  - Added strict 5-tier environment resolution precedence: CLI flag overrides (`-P` / `-E`), environment variables (`SEC_ENV` / `SEC_PROFILE`), workspace `.secrc` defaults, and global `default` profile.
+- **Process-Isolated Context Switching (`sec use` & `sec env`)**:
+  - Implemented `sec use <alias>` and `eval $(sec use <alias>)` to switch subshell environment contexts in memory via POSIX exports (`SEC_ENV`, `SEC_PROFILE`) with zero shared disk files.
+  - Implemented `sec use --clear` to reset shell context to default workspace bindings.
+  - Implemented `sec env ls` / `sec env` displaying discovered workspace environments with active indicators (`*`), profile bindings, and ANSI color-coded tier badges (`[dev]`, `[staging]`, `[prod 🔴]`), with full `--json` support.
+  - Added legacy secret export fallback for `sec env <prefix>` when executed in non-multi-environment or single-profile vaults.
+  - Added global `-E <alias>` and `--env <alias>` command-level flag overrides.
+- **Production Blast-Radius Mutation Guardrails**:
+  - Intercepted all mutating subcommands (`set`, `rm`, `mv`, `rollback`, `restore-deleted`, `rotate`) targeting `tier: "prod"`.
+  - Enforced interactive TTY prompt confirmation requiring typing `yes` before mutating production vaults.
+  - Enforced non-interactive abort with exit code 2 and structured error code `PROD_MUTATION_CONFIRMATION_REQUIRED` for scripts, CI/CD runners, and AI agent tool calls unless `--confirm-prod` or `SEC_CONFIRM_PROD=1` is provided.
+  - Preserved frictionless pass-through for all read-only operations (`get`, `ls`, `history`, `export`, `run`, `stream`).
+- **Cross-Profile Template Interpolation (`sec stream`)**:
+  - Enhanced template placeholder parsing in `sec stream` to support cross-profile syntax `{{@<alias_or_profile>:<key>}}` alongside standard `{{<key>}}` placeholders.
+  - Added actionable diagnostic error reporting with remediation steps when a target cross-profile daemon is locked or stopped.
+- **Shell Ergonomics & Autocompletions**:
+  - Updated `sec prompt` with multi-environment tier formatting (e.g. `[sec: sandbox (xuntos-prod 🔴)]`).
+  - Synchronized Zsh, Bash, and Fish autocompletions for `use`, `env`, `-E`, `--env`, and `--confirm-prod`, verified via automated bidirectional flag parity testing.
+
+---
+
 ## [v2.13.4] - 2026-09-22
 
 ### Fixed & Enhanced

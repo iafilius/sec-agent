@@ -153,6 +153,9 @@ func TestShellCompletionOutput(t *testing.T) {
 		if !strings.Contains(out, "profile") || !strings.Contains(out, "skill") {
 			t.Errorf("expected shell completion for %s to contain subcommands 'profile', 'skill', got:\n%s", shell, out)
 		}
+		if !strings.Contains(out, "use") || !strings.Contains(out, "env") {
+			t.Errorf("expected shell completion for %s to contain subcommands 'use', 'env', got:\n%s", shell, out)
+		}
 		for _, sub := range []string{"install", "status", "update", "list"} {
 			if !strings.Contains(out, sub) {
 				t.Errorf("expected shell completion for %s to contain skill subcommand %q, got:\n%s", shell, sub, out)
@@ -161,13 +164,25 @@ func TestShellCompletionOutput(t *testing.T) {
 		if !strings.Contains(out, "verbose") {
 			t.Errorf("expected shell completion for %s to contain 'verbose', got:\n%s", shell, out)
 		}
+		if !strings.Contains(out, "confirm-prod") {
+			t.Errorf("expected shell completion for %s to contain 'confirm-prod', got:\n%s", shell, out)
+		}
+		if !strings.Contains(out, "env") {
+			t.Errorf("expected shell completion for %s to contain 'env', got:\n%s", shell, out)
+		}
 		if shell == "fish" {
 			if !strings.Contains(out, "-l repair") {
 				t.Errorf("expected shell completion for fish to contain '-l repair', got:\n%s", out)
 			}
+			if !strings.Contains(out, "-s E") {
+				t.Errorf("expected shell completion for fish to contain '-s E', got:\n%s", out)
+			}
 		} else {
 			if !strings.Contains(out, "--repair") {
 				t.Errorf("expected shell completion for %s to contain '--repair', got:\n%s", shell, out)
+			}
+			if !strings.Contains(out, "-E") {
+				t.Errorf("expected shell completion for %s to contain '-E', got:\n%s", shell, out)
 			}
 		}
 	}
