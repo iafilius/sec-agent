@@ -5,6 +5,26 @@ All notable changes to `sec-agent` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v2.13.4] - 2026-09-22
+
+### Fixed & Enhanced
+- **Daemon POSIX Session Detachment & SIGHUP Immunity**:
+  - Configured `ensureDaemonRunning` to launch background daemons with `SysProcAttr: &syscall.SysProcAttr{Setsid: true}` and decouple standard streams (`Stdin`, `Stdout`, `Stderr`) to `/dev/null`.
+  - Added `signal.Ignore(syscall.SIGHUP)` in `runDaemon` to guarantee background daemon persistence when spawned from short-lived subshells, subagents, or IDE terminal runners.
+- **Strictly Non-Mutating Read-Only Commands & Opt-In Skill Sync**:
+  - Early-dispatched informational and read-only commands (`version`, `--version`, `-v`, `help`, `--help`, `-h`, `completion`) prior to skill synchronization hooks, ensuring zero disk mutations during inspection.
+  - Refactored `syncInstalledSkillsIfOutdated()` into a non-intrusive advisory notification on `stderr`, directing operators and AI agents to run `sec-agent skill update` instead of silently overwriting workspace files.
+- **Global `--verbose` / `-V` CLI Flag Handling**:
+  - Intercepted global `--verbose` and `-V` flags at root CLI entry point, supporting standalone execution (`sec-agent --verbose`) and subcommand modifier positions (`sec-agent --verbose status` / `sec-agent status --verbose`).
+  - Standalone `--verbose` displays a comprehensive categorized command overview alongside runtime environment introspection (profile, config paths, daemon socket status).
+  - Emits detailed socket probe, IPC action, and connection diagnostics to `stderr` when verbose mode is active.
+- **Skill Scope Veracity & Manifest Auto-Healing**:
+  - Implemented `determineSkillScope()` to enforce scope truth from physical file paths, auto-healing mislabeled `(global)` entries for workspace-relative skill installations in `skills_manifest.json`.
+- **AI Agent Direct Biometric Execution & Persistence Guidance**:
+  - Updated AI agent integration instructions (`SKILL.md`) and `.github/copilot-instructions.md` template to direct AI agents to execute `sec open` directly at Turn 1, documenting native macOS system UI rendering and 8-hour daemon persistence across independent tool turns.
+
+---
+
 ## [v2.13.3] - 2026-09-22
 
 ### Added & Enhanced

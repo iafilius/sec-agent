@@ -31,9 +31,12 @@ import (
 //go:embed SKILL.md
 var embeddedSkillBytes []byte
 
-var jsonErrors bool
 var (
-	Version   = "v2.13.3"
+	jsonErrors bool
+	Verbose    bool
+)
+var (
+	Version   = "v2.13.4"
 	BuildDate = "unknown"
 )
 
@@ -68,6 +71,9 @@ func mapDaemonError(errStr string) (code string, remediation string) {
 }
 
 func fail(code string, err error, remediation string) {
+	if Verbose {
+		fmt.Fprintf(os.Stderr, "[VERBOSE] Failure details: code=%s error=%v remediation=%s\n", code, err, remediation)
+	}
 	if jsonErrors {
 		resp := JSONErrorResponse{
 			Success: false,
@@ -97,6 +103,10 @@ func daemonNotRunningError(profile string) (error, string) {
 }
 
 func failDaemonNotRunning(profile string) {
+	if Verbose {
+		sock, _ := config.GetSocketPath(profile)
+		fmt.Fprintf(os.Stderr, "[VERBOSE] Daemon socket unreachable at: %s\n", sock)
+	}
 	err, rem := daemonNotRunningError(profile)
 	fail("DAEMON_NOT_RUNNING", err, rem)
 }
@@ -235,6 +245,10 @@ func extractGlobalFlags() (string, []string) {
 				continue
 			}
 		}
+		if args[i] == "--verbose" || args[i] == "-V" {
+			Verbose = true
+			continue
+		}
 		cleanArgs = append(cleanArgs, args[i])
 	}
 	return profile, cleanArgs
@@ -297,6 +311,7 @@ func handleOpenGUI(profile string) bool {
 }
 
 func queryDaemonRaw(profile string, req daemon.IPCRequest) (*daemon.IPCResponse, error) {
+	start := time.Now()
 	if req.Action != "open" && req.Action != "ping" {
 		if req.Token == "" {
 			req.Token = os.Getenv("SEC_SESSION_TOKEN")
@@ -311,6 +326,9 @@ func queryDaemonRaw(profile string, req daemon.IPCRequest) (*daemon.IPCResponse,
 
 	socketPath, err := config.GetSocketPath(profile)
 	if err != nil {
+		if Verbose {
+			fmt.Fprintf(os.Stderr, "[VERBOSE] Failed to resolve socket path for profile %q: %v\n", profile, err)
+		}
 		return nil, err
 	}
 
@@ -325,18 +343,49 @@ func queryDaemonRaw(profile string, req daemon.IPCRequest) (*daemon.IPCResponse,
 		// #nosec G704
 		conn, err = net.Dial("unix", socketPath)
 		if err != nil {
+			if Verbose {
+				fmt.Fprintf(os.Stderr, "[VERBOSE] Daemon IPC dial failed [profile=%s socket=%s error=%v]\n", profile, socketPath, err)
+			}
 			return nil, err // Daemon likely not running
 		}
 	}
 	defer conn.Close()
 
 	if err := json.NewEncoder(conn).Encode(req); err != nil {
+		if Verbose {
+			fmt.Fprintf(os.Stderr, "[VERBOSE] Daemon IPC encode error: %v\n", err)
+		}
 		return nil, err
 	}
 
 	var resp daemon.IPCResponse
 	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		if Verbose {
+			fmt.Fprintf(os.Stderr, "[VERBOSE] Daemon IPC decode error: %v\n", err)
+		}
 		return nil, err
+	}
+
+	if Verbose {
+		latency := time.Since(start)
+		pidPath, _ := config.GetPIDFilePath(profile)
+		activePID := 0
+		if pidPath != "" {
+			// #nosec G304 G703
+			if data, err := os.ReadFile(pidPath); err == nil {
+				var info daemon.PIDLockInfo
+				if json.Unmarshal(data, &info) == nil {
+					activePID = info.PID
+				}
+			}
+		}
+		if !resp.Success {
+			fmt.Fprintf(os.Stderr, "[VERBOSE] IPC query rejected [profile=%s action=%s socket=%s pid=%d latency=%v error=%q code=%s]\n",
+				profile, req.Action, socketPath, activePID, latency, resp.Error, resp.ErrorCode)
+		} else {
+			fmt.Fprintf(os.Stderr, "[VERBOSE] IPC query completed [profile=%s action=%s socket=%s pid=%d latency=%v]\n",
+				profile, req.Action, socketPath, activePID, latency)
+		}
 	}
 
 	return &resp, nil
@@ -537,8 +586,19 @@ func ensureDaemonRunning(profile string) error {
 	// #nosec G204 G702
 	cmd := exec.Command(bin, "--profile", profile, "daemon")
 	cmd.Env = append(os.Environ(), fmt.Sprintf("SEC_PROFILE=%s", profile))
-	cmd.Stdout = nil
-	cmd.Stderr = nil
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setsid: true,
+	}
+
+	// #nosec G302 G304
+	devNull, devNullErr := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if devNullErr == nil {
+		defer devNull.Close()
+		cmd.Stdin = devNull
+		cmd.Stdout = devNull
+		cmd.Stderr = devNull
+	}
+
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("failed to start daemon process: %w", err)
 	}
@@ -955,6 +1015,9 @@ func handleVersion(profile string) {
 }
 
 func runDaemon(profile string) {
+	// Explicitly ignore SIGHUP so subshell exit or terminal closure never terminates the daemon
+	signal.Ignore(syscall.SIGHUP)
+
 	d, err := daemon.NewDaemon(profile, 8*time.Hour, Version)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating daemon: %v\n", err)
@@ -1070,7 +1133,16 @@ func main() {
 				printUsageJSON()
 				os.Exit(0)
 			}
+			if Verbose {
+				printVerboseUsage(profile)
+				os.Exit(0)
+			}
 			printUsage()
+			os.Exit(0)
+		}
+
+		if cmd == "version" || cmd == "--version" || cmd == "-v" {
+			handleVersion(profile)
 			os.Exit(0)
 		}
 
@@ -1092,13 +1164,24 @@ func main() {
 	}
 
 	if len(os.Args) < 2 {
+		if Verbose {
+			printVerboseUsage(profile)
+			os.Exit(0)
+		}
 		printUsage()
 		os.Exit(1)
 	}
 
-	syncInstalledSkillsIfOutdated()
-
 	cmdName := os.Args[1]
+	isReadOnlyCmd := cmdName == "version" || cmdName == "--version" || cmdName == "-v" ||
+		cmdName == "help" || cmdName == "--help" || cmdName == "-h" ||
+		cmdName == "completion" || cmdName == "shell-completion" ||
+		cmdName == "feedback"
+
+	if !isReadOnlyCmd {
+		syncInstalledSkillsIfOutdated()
+	}
+
 	spec, ok := findCommandSpec(cmdName)
 	if !ok || spec.Handler == nil {
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", cmdName)

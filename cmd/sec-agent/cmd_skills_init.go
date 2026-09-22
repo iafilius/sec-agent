@@ -179,7 +179,7 @@ This workspace integrates with ` + "`sec-agent`" + ` for zero-plaintext secret m
 
 ## Core Rules for AI Assistants
 1. **Zero Plaintext Exposure**: Never print, log, or commit secret values to files, history, or chat output.
-2. **Conditional Pre-flight**: If ` + "`.secrc`" + ` exists in this repository or the task requires credentials, run ` + "`sec status --quick`" + ` (<5ms) to verify daemon session state. If locked and secrets are required, execute ` + "`sec open`" + ` or the target command directly in your tool terminal. macOS natively displays the system Touch ID biometric window on the operator's physical display for fingerprint confirmation with zero credentials exposed in chat channels.
+2. **Conditional Pre-flight & Session Longevity**: If ` + "`.secrc`" + ` exists in this repository or the task requires credentials, run ` + "`sec status --quick`" + ` (<5ms) to verify daemon session state. If locked and secrets are required, execute ` + "`sec open`" + ` directly in your tool terminal runner at Turn 1. macOS natively displays the system Touch ID biometric prompt on the operator's physical display outside chat channels. Do NOT hesitate to run ` + "`sec open`" + ` or conclude you cannot do Touch ID; once unlocked, the background daemon session persists independently across separate tool calls and subprocesses for the entire session TTL (default 8 hours). Do NOT chain commands with ` + "`eval $(sec open) && ...`" + ` just to preserve state.
 3. **Long-Running & Unattended Task Longevity**: Before launching long-running or autonomous jobs (e.g. ` + "`/goal`" + `, batch builds, migrations), verify session TTL via ` + "`sec status`" + `. Proactively run ` + "`sec extend --ttl <duration>`" + ` (e.g. ` + "`24h`" + `) without Touch ID or request extended unlock at Turn 1 to prevent unattended mid-job timeouts.
 4. **Isolated Process Execution**: Run pipelines and scripts using ` + "`sec run -- <cmd>`" + ` to inject secrets directly into memory without touching disk or shell history.
 
@@ -188,7 +188,7 @@ This workspace integrates with ` + "`sec-agent`" + ` for zero-plaintext secret m
 | :--- | :--- |
 | ` + "`sec status --quick`" + ` | Ultra-fast check (<5ms) of daemon session state |
 | ` + "`sec run -- <cmd>`" + ` | Execute command with secrets injected into process memory |
-| ` + "`sec open`" + ` | Unlock vault session via macOS native Touch ID popup (single auth covers full session) |
+| ` + "`sec open`" + ` | Unlock vault session via macOS native Touch ID popup (persists across tool calls for 8h TTL) |
 | ` + "`sec extend [--ttl <dur>]`" + ` | Extend active session lifetime without Touch ID |
 | ` + "`sec get <key>`" + ` | Retrieve secret - always prints the real value to stdout, in any context. Prefer ` + "`sec run`" + ` for scripts/agents; reserve ` + "`get`" + ` for deliberate human/` + "`--raw`" + ` use |
 | ` + "`sec set <key>`" + ` | Store secret via secure hidden terminal prompt |
@@ -223,6 +223,33 @@ func writeSkillToFile(target, targetPath string) error {
 	return os.WriteFile(targetPath, content, 0600)
 }
 
+func determineSkillScope(target, pathStr string) string {
+	if target == "copilot" || target == "windsurf" {
+		return "workspace"
+	}
+	clean := filepath.Clean(pathStr)
+	homeDir, _ := os.UserHomeDir()
+	if homeDir != "" {
+		homeClean := filepath.Clean(homeDir)
+		if strings.HasPrefix(clean, filepath.Join(homeClean, ".gemini", "config")) ||
+			strings.HasPrefix(clean, filepath.Join(homeClean, ".cursor", "rules")) ||
+			strings.HasPrefix(clean, filepath.Join(homeClean, ".claude", "skills")) {
+			return "global"
+		}
+	}
+	// Check if path contains repository/workspace directories
+	parts := strings.Split(clean, string(filepath.Separator))
+	for _, part := range parts {
+		if part == ".github" || part == ".agents" || part == ".cursor" || part == ".claude" {
+			return "workspace"
+		}
+	}
+	if strings.HasSuffix(clean, ".windsurfrules") {
+		return "workspace"
+	}
+	return "workspace"
+}
+
 func handleSkillInstallTarget(target, scope string) bool {
 	if target == "copilot" || target == "windsurf" {
 		scope = "workspace"
@@ -232,6 +259,7 @@ func handleSkillInstallTarget(target, scope string) bool {
 		fmt.Fprintf(os.Stderr, "Skill error: %v\n", err)
 		return false
 	}
+	scope = determineSkillScope(target, targetPath)
 	if err := writeSkillToFile(target, targetPath); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to write skill file to %s: %v\n", targetPath, err)
 		return false
@@ -264,7 +292,32 @@ func handleSkillInstallTarget(target, scope string) bool {
 	return true
 }
 
+func isPathInDir(path, dir string) bool {
+	if path == "" || dir == "" {
+		return false
+	}
+	if realPath, err := filepath.EvalSymlinks(path); err == nil {
+		path = realPath
+	}
+	if realDir, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = realDir
+	}
+	cleanPath := filepath.Clean(path)
+	cleanDir := filepath.Clean(dir)
+	if cleanPath == cleanDir {
+		return true
+	}
+	rel, err := filepath.Rel(cleanDir, cleanPath)
+	if err != nil {
+		return false
+	}
+	return !strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel)
+}
+
 func syncInstalledSkillsIfOutdated() {
+	if os.Getenv("SEC_TEST_MODE") == "1" && os.Getenv("SEC_TEST_SKILL_SYNC") != "1" {
+		return
+	}
 	if !config.IsConfigDirInitialized() {
 		return
 	}
@@ -275,7 +328,9 @@ func syncInstalledSkillsIfOutdated() {
 	if manifest.Version == Version {
 		return
 	}
-	var refreshedPaths []string
+
+	cwd, _ := os.Getwd()
+	hasOutdated := false
 	manifestModified := false
 
 	for i, entry := range manifest.Skills {
@@ -293,7 +348,7 @@ func syncInstalledSkillsIfOutdated() {
 		}
 
 		if isSkillContentIdentical(entry.Target, targetPath) {
-			// Content is already up to date; align version tag without noisy false upgrade alerts
+			// Content is already up to date; align version tag without noisy false alerts or disk writes
 			if manifest.Skills[i].Version != Version || manifest.Skills[i].Path != targetPath {
 				manifest.Skills[i].Version = Version
 				manifest.Skills[i].Path = targetPath
@@ -302,24 +357,19 @@ func syncInstalledSkillsIfOutdated() {
 			continue
 		}
 
-		if writeErr := writeSkillToFile(entry.Target, targetPath); writeErr == nil {
-			manifest.Skills[i].Version = Version
-			manifest.Skills[i].Path = targetPath
-			manifestModified = true
-			refreshedPaths = append(refreshedPaths, targetPath)
+		// Content differs and trails binary version: flag as outdated ONLY if in the active workspace
+		if cwd != "" && isPathInDir(targetPath, cwd) {
+			hasOutdated = true
 		}
 	}
 
-	if manifestModified || manifest.Version != Version {
+	if manifestModified && !hasOutdated {
 		manifest.Version = Version
 		_ = saveSkillManifest(manifest)
 	}
 
-	if len(refreshedPaths) > 0 {
-		fmt.Fprintf(os.Stderr, "[sec-agent] Refreshed AI assistant skill instructions across %d location(s):\n", len(refreshedPaths))
-		for _, p := range refreshedPaths {
-			fmt.Fprintf(os.Stderr, "  • %s\n", p)
-		}
+	if hasOutdated {
+		fmt.Fprintf(os.Stderr, "[sec-agent] 💡 Active workspace AI skill instructions trail CLI version (%s -> %s).\n  Run 'sec-agent skill update' to refresh.\n", manifest.Version, Version)
 	}
 }
 
@@ -579,6 +629,27 @@ func handleSkill(profile string, args []string) {
 		if err != nil || manifest == nil {
 			manifest = &SkillManifest{Version: Version, Skills: []InstalledSkillEntry{}}
 		}
+		manifestModified := false
+		for i := range manifest.Skills {
+			targetPath := manifest.Skills[i].Path
+			if targetPath == "" || !filepath.IsAbs(targetPath) {
+				p, err := resolveSkillPath(manifest.Skills[i].Target, manifest.Skills[i].Scope)
+				if err == nil {
+					targetPath = p
+					manifest.Skills[i].Path = targetPath
+					manifestModified = true
+				}
+			}
+			correctScope := determineSkillScope(manifest.Skills[i].Target, targetPath)
+			if manifest.Skills[i].Scope != correctScope {
+				manifest.Skills[i].Scope = correctScope
+				manifestModified = true
+			}
+		}
+		if manifestModified {
+			_ = saveSkillManifest(manifest)
+		}
+
 		fmt.Println("=== 🤖 sec-agent AI Skill Installation Status ===")
 		fmt.Printf("Binary Skill Version: %s\n\n", Version)
 		fmt.Println("Scope Definitions:")
@@ -616,6 +687,7 @@ func handleSkill(profile string, args []string) {
 					targetPath = p
 				}
 			}
+			scope := determineSkillScope(s.Target, targetPath)
 			status := "[✓] Up to date"
 			diskHashStr := ""
 			// #nosec G304 G703
@@ -635,7 +707,7 @@ func handleSkill(profile string, args []string) {
 			} else {
 				status = fmt.Sprintf("[✓] Up to date (sha256:%s)", diskHashStr)
 			}
-			fmt.Printf("  • %-15s (%-9s) %s\n", s.Target, s.Scope, status)
+			fmt.Printf("  • %-15s (%-9s) %s\n", s.Target, scope, status)
 			fmt.Printf("    Path: %s\n", targetPath)
 		}
 	case "update":
@@ -665,6 +737,7 @@ func handleSkill(profile string, args []string) {
 		}
 		updated := 0
 		unchanged := 0
+		var updatedPaths []string
 		for i, entry := range manifest.Skills {
 			targetPath := entry.Path
 			if targetPath == "" || !filepath.IsAbs(targetPath) {
@@ -674,6 +747,8 @@ func handleSkill(profile string, args []string) {
 				}
 				targetPath = p
 			}
+			manifest.Skills[i].Scope = determineSkillScope(entry.Target, targetPath)
+
 			dir := filepath.Dir(targetPath)
 			if _, statErr := os.Stat(dir); statErr != nil {
 				continue
@@ -682,20 +757,26 @@ func handleSkill(profile string, args []string) {
 				manifest.Skills[i].Version = Version
 				manifest.Skills[i].Path = targetPath
 				unchanged++
-				fmt.Printf("[✓] Already up to date: %s (%s) -> %s\n", entry.Target, entry.Scope, targetPath)
+				fmt.Printf("[✓] Already up to date: %s (%s) -> %s\n", entry.Target, manifest.Skills[i].Scope, targetPath)
 				continue
 			}
 			if writeErr := writeSkillToFile(entry.Target, targetPath); writeErr == nil {
 				manifest.Skills[i].Version = Version
 				manifest.Skills[i].Path = targetPath
 				updated++
-				fmt.Printf("[✓] Updated %s (%s) -> %s\n", entry.Target, entry.Scope, targetPath)
+				updatedPaths = append(updatedPaths, targetPath)
+				fmt.Printf("[✓] Updated %s (%s) -> %s\n", entry.Target, manifest.Skills[i].Scope, targetPath)
 			}
 		}
 		manifest.Version = Version
 		_ = saveSkillManifest(manifest)
 		if updated > 0 {
 			fmt.Printf("\nSuccessfully updated %d skill location(s) to %s.\n", updated, Version)
+			fmt.Fprintf(os.Stderr, "\n[sec-agent] 🔄 AI Skill Reload Directive:\n")
+			for _, p := range updatedPaths {
+				fmt.Fprintf(os.Stderr, "  • %s\n", p)
+			}
+			fmt.Fprintf(os.Stderr, "  AI assistants: Please re-read the updated skill file(s) above using your file viewing tool to load the latest instructions and operational rules.\n\n")
 		} else {
 			fmt.Printf("\nAll tracked skills (%d location(s)) are already up to date with %s.\n", unchanged, Version)
 		}

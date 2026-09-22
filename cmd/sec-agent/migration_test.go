@@ -49,6 +49,7 @@ func TestJSONHelpSchema(t *testing.T) {
 }
 
 func TestLocalDotenvMigrationAndExport(t *testing.T) {
+	t.Setenv("SEC_TEST_MODE", "1")
 	profile := "migration-test-profile"
 	sockPath, _ := config.GetSocketPath(profile)
 	dbPath, _ := store.GetStorePath(profile)

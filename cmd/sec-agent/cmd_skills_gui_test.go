@@ -730,7 +730,12 @@ func TestSyncInstalledSkillsIfOutdated_UpgradeDirective(t *testing.T) {
 		t.Fatalf("failed to save manifest: %v", err)
 	}
 
-	// Capture stderr
+	origWd, _ := os.Getwd()
+	_ = os.Chdir(tempDir)
+	defer func() { _ = os.Chdir(origWd) }()
+
+	// 1. Initial check: skill trails binary version. syncInstalledSkillsIfOutdated should NOT overwrite disk,
+	// but should print the advisory notice to stderr prompting sec-agent skill update.
 	oldStderr := os.Stderr
 	r, w, _ := os.Pipe()
 	os.Stderr = w
@@ -744,17 +749,41 @@ func TestSyncInstalledSkillsIfOutdated_UpgradeDirective(t *testing.T) {
 	_, _ = io.Copy(&buf, r)
 	errOutput := buf.String()
 
-	if !strings.Contains(errOutput, "[sec-agent] Refreshed AI assistant skill instructions across 1 location(s):") {
-		t.Errorf("expected refreshed notice in stderr, got:\n%s", errOutput)
+	if !strings.Contains(errOutput, "[sec-agent] 💡 Active workspace AI skill instructions trail CLI version") {
+		t.Errorf("expected advisory notice in stderr, got:\n%s", errOutput)
 	}
-	if strings.Contains(errOutput, "ACTION REQUIRED FOR AI ASSISTANTS") {
-		t.Errorf("expected no prompt-injection phrasing in stderr, got:\n%s", errOutput)
-	}
-	if !strings.Contains(errOutput, skillFile) {
-		t.Errorf("expected updated skill path in stderr, got:\n%s", errOutput)
+	if !strings.Contains(errOutput, "Run 'sec-agent skill update' to refresh.") {
+		t.Errorf("expected instruction to run 'sec-agent skill update' in stderr, got:\n%s", errOutput)
 	}
 
-	// Verify manifest version was updated to Version
+	// Verify skill file was NOT overwritten during passive sync
+	dataBeforeUpdate, err := os.ReadFile(skillFile)
+	if err != nil {
+		t.Fatalf("failed to read skill file: %v", err)
+	}
+	if !strings.Contains(string(dataBeforeUpdate), "Old content") {
+		t.Errorf("expected skill file to remain untouched before update, got:\n%s", string(dataBeforeUpdate))
+	}
+
+	// 2. Explicit update: run handleSkill with "update"
+	rUp, wUp, _ := os.Pipe()
+	os.Stderr = wUp
+	handleSkill("default", []string{"update"})
+	_ = wUp.Close()
+	os.Stderr = oldStderr
+
+	var bufUp bytes.Buffer
+	_, _ = io.Copy(&bufUp, rUp)
+	upErrOutput := bufUp.String()
+
+	if !strings.Contains(upErrOutput, "[sec-agent] 🔄 AI Skill Reload Directive:") {
+		t.Errorf("expected AI Skill Reload Directive on explicit update, got:\n%s", upErrOutput)
+	}
+	if !strings.Contains(upErrOutput, skillFile) {
+		t.Errorf("expected updated skill path in reload directive, got:\n%s", upErrOutput)
+	}
+
+	// Verify manifest and skill file were updated
 	updatedManifest, err := loadSkillManifest()
 	if err != nil {
 		t.Fatalf("failed to load updated manifest: %v", err)
@@ -762,20 +791,16 @@ func TestSyncInstalledSkillsIfOutdated_UpgradeDirective(t *testing.T) {
 	if updatedManifest.Version != Version {
 		t.Errorf("expected manifest version %s, got %s", Version, updatedManifest.Version)
 	}
-	if updatedManifest.Skills[0].Version != Version {
-		t.Errorf("expected skill entry version %s, got %s", Version, updatedManifest.Skills[0].Version)
-	}
 
-	// Verify skill file was overwritten with Version
-	data, err := os.ReadFile(skillFile)
+	dataAfterUpdate, err := os.ReadFile(skillFile)
 	if err != nil {
 		t.Fatalf("failed to read updated skill file: %v", err)
 	}
-	if !strings.Contains(string(data), "version: "+Version) {
-		t.Errorf("expected skill file to contain version: %s, got:\n%s", Version, string(data))
+	if !strings.Contains(string(dataAfterUpdate), "sec-agent") {
+		t.Errorf("expected skill file to contain updated content, got:\n%s", string(dataAfterUpdate))
 	}
 
-	// 2. Second invocation: on-disk content is already identical, so stderr should be clean!
+	// 3. Second invocation: on-disk content is already identical, so stderr should be clean!
 	r2, w2, _ := os.Pipe()
 	os.Stderr = w2
 

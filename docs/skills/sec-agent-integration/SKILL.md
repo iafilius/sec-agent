@@ -1,10 +1,10 @@
 ---
 name: sec-agent-integration
 description: Use the sec-agent CLI utility to start background daemons, store secrets, run applications in isolated environments, migrate dotenv files, install AI skills, inspect snapshots, and manage backups.
-version: v2.13.3
+version: v2.13.4
 ---
 
-# sec-agent Secrets Management Integration (v2.13.3)
+# sec-agent Secrets Management Integration (v2.13.4)
 
 This skill enables AI coding agents and autonomous assistants to use the `sec-agent` CLI tool (v1.9.4+) to securely retrieve credentials, run application build/test/terraform pipelines in isolated process environments, migrate dotenv configuration files, install integration skills across IDEs, inspect point-in-time snapshots (`sec snapshot`), and manage KeePassXC `.kdbx` backups on macOS.
 
@@ -23,9 +23,7 @@ When operating in a workspace that uses `sec-agent` (indicated by a `.secrc` fil
    * Touch ID / Biometric authorization is required only once per session. Once unlocked, all subsequent subagent tool calls, child processes, and background commands inherit access frictionlessly without further prompts.
 3. **Session Unlock Guidance (Preventing Mid-Run Interruption)**:
    * **Daemon Active / Running**: Proceed frictionlessly throughout the task trajectory.
-   * **Daemon Locked / Not Running**: If the task requires secrets, the agent can directly execute `sec-agent open` (or `sec open`) with an appropriate timeout (~15s). On macOS, the operating system natively displays the system Touch ID biometric window on screen; the user approves via fingerprint, and the command completes with zero terminal context switching required. Alternatively, prompt the user:
-     > 🔑 **`sec-agent` session is currently locked.**
-     > Please approve the Touch ID prompt (or run `eval $(sec open)`) to retain session access for the execution run.
+   * **Daemon Locked / Not Running**: If the task requires secrets, the agent SHALL directly execute `sec-agent open` (or `sec open`, or the target `sec run` command) directly in its terminal tool runner at Turn 1. macOS natively displays the system Touch ID biometric window on the operator's physical display outside chat channels. **Do NOT hesitate to execute `sec open` or conclude you cannot do Touch ID**; you are invoking the local CLI which prompts the local human operator on their physical screen. Once unlocked, the background daemon detaches into its own POSIX session and persists for 8 hours across separate subsequent tool turns and subprocesses without requiring command chaining (`eval $(sec open) && ...`).
    * **Decryption Authentication Errors**: If unlocking or recovery returns `cipher: message authentication failed`, immediately run `sec-agent doctor` to check for nested envelope depth anomalies before advising the user to re-enter their 24-word recovery seed.
 4. **Long-Running & Unattended Task Longevity Protocol**:
    * **Anticipated Long Jobs**: When the agent is tasked with executing long-running, multi-step, batch, or unattended workflows (such as `/goal`, lengthy test suites, kernel/code compilation, data migrations, or overnight background tasks), the agent **MUST proactively verify remaining session TTL** at Turn 1 via `sec status`.
@@ -75,13 +73,15 @@ sec-agent doctor --repair
 * **Multi-Nested Envelope Auto-Repair (`sec doctor --repair`)**: If diagnostic output reports `Depth Anomaly Detected (nesting_depth > 1)` on any `.enc` vault, running `sec doctor --repair` safely writes a `.bak_nested` backup and flattens all affected profile envelopes down to single-layer format offline without requiring Keychain biometrics or seed phrases.
 
 ### 1.4. Skill Version Synchronization & Dynamic Re-Read Protocol
-When `sec-agent` is updated on the workstation (e.g. via Homebrew or source rebuild), the CLI automatically updates installed skill files across all configured IDE locations on its next execution.
+When `sec-agent` is updated on the workstation (e.g. via Homebrew or source rebuild), the CLI detects version differences against `skills_manifest.json`. To prevent unexpected disk churn or IDE reloads during read-only commands, the CLI emits an advisory notice to stderr prompting the operator or agent to update.
 
 **CRITICAL RULE FOR AI ASSISTANTS**:
 1. **Dynamic Version Drift Detection**: When executing `sec status`, `sec status --quick`, or any CLI command, if the CLI output indicates:
-   * A structured upgrade notice (`[sec-agent] ⚡ Upgraded AI agent skill from ... to v2.13.3`), or
-   * A CLI version newer than this document's declared version (`v2.13.3`),
-2. **Immediate Re-Read Obligation**: The AI agent **MUST IMMEDIATELY INVOKE its file viewing tool** (e.g. `view_file`) on the installed skill path (such as `.agents/skills/sec-agent-integration/SKILL.md` or `~/.gemini/config/skills/sec-agent-integration/SKILL.md`) before taking further action. This purges stale cached instructions from the LLM conversation context and equips the agent with new commands, flags, and security rules.
+   * An advisory upgrade notice (`[sec-agent] 💡 Active workspace AI skill instructions trail CLI version ... Run 'sec-agent skill update' to refresh.`), or
+   * A CLI version newer than this document's declared version (`v2.13.4`),
+2. **Immediate Update & Re-Read Obligation**:
+   * Execute `sec-agent skill update` to refresh installed skills to the latest binary version.
+   * Then **IMMEDIATELY INVOKE your file viewing tool** (e.g. `view_file`) on the installed skill path (such as `.agents/skills/sec-agent-integration/SKILL.md` or `~/.gemini/config/skills/sec-agent-integration/SKILL.md`) before taking further action. This purges stale cached instructions from the LLM conversation context and equips the agent with new commands, flags, and security rules.
 
 ### 1.5. Guided Profile Onboarding Wizard (`sec profile new <name>`)
 Creating a new isolated profile previously required multiple steps (`init`, `set`, and `migrate-v2`). Now you can provision a complete Dual-Slot vault in a single guided step:
@@ -134,9 +134,12 @@ sec-agent skill update
 | `claude` | `workspace` | `.claude/skills/sec-agent.md` |
 | `windsurf` | `workspace` | `.windsurfrules` |
 
-### 2.2. Automatic Upgrade Sync (`skills_manifest.json`)
-When `sec-agent` is updated (e.g. via `brew upgrade sec-agent`), the next CLI execution compares `skills_manifest.json` manifest version with binary `Version` and automatically updates installed skill files across all tracked IDE locations in-place, printing:
-`[sec-agent] Automatically upgraded AI agent skills (v2.13.3) across N location(s).`
+### 2.2. Skill Sync & Upgrade Protocol (`skills_manifest.json`)
+When `sec-agent` is updated (e.g. via `brew upgrade sec-agent`), the CLI compares `skills_manifest.json` manifest version with binary `Version`. Read-only commands (`--version`, `--help`) remain strictly non-mutating and will not touch installed skills or manifest files. To update all installed skill files across tracked IDE locations in-place, run:
+```bash
+sec-agent skill update
+```
+The CLI verifies SHA-256 integrity hashes, updates files to the current binary release, and updates `skills_manifest.json`.
 
 ---
 
@@ -439,7 +442,7 @@ When initializing secret management for a new workspace or migrating an existing
 1. **Always Favor `sec-agent run -- <cmd>`**: Never ask users to write plaintext secrets to `.env` files.
 2. **UPFRONT SESSION BOOTSTRAPPING & REUSABLE SESSIONS**:
    * **Pre-flight Check at Turn 1**: AI agents MUST run `sec status --quick` at the very beginning of a session or task requiring workspace execution or secrets.
-   * **Turn-1 Touch ID Prompting**: If session is locked, prompt the user ONCE at Turn 1 before starting work: *"🔑 The sec-agent session is locked. Please approve Touch ID (or run `eval $(sec open)`) to retain session access for our run."*
+   * **Turn-1 Touch ID Execution**: If session is locked, execute `sec open` directly in your terminal tool to trigger the native macOS Touch ID window for operator approval: *"🔑 Executing sec open to prompt Touch ID on your display for session authorization."*
    * **Daemon Session Memory**: Once unlocked, the background daemon retains session secrets in RAM (8-hour TTL). All subagent tool calls, subshells, and background pipeline runs inherit access frictionlessly without further prompts.
    * **DO NOT pass `--auto-open` or set `SEC_AUTO_OPEN=1` in AI agent tool calls**.
 3. **Use Scoped Profiles**: Always pass `--profile` or check `.secrc`.

@@ -5,7 +5,106 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"secure_secrets/internal/config"
+	"secure_secrets/internal/daemon"
 )
+
+func printVerboseUsage(profile string) {
+	if len(CommandRegistry) == 0 {
+		initRegistry()
+	}
+
+	fmt.Printf("sec-agent %s — Enclave Session Agent for local developer secrets\n\n", Version)
+
+	cfgDir, _ := config.GetConfigDir()
+	sockPath, _ := config.GetSocketPath(profile)
+	pidPath, _ := config.GetPIDFilePath(profile)
+	activePID := 0
+	if pidPath != "" {
+		// #nosec G304 G703
+		if data, err := os.ReadFile(pidPath); err == nil {
+			var info daemon.PIDLockInfo
+			if json.Unmarshal(data, &info) == nil {
+				activePID = info.PID
+			}
+		}
+	}
+
+	fmt.Println("=== Runtime Configuration & Diagnostics ===")
+	fmt.Printf("  Config Directory  : %s\n", cfgDir)
+	fmt.Printf("  Active Profile    : %s\n", profile)
+	fmt.Printf("  Socket Path       : %s\n", sockPath)
+	if activePID > 0 {
+		fmt.Printf("  Active Daemon PID : %d (running)\n", activePID)
+	} else {
+		fmt.Println("  Active Daemon PID : (not running)")
+	}
+	fmt.Println()
+
+	fmt.Println("=== Global Flags ===")
+	fmt.Println("  --profile, -P <name>     Target vault profile (default: 'default' or resolved from .secrc)")
+	fmt.Println("  --auto-open, --gui       Enable background biometric unlock via GUI prompt")
+	fmt.Println("  --json, --json-errors    Format errors and help output as JSON")
+	fmt.Println("  --verbose, -V            Enable extended diagnostic messages on stderr")
+	fmt.Println("  --help, -h               Display help documentation")
+	fmt.Println()
+
+	fmt.Println("=== Categorized Commands ===")
+	categories := []string{
+		"Session & Setup",
+		"Core Secrets",
+		"Profiles & Scope",
+		"Security & Maintenance",
+		"Backup & Migration",
+		"System",
+	}
+
+	for _, cat := range categories {
+		var catCmds []CommandSpec
+		for _, spec := range CommandRegistry {
+			if spec.Category == cat {
+				catCmds = append(catCmds, spec)
+			}
+		}
+		if len(catCmds) == 0 {
+			continue
+		}
+		fmt.Printf("[%s]\n", cat)
+		for _, spec := range catCmds {
+			aliasStr := ""
+			if len(spec.Aliases) > 0 {
+				var validAliases []string
+				for _, a := range spec.Aliases {
+					if !strings.HasPrefix(a, "-") {
+						validAliases = append(validAliases, a)
+					}
+				}
+				if len(validAliases) > 0 {
+					aliasStr = fmt.Sprintf(" (alias: %s)", strings.Join(validAliases, ", "))
+				}
+			}
+			usageText := spec.Name
+			if spec.Usage != "" {
+				if strings.HasPrefix(spec.Usage, "sec ") {
+					usageText = spec.Usage[4:]
+				} else {
+					usageText = spec.Usage
+				}
+			}
+			fmt.Printf("  %-32s %s%s\n", usageText, spec.Description, aliasStr)
+			if len(spec.Flags) > 0 {
+				fmt.Printf("    Flags: %s\n", strings.Join(spec.Flags, ", "))
+			}
+			if len(spec.Subcommands) > 0 {
+				for _, sub := range spec.Subcommands {
+					fmt.Printf("    • %-18s %s\n", sub.Name, sub.Description)
+				}
+			}
+		}
+		fmt.Println()
+	}
+}
 
 func printUsage() {
 	if len(CommandRegistry) == 0 {
