@@ -3,7 +3,7 @@ class SecAgent < Formula
   homepage "https://github.com/iafilius/sec-agent"
   url "https://github.com/iafilius/sec-agent/releases/download/v2.14.0/sec-agent_v2.14.0_darwin_arm64.tar.gz"
   version "2.14.0"
-  sha256 "16261fd17eb127977639cca44acd05a20d054d1d6c021e1c860f7572b8a0a79b"
+  sha256 "64f797d1f555dd33c5fc097bc170b592ccf53470afff334779a9317373b860d3"
   license "GPL-3.0-or-later"
 
   depends_on :macos
