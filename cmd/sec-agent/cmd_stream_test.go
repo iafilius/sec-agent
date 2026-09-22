@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"secure_secrets/internal/store"
 	"strings"
 	"testing"
@@ -108,3 +110,66 @@ func TestRenderStreamTemplateTargetLocked(t *testing.T) {
 		t.Errorf("expected locked error naming 'xuntos-prod', got: %v", err)
 	}
 }
+
+func TestStreamTemplateFileInput(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmplFile := filepath.Join(tmpDir, "sample.yaml.tmpl")
+	content := "API_KEY={{api/key}}\nDB={{db/name}}"
+	if err := os.WriteFile(tmplFile, []byte(content), 0600); err != nil {
+		t.Fatalf("failed writing temp template file: %v", err)
+	}
+
+	wsCfg := &WorkspaceConfig{
+		Version: 2,
+		Environments: map[string]WorkspaceEnvironment{
+			"dev": {
+				Profile: store.ProfileName("test-prof"),
+				Tier:    "dev",
+			},
+		},
+	}
+	normalizeWorkspaceConfig(wsCfg)
+
+	mockFetcher := func(profile string) (map[string]string, error) {
+		return map[string]string{
+			"api/key": "secret-api-val",
+			"db/name": "production-db",
+		}, nil
+	}
+
+	expected := "API_KEY=secret-api-val\nDB=production-db"
+
+	// 1. Test parsing via --file
+	t.Run("--file flag", func(t *testing.T) {
+		data, err := os.ReadFile(tmplFile)
+		if err != nil {
+			t.Fatalf("failed reading file: %v", err)
+		}
+		rendered, err := renderStreamTemplate("test-prof", string(data), wsCfg, mockFetcher)
+		if err != nil {
+			t.Fatalf("render error: %v", err)
+		}
+		if rendered != expected {
+			t.Errorf("expected %q, got %q", expected, rendered)
+		}
+	})
+
+	// 2. Test fallback when --template is passed an existing file path
+	t.Run("--template filepath fallback", func(t *testing.T) {
+		arg := tmplFile
+		templateStr := arg
+		if fi, err := os.Stat(templateStr); err == nil && !fi.IsDir() {
+			if data, err := os.ReadFile(templateStr); err == nil {
+				templateStr = string(data)
+			}
+		}
+		rendered, err := renderStreamTemplate("test-prof", templateStr, wsCfg, mockFetcher)
+		if err != nil {
+			t.Fatalf("render error: %v", err)
+		}
+		if rendered != expected {
+			t.Errorf("expected %q, got %q", expected, rendered)
+		}
+	})
+}
+

@@ -470,16 +470,40 @@ func handleProfileNew(args []string) {
 		cwd, _ := os.Getwd()
 		absSecrc := filepath.Join(cwd, ".secrc")
 		if cwd != "" {
-			isGit := false
-			for _, marker := range []string{".git", "go.mod", "package.json", "Makefile"} {
-				if _, err := os.Stat(filepath.Join(cwd, marker)); err == nil {
-					isGit = true
-					break
+			homeDir, _ := os.UserHomeDir()
+			isSensitiveDir := false
+			if homeDir != "" {
+				evalHome, err1 := filepath.EvalSymlinks(homeDir)
+				evalCwd, err2 := filepath.EvalSymlinks(cwd)
+				if err1 == nil && err2 == nil {
+					if evalCwd == evalHome || evalCwd == filepath.Join(evalHome, "bin") || strings.HasPrefix(evalCwd, filepath.Join(evalHome, "bin")+string(filepath.Separator)) {
+						isSensitiveDir = true
+					}
+				}
+				if cwd == homeDir || cwd == filepath.Join(homeDir, "bin") || strings.HasPrefix(cwd, filepath.Join(homeDir, "bin")+string(filepath.Separator)) {
+					isSensitiveDir = true
 				}
 			}
-			if !isGit {
-				fmt.Printf("⚠️  Warning: Current directory (%s) does not appear to be a Git repository or project root.\n", cwd)
-				fmt.Printf("   Any sibling/subdirectories will inherit profile %q via upward traversal!\n", pName.String())
+			if cwd == "/usr/local/bin" || cwd == "/tmp" || cwd == "/var/tmp" || cwd == "/private/tmp" || cwd == "/private/var/tmp" {
+				isSensitiveDir = true
+			}
+
+			if isSensitiveDir {
+				fmt.Printf("⚠️  Notice: Creating .secrc in a home/system directory (%s).\n", cwd)
+				fmt.Printf("   All child projects without their own .secrc will inherit profile %q via upward traversal!\n", pName.String())
+				fmt.Printf("   Consider running 'sec profile new' inside your specific project repository.\n")
+			} else {
+				isGit := false
+				for _, marker := range []string{".git", "go.mod", "package.json", "Makefile"} {
+					if _, err := os.Stat(filepath.Join(cwd, marker)); err == nil {
+						isGit = true
+						break
+					}
+				}
+				if !isGit {
+					fmt.Printf("⚠️  Warning: Current directory (%s) does not appear to be a Git repository or project root.\n", cwd)
+					fmt.Printf("   Any sibling/subdirectories will inherit profile %q via upward traversal!\n", pName.String())
+				}
 			}
 		}
 
@@ -488,7 +512,8 @@ func handleProfileNew(args []string) {
 		if err := os.WriteFile(filepath.Clean(".secrc"), []byte(secrcData), 0600); err != nil {
 			fmt.Fprintf(os.Stderr, "⚠️  Failed to write .secrc: %v\n", err)
 		} else {
-			fmt.Printf("✅ Created %s bound to profile %q\n", absSecrc, pName.String())
+			fmt.Printf("📁 Bound workspace config: %s\n", absSecrc)
+			fmt.Printf("   Scope: Active for this directory and all subdirectories.\n")
 		}
 	}
 }

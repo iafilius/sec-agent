@@ -28,9 +28,20 @@ func LoadSecIgnoreRules(ignoreFilePath string) []string {
 
 // ShouldIgnoreFile checks if a given file path matches any .secignore rules.
 func ShouldIgnoreFile(file string, rules []string) bool {
+	base := filepath.Base(file)
 	for _, rule := range rules {
 		if matched, _ := filepath.Match(rule, file); matched {
 			return true
+		}
+		if !strings.Contains(rule, "/") {
+			if matched, _ := filepath.Match(rule, base); matched {
+				return true
+			}
+		} else if strings.HasPrefix(rule, "**/") {
+			subRule := strings.TrimPrefix(rule, "**/")
+			if matched, _ := filepath.Match(subRule, base); matched {
+				return true
+			}
 		}
 		if strings.Contains(file, rule) {
 			return true

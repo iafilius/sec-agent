@@ -4,12 +4,30 @@
 [![Security: Hardware Enclave](https://img.shields.io/badge/Security-Secure%20Enclave-red.svg?style=flat-square)](https://developer.apple.com/documentation/security)
 [![License: GPLv3](https://img.shields.io/badge/License-GPLv3-blue.svg?style=flat-square)](LICENSE)
 
-`sec-agent` is a fully local, offline-first credentials manager designed to protect local developer secrets (such as API keys, database credentials, and cloud tokens) from session takeover vectors (e.g. hijacked terminal sessions, remote SSH shell attackers, or administrative screen monitoring).
+**Zero-Plaintext, Hardware-Sealed Secrets Management for macOS Engineers & AI Coding Agents.**
 
-It functions similarly to `ssh-agent` or `gpg-agent`, but is engineered specifically for secure secret, variable, and key-value retrieval—completely eliminating the need for plaintext passwords or stored credentials on disk, even across local development environments.
+`sec-agent` is a fully local, offline-first credentials manager designed to protect developer secrets (API keys, database credentials, cloud tokens, and certificates) from session takeover vectors (hijacked terminal sessions, remote SSH shell attackers, or administrative screen monitoring).
+
+It functions similarly to `ssh-agent` or `gpg-agent`, but is engineered specifically for secure secret, variable, and key-value retrieval—completely eliminating the need for plaintext passwords, `.env` files, or stored credentials on disk, across local development environments and multi-tier cloud pipelines.
 
 > [!WARNING]
 > **macOS Exclusivity**: This tool utilizes macOS-specific APIs, including LocalAuthentication (Touch ID/Apple Watch hardware prompts), Keychain Services (Secure Enclave master key storage), and macOS Hardened Runtime memory protections. It is not compatible with Windows or Linux.
+
+---
+
+### ⚡ Core Capabilities at a Glance
+
+| Capability | Description | Command / Feature |
+| :--- | :--- | :--- |
+| 🔒 **Hardware-Anchored Silicon Storage** | Master keys generated and sealed inside the Apple Silicon Secure Enclave. Zero plaintext keys on disk. | `kSecAccessControlBiometryCurrentSet` |
+| 👆 **Touch ID Physical Presence Gate** | Physical sensor contact required. Unlocks in < 0.1s without typing master passwords. Blocks remote scripts. | `eval $(sec open)` |
+| 🛡️ **Active Session Hijack Interceptor** | Process tree & environment scanner detects remote SSH (`sshd`, `SSH_CLIENT`) and VNC/screensharing, self-locking instantly. | Active daemon defense |
+| 📁 **Multi-Tier Environment Contexts** | Switch between `dev`, `dta`, `staging`, `prod` in memory with zero disk writes. | `sec use staging` / `sec env ls` |
+| 🚀 **Zero-Plaintext Process Injection** | Inject secrets into child processes with dynamic streaming log redaction (`[REDACTED_BY_SEC]`). | `sec run --redact -- <cmd>` |
+| 📄 **Cross-Profile Template Streaming** | Interpolate mustache `{{key}}` and cross-profile `{{@env:key}}` templates from files or stdin in memory. | `sec stream <file>` |
+| 🛡️ **Git Pre-Commit Privacy Guard** | Staged file scanner combining Shannon entropy analysis and active vault exact-match leak detection. | `sec githook install / check` |
+| 🤖 **Autonomous AI Coding Partner** | Turn-1 biometric protocol, dual-audience diagnostics, and bundled Agent Skill for Antigravity & IDEs. | `sec skill install / update` |
+| 🖥️ **Hardened Web UI & Desktop App** | Local Web UI (`127.0.0.1:9876`) with single-tab `BroadcastChannel` binding and direct in-browser Touch ID. | `sec gui` / `SecAgent.app` |
 
 ---
 
@@ -110,7 +128,7 @@ brew install sec-agent
 Download the latest pre-compiled, macOS Hardened Runtime signed binary tarball from [GitHub Releases](https://github.com/iafilius/sec-agent/releases/latest):
 ```bash
 # Extract and install binary to /usr/local/bin
-tar -xzf sec-agent_v2.11.0_darwin_arm64.tar.gz
+tar -xzf sec-agent_v2.14.1_darwin_arm64.tar.gz
 sudo mv sec-agent /usr/local/bin/
 ```
 
@@ -319,9 +337,38 @@ sec rm app/old_key --confirm-prod
 ```
 
 ### 12. Cross-Profile Template Streaming (`sec stream`)
-Evaluate configuration templates in-memory with local and cross-profile vault secrets:
+Evaluate configuration templates in-memory with local and cross-profile vault secrets without leaving unencrypted temporary files on disk:
 ```bash
+# 1. Stream from a template file (positional argument or -f / --file)
+sec stream config.yaml.tmpl > config.yaml
+sec stream -f deploy.env.tmpl | docker compose --env-file - up
+
+# 2. Stream inline template strings
 sec stream --template "export LOCAL='{{db/password}}' GLOBAL_CA='{{@global-shared:pki/ca}}'" | sh
+
+# 3. Stream from stdin
+cat app.conf.tmpl | sec stream
+```
+
+### 13. Git Pre-Commit Privacy Guard & `.secignore` (`sec githook`)
+Prevent accidental secret leaks before code ever touches Git history. Combines Shannon entropy scanning with exact-match detection against active vault credentials:
+```bash
+# Install pre-commit hook into local repository (.git/hooks/pre-commit)
+sec githook install
+
+# Or install globally for all git repositories on your workstation
+sec githook install --global
+
+# Manually trigger a privacy scan on staged changes
+sec githook check
+```
+
+#### Suppressing Expected Template Files via `.secignore`
+Place a `.secignore` file in your project root to suppress harmless template files across any subdirectory (e.g. `*.tmpl` or `terraform/.secrets.tmpl`):
+```ini
+# Suppress templates with mustache placeholders across all subdirectories
+*.tmpl
+**/*.secret.template
 ```
 
 ---
@@ -522,6 +569,10 @@ The following feature ideas have been recorded as optional future architectural 
 | **Remote Session Hijack Intercept** | **Active BSD Process Tree & SSH/VNC Scanner** | ❌ None (Triggers while plugged in) | ❌ None (CLI queryable during unlock) | ❌ None | ❌ None | ❌ None | ❌ None |
 | **External Hardware Needed** | **❌ None (Uses Built-in Apple Silicon)** | ⚠️ Required (USB Dongle purchase/carrying) | ❌ None | ❌ None | ❌ None | ❌ None | ❌ None |
 | **Zero-Codebase Dotenv Injection** | **Automatic `<migrated_to_sec>` Override** | ❌ Complex GPG / PKCS#11 Scripting | ⚠️ Manual `op run` Template Mapping | SDK / Custom API Scripts | Custom Agent / Template Injection | CLI Secret Ingestion | Manual Decrypt Scripting |
+| **Dynamic Log Stream Redaction** | **✅ Built-in (`[REDACTED_BY_SEC]`)** | ❌ None | ❌ None | ❌ None | ❌ None | ❌ None | ❌ None |
+| **In-Memory Template Streaming** | **✅ Built-in (`sec stream <file>`)** | ❌ None | ⚠️ Manual CLI Templating | ❌ None | ⚠️ Consul Template Daemon | ❌ None | ❌ None |
+| **Git Pre-Commit Privacy Guard** | **✅ Built-in (`sec githook check`)** | ❌ None | ❌ None | ❌ None | ❌ None | ❌ None | ❌ None |
+| **Autonomous AI Agent Skill Protocol** | **✅ Built-in (Zero-stall TTL + IDE Skills)** | ❌ None | ❌ None | ❌ None | ❌ None | ❌ None | ❌ None |
 
 ---
 

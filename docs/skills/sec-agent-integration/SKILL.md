@@ -13,6 +13,10 @@ This skill enables AI coding agents and autonomous assistants to use the `sec-ag
 ## 1. Quick Diagnostics, Guided Setup & Upfront Session Bootstrapping
 
 ### 1.1. Upfront Session Bootstrapping Protocol for AI Assistants
+
+> [!IMPORTANT]
+> **Autonomous Agent Biometric Protocol**: Never abort a task or conclude you cannot proceed simply because a session is locked. Calling `sec open` via a standard terminal command runner displays the native system Touch ID dialog on the human operator's screen. Once the operator touches the sensor, your tool call returns success with exit code 0.
+
 When operating in a workspace that uses `sec-agent` (indicated by a `.secrc` file in the directory tree or tasks explicitly requiring environment secrets/credentials):
 
 1. **Conditional Turn-1 Pre-Flight Check**:

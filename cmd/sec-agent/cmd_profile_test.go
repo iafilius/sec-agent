@@ -675,6 +675,66 @@ func TestRestartHotReloadSafeNonInteractive(t *testing.T) {
 	}
 }
 
+func TestProfileNewSensitiveDirectoryWarning(t *testing.T) {
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get current wd: %v", err)
+	}
+
+	tmpDir := t.TempDir()
+	binPath := filepath.Join(tmpDir, "sec_test_bin")
+	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build test binary: %v\nOutput: %s", err, string(out))
+	}
+
+	// Create fake bin dir inside a mock HOME
+	fakeHome := filepath.Join(tmpDir, "fakehome")
+	fakeBin := filepath.Join(fakeHome, "bin")
+	if err := os.MkdirAll(fakeBin, 0700); err != nil {
+		t.Fatalf("failed to create fake bin dir: %v", err)
+	}
+	_ = os.MkdirAll(filepath.Join(fakeHome, ".config", "sec-agent"), 0700)
+
+	if err := os.Chdir(fakeBin); err != nil {
+		t.Fatalf("failed to chdir to fakeBin: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(origWd)
+	}()
+
+	mnemonic, err := crypto.GenerateMnemonic()
+	if err != nil {
+		t.Fatalf("failed to generate mnemonic: %v", err)
+	}
+
+	configDir := filepath.Join(tmpDir, "config")
+	_ = os.MkdirAll(configDir, 0700)
+
+	cmd := exec.Command(binPath, "profile", "new", "sensitivenode", "--seed", mnemonic, "--secrc")
+	cmd.Env = append(os.Environ(),
+		"HOME="+fakeHome,
+		"SEC_CONFIG_DIR="+configDir,
+		"SEC_TEST_MODE=1",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("profile new failed: %v, output:\n%s", err, string(out))
+	}
+
+	outStr := string(out)
+	if !strings.Contains(outStr, "Notice: Creating .secrc in a home/system directory") {
+		t.Errorf("expected warning about home/system directory, got:\n%s", outStr)
+	}
+	if !strings.Contains(outStr, "Bound workspace config:") || !strings.Contains(outStr, filepath.Join("fakehome", "bin", ".secrc")) {
+		t.Errorf("expected bound workspace config with absolute path, got:\n%s", outStr)
+	}
+	if !strings.Contains(outStr, "Scope: Active for this directory and all subdirectories.") {
+		t.Errorf("expected scope description in output, got:\n%s", outStr)
+	}
+}
+
+
 
 
 

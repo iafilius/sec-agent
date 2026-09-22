@@ -5,6 +5,27 @@ All notable changes to `sec-agent` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v2.14.1] - 2026-09-22
+
+### Added & Enhanced
+- **Profile Provisioning Ergonomics & Sensitive Directory Guard**:
+  - `sec profile new --secrc` logs the absolute path of the generated `.secrc` configuration file and explicitly displays directory scoping rules (`Active for this directory and all subdirectories`).
+  - Emits an advisory security warning when `.secrc` is provisioned inside sensitive global directories (`$HOME`, `$HOME/bin`, `/usr/local/bin`, `/tmp`), preventing accidental workstation-wide secret scope contamination.
+- **Dual-Audience Daemon Error Remediation**:
+  - Formatted daemon connection and lock diagnostics to simultaneously provide direct copy-paste remediation for interactive human operators (`eval $(sec open)`) and structured protocol instructions for autonomous AI coding agents and IDE runners.
+  - Added prominent Autonomous Agent Biometric Protocol callouts in `SKILL.md` advising agents to verify session longevity (`sec status`) and request upfront biometric authorization at Turn 1 to prevent mid-session stalls.
+- **Flexible Filepath & Positional Template Support in `sec stream`**:
+  - Extended `sec stream` to read templates from filepaths via `-f` / `--file <path>` and as direct positional arguments (`sec stream <file>`).
+  - Added automatic regular file detection when `--template <string>` matches an existing readable file on disk.
+  - Updated command registry, usage documentation, and shell autocompletions (Zsh, Bash, Fish).
+- **`.secignore` Wildcard Basename Matching & Template Entropy Normalization**:
+  - Enhanced `ShouldIgnoreFile` to match `filepath.Base(file)` when a rule contains no `/`, providing full `.gitignore` wildcard parity across nested subdirectories (e.g., `*.tmpl` suppressing `terraform/prod/.secrets.tmpl`).
+  - Updated `IsHighEntropyString` to strip mustache template placeholders (`\{\{[^}]+\}\}`) prior to evaluating token length and Shannon entropy, eliminating false-positive git pre-commit blocks while preserving exact-match secret leak detection.
+- **Documentation & GitHub Showcase**:
+  - Elevated `README.md` hero section with a visual Core Capabilities grid and modernized Solution Comparison Matrix.
+
+---
+
 ## [v2.14.0] - 2026-09-22
 
 ### Added & Enhanced

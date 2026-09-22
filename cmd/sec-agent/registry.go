@@ -328,9 +328,9 @@ func initRegistry() {
 		{
 			Name:        "stream",
 			Category:    "Profiles & Scope",
-			Description: "Evaluate secret {{key_path}} placeholders in template strings",
-			Usage:       "sec stream [--template <t>]",
-			Flags:       []string{"--template"},
+			Description: "Evaluate secret {{key_path}} placeholders in template strings or files",
+			Usage:       "sec stream [<file>] [--file <f>] [--template <t>]",
+			Flags:       []string{"--file", "-f", "--template", "-t"},
 			Handler:     handleStream,
 		},
 		{

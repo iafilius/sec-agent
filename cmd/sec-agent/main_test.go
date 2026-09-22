@@ -809,8 +809,14 @@ func TestDaemonNotRunningErrorDiagnostics(t *testing.T) {
 	if !strings.Contains(errDef.Error(), "profile 'default'") {
 		t.Errorf("expected default error to mention profile 'default', got: %v", errDef)
 	}
-	if !strings.Contains(remDef, "eval $(sec open)") {
-		t.Errorf("expected default remediation to suggest 'eval $(sec open)', got: %s", remDef)
+	if !strings.Contains(remDef, "Interactive Shell: Run 'eval $(sec open)'") {
+		t.Errorf("expected default remediation to suggest interactive 'eval $(sec open)', got: %s", remDef)
+	}
+	if !strings.Contains(remDef, "AI Assistant / IDE: Execute 'sec open' directly") {
+		t.Errorf("expected default remediation to suggest AI assistant 'sec open', got: %s", remDef)
+	}
+	if !strings.Contains(remDef, "Touch ID") {
+		t.Errorf("expected default remediation to mention Touch ID prompt, got: %s", remDef)
 	}
 
 	// 2. Empty profile (defaults to default)
@@ -818,8 +824,11 @@ func TestDaemonNotRunningErrorDiagnostics(t *testing.T) {
 	if !strings.Contains(errEmpty.Error(), "profile 'default'") {
 		t.Errorf("expected empty profile to mention profile 'default', got: %v", errEmpty)
 	}
-	if !strings.Contains(remEmpty, "eval $(sec open)") {
-		t.Errorf("expected empty profile remediation to suggest 'eval $(sec open)', got: %s", remEmpty)
+	if !strings.Contains(remEmpty, "Interactive Shell: Run 'eval $(sec open)'") {
+		t.Errorf("expected empty profile remediation to suggest interactive 'eval $(sec open)', got: %s", remEmpty)
+	}
+	if !strings.Contains(remEmpty, "AI Assistant / IDE: Execute 'sec open' directly") {
+		t.Errorf("expected empty profile remediation to suggest AI assistant 'sec open', got: %s", remEmpty)
 	}
 
 	// 3. Named profile
@@ -827,8 +836,11 @@ func TestDaemonNotRunningErrorDiagnostics(t *testing.T) {
 	if !strings.Contains(errNamed.Error(), `profile "t430"`) {
 		t.Errorf("expected named error to mention profile \"t430\", got: %v", errNamed)
 	}
-	if !strings.Contains(remNamed, "eval $(sec --profile t430 open)") {
-		t.Errorf("expected named remediation to include profile flag, got: %s", remNamed)
+	if !strings.Contains(remNamed, "Interactive Shell: Run 'eval $(sec --profile t430 open)'") {
+		t.Errorf("expected named remediation to include interactive profile flag, got: %s", remNamed)
+	}
+	if !strings.Contains(remNamed, "AI Assistant / IDE: Execute 'sec --profile t430 open' directly") {
+		t.Errorf("expected named remediation to include AI assistant direct profile execution, got: %s", remNamed)
 	}
 }
 

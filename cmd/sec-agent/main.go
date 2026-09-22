@@ -39,7 +39,7 @@ var (
 	confirmProdFlag bool
 )
 var (
-	Version   = "v2.14.0"
+	Version   = "v2.14.1"
 	BuildDate = "unknown"
 )
 
@@ -99,10 +99,21 @@ func fail(code string, err error, remediation string) {
 }
 
 func daemonNotRunningError(profile string) (error, string) {
-	if profile == "" || profile == "default" {
-		return fmt.Errorf("Daemon for profile 'default' is not running. Please run 'sec open' to unlock the session."), "Run 'eval $(sec open)' to start/unlock the session."
+	openCmd := "eval $(sec open)"
+	directCmd := "sec open"
+	if profile != "" && profile != "default" {
+		openCmd = fmt.Sprintf("eval $(sec --profile %s open)", profile)
+		directCmd = fmt.Sprintf("sec --profile %s open", profile)
 	}
-	return fmt.Errorf("Daemon for profile %q is not running. Please run 'sec open' to unlock the session.", profile), fmt.Sprintf("Run 'eval $(sec --profile %s open)' to start/unlock the session.", profile)
+
+	err := fmt.Errorf("Daemon for profile %q is not running. Please run 'sec open' to unlock the session.", profile)
+	if profile == "" || profile == "default" {
+		err = fmt.Errorf("Daemon for profile 'default' is not running. Please run 'sec open' to unlock the session.")
+	}
+
+	rem := fmt.Sprintf("\n  • Interactive Shell: Run '%s' to start/unlock and export session variables.\n  • AI Assistant / IDE: Execute '%s' directly in terminal — macOS Secure Enclave will prompt the console operator for Touch ID on their display.", openCmd, directCmd)
+
+	return err, rem
 }
 
 func failDaemonNotRunning(profile string) {

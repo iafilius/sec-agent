@@ -2,12 +2,15 @@ package audit
 
 import (
 	"math"
+	"regexp"
 	"strings"
 )
 
 var defaultWeakDictionary = []string{
 	"admin123", "password", "p@ssword1", "123456", "secret", "test", "demo",
 }
+
+var reTemplatePlaceholder = regexp.MustCompile(`\{\{[^}]+\}\}`)
 
 // CalculateEntropy computes Shannon entropy in bits per character for a given string.
 func CalculateEntropy(s string) float64 {
@@ -29,6 +32,7 @@ func CalculateEntropy(s string) float64 {
 
 // IsHighEntropyString detects high-entropy string tokens commonly indicative of secrets or hashes.
 func IsHighEntropyString(s string) bool {
+	s = reTemplatePlaceholder.ReplaceAllString(s, "")
 	words := strings.Fields(s)
 	for _, word := range words {
 		cleaned := strings.Trim(word, `"',:;()[]{}<>=`)

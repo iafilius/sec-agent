@@ -154,3 +154,61 @@ AKIAIOSFODNN7EXAMPLE
 		t.Errorf("expected line containing AKIAIOSFODNN7EXAMPLE to be ignored")
 	}
 }
+
+func TestIgnoreRulesWildcardBasename(t *testing.T) {
+	rules := []string{
+		"*.tmpl",
+		"secrets.env",
+		"**/*.secret.json",
+	}
+
+	// 1. *.tmpl should match root or deeply nested files
+	if !ShouldIgnoreFile("config.tmpl", rules) {
+		t.Errorf("expected config.tmpl to match *.tmpl")
+	}
+	if !ShouldIgnoreFile("terraform/prod/.secrets.tmpl", rules) {
+		t.Errorf("expected terraform/prod/.secrets.tmpl to match *.tmpl")
+	}
+	if !ShouldIgnoreFile("a/b/c/d/service.tmpl", rules) {
+		t.Errorf("expected deeply nested file to match *.tmpl")
+	}
+
+	// 2. Exact basename rule without slashes
+	if !ShouldIgnoreFile("secrets.env", rules) {
+		t.Errorf("expected secrets.env to match secrets.env")
+	}
+	if !ShouldIgnoreFile("deploy/k8s/secrets.env", rules) {
+		t.Errorf("expected deploy/k8s/secrets.env to match secrets.env")
+	}
+
+	// 3. ** glob pattern
+	if !ShouldIgnoreFile("app/config.secret.json", rules) {
+		t.Errorf("expected app/config.secret.json to match **/*.secret.json")
+	}
+
+	// 4. Non-matching files
+	if ShouldIgnoreFile("terraform/prod/.secrets.yaml", rules) {
+		t.Errorf("expected .secrets.yaml not to be ignored")
+	}
+}
+
+func TestEntropyTemplateNormalization(t *testing.T) {
+	// A long template placeholder that would previously have > 32 chars and high entropy
+	templateLine := `DATABASE_URL="{{@xuntos-prod:database/credentials/master_connection_url}}"`
+	if IsHighEntropyString(templateLine) {
+		t.Errorf("expected template line with mustache placeholder not to be flagged as high entropy")
+	}
+
+	// Multiple template placeholders on one line
+	multiTmpl := `USER="{{@dev:user}}" PASS="{{@dev:very_long_password_token_path_here}}"`
+	if IsHighEntropyString(multiTmpl) {
+		t.Errorf("expected multiple template placeholders not to be flagged as high entropy")
+	}
+
+	// A line containing an ACTUAL high-entropy secret along with a template placeholder
+	actualSecretLine := `REAL_SECRET="8fA!9xL#2kQ@7vP$1mZ%4wY^6tB&3nC*" # template={{@dev:test}}`
+	if !IsHighEntropyString(actualSecretLine) {
+		t.Errorf("expected line with real high entropy secret to still be flagged")
+	}
+}
+

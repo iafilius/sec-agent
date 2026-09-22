@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"regexp"
 	"secure_secrets/internal/daemon"
 	"strings"
@@ -101,15 +102,54 @@ func renderStreamTemplate(activeProfile string, templateStr string, wsCfg *Works
 }
 
 func handleStream(profile string, args []string) {
+	filePath := ""
 	templateStr := ""
+	var positional []string
+
 	for i := 0; i < len(args); i++ {
-		if (args[i] == "--template" || args[i] == "-t") && i+1 < len(args) {
+		arg := args[i]
+		switch {
+		case (arg == "--file" || arg == "-f") && i+1 < len(args):
+			filePath = args[i+1]
+			i++
+		case (arg == "--template" || arg == "-t") && i+1 < len(args):
 			templateStr = args[i+1]
 			i++
+		case strings.HasPrefix(arg, "-"):
+			// Other flags, if any in the future
+		default:
+			positional = append(positional, arg)
 		}
 	}
 
-	if templateStr == "" {
+	if filePath != "" {
+		cleaned := filepath.Clean(filePath)
+		// #nosec G304 G703
+		data, err := os.ReadFile(cleaned)
+		if err != nil {
+			fail("FILE_READ_ERROR", fmt.Errorf("failed reading template file %q: %w", filePath, err), "")
+		}
+		templateStr = string(data)
+	} else if templateStr != "" {
+		// If --template was passed a path to an existing regular file, read it
+		cleaned := filepath.Clean(templateStr)
+		// #nosec G304 G703
+		if fi, err := os.Stat(cleaned); err == nil && !fi.IsDir() {
+			// #nosec G304 G703
+			if data, err := os.ReadFile(cleaned); err == nil {
+				templateStr = string(data)
+			}
+		}
+	} else if len(positional) > 0 {
+		posPath := filepath.Clean(positional[0])
+		// #nosec G304 G703
+		data, err := os.ReadFile(posPath)
+		if err != nil {
+			fail("FILE_READ_ERROR", fmt.Errorf("failed reading template file %q: %w", positional[0], err), "")
+		}
+		templateStr = string(data)
+	} else {
+		// Read from stdin
 		data, err := io.ReadAll(os.Stdin)
 		if err != nil {
 			fail("STDIN_READ_ERROR", fmt.Errorf("failed reading stream input: %v", err), "")
