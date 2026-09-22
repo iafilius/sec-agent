@@ -5,6 +5,28 @@ All notable changes to `sec-agent` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v2.13.3] - 2026-09-22
+
+### Added & Enhanced
+- **Foreground Process Group Handover & Signal Forwarding (`sec run`)**:
+  - Implemented terminal controlling foreground process group handover via `unix.TIOCSPGRP` with terminal state preservation and graceful cleanup (`tcsetpgrp`).
+  - Child interactive processes (e.g. `az login`, `terraform`, REPLs) now directly receive terminal keyboard inputs and job control signals without stall.
+  - Forwarded asynchronous POSIX signals (`SIGINT`, `SIGTERM`, `SIGHUP`, `SIGWINCH`) to child process groups.
+- **Prefix-Aware Dynamic Stream Redaction**:
+  - Enhanced stream redaction in `redactWriter` with an idle timer flush (25ms) so interactive prompts without trailing newlines (e.g. `[y/N]: ` or `Password: `) display immediately while preventing secret token boundary leaks.
+- **Non-TTY Plaintext Safety Guard (`sec get`)**:
+  - `sec get` now strictly requires `--raw` when standard output is redirected or piped (`!term.IsTerminal(os.Stdout)`), preventing accidental secret exposure in agent prompt contexts, scripts, or redirected log files.
+- **Structured Daemon Failure & Security Audit Logging**:
+  - Added structured audit trail logging for daemon authorization failures, profile mismatches, invalid token rejections, locked vault attempts, and lifecycle transitions.
+- **Workspace Scope Enforcement & Integrity Hashing in `skill status`**:
+  - `skill status` and `skill update` now verify workspace boundaries and display SHA-256 content hashes alongside skill versions across tracked IDE configurations.
+- **Critical Recovery Seed Warning Banners**:
+  - Enhanced `sec profile new` and `sec export` to display clear, prominent warning banners emphasizing the absolute criticality of offline recovery seed storage.
+- **AI Agent Direct Biometric Execution Protocol**:
+  - Updated AI agent integration instructions (`SKILL.md`) to execute Touch ID-prompting commands directly in the active terminal rather than delegating operator window switching.
+
+---
+
 ## [v2.13.2] - 2026-09-16
 
 ### Added & Enhanced

@@ -211,6 +211,9 @@ func handleGet(profile string, path string, args []string) {
 	} else if showRaw {
 		fmt.Print(resp.Value)
 	} else {
+		if os.Getenv("SEC_TEST_MODE") != "1" && os.Getenv("SEC_ALLOW_NON_TTY_GET") != "1" && !term.IsTerminal(int(os.Stdout.Fd())) {
+			fail("NON_TTY_RAW_REQUIRED", fmt.Errorf("refusing to print plaintext secret to non-interactive stdout"), "Use 'sec run -- <cmd>' to inject secrets into process memory, or pass '--raw' / '-r' if you explicitly intended to pipe the raw secret bytes.")
+		}
 		fmt.Println(resp.Value)
 	}
 }

@@ -178,7 +178,7 @@ func TestSecretVersioningAndRollback(t *testing.T) {
 	}
 
 	// Verify current value is back to val_v1
-	getCmd := exec.Command(binPath, "get", "api/key", "--profile", profile)
+	getCmd := exec.Command(binPath, "get", "api/key", "--raw", "--profile", profile)
 	getCmd.Env = append(os.Environ(), "SEC_SESSION_TOKEN="+token)
 	getOut, _ := getCmd.CombinedOutput()
 	if !strings.Contains(string(getOut), "val_v1") {
@@ -640,5 +640,74 @@ func TestReadStdinSecretValue_TimesOutWithInformativeError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "timed out") {
 		t.Errorf("expected an informative timeout error, got: %v", err)
+	}
+}
+
+func TestNonTTYGetPlainTextGuard(t *testing.T) {
+	profile := "nontty-test-profile"
+	sockPath, _ := config.GetSocketPath(profile)
+	dbPath, _ := store.GetStorePath(profile)
+	_ = os.Remove(sockPath)
+	_ = os.Remove(dbPath)
+	defer os.Remove(sockPath)
+	defer os.Remove(dbPath)
+
+	tempDir := t.TempDir()
+	binPath := filepath.Join(tempDir, "sec_nontty_bin")
+	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build test binary: %v\nOutput: %s", err, out)
+	}
+
+	token := "token-nontty-xyz"
+
+	d, err := daemon.NewDaemon(profile, 1*time.Hour, Version)
+	if err != nil {
+		t.Fatalf("failed to create test daemon: %v", err)
+	}
+	d.SetSessionTokenForTest(token)
+	d.SetMasterKeyForTest([]byte("01234567890123456789012345678901"))
+	d.SetSecretsForTest(map[string]store.SecretEntry{
+		"pipeline/token": {Value: "sensitive_plaintext_pat_12345"},
+	})
+	go d.Start()
+	defer d.Stop()
+
+	for i := 0; i < 50; i++ {
+		if _, err := os.Stat(sockPath); err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Case 1: Piped execution without --raw or -r should be blocked
+	getCmd := exec.Command(binPath, "get", "pipeline/token", "--profile", profile)
+	// Explicitly clear SEC_TEST_MODE and SEC_ALLOW_NON_TTY_GET
+	var runEnv []string
+	for _, e := range os.Environ() {
+		if !strings.HasPrefix(e, "SEC_TEST_MODE=") && !strings.HasPrefix(e, "SEC_ALLOW_NON_TTY_GET=") {
+			runEnv = append(runEnv, e)
+		}
+	}
+	runEnv = append(runEnv, "SEC_SESSION_TOKEN="+token)
+	getCmd.Env = runEnv
+
+	out, err := getCmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected non-TTY get without --raw to fail, but it succeeded with output: %s", string(out))
+	}
+	if !strings.Contains(string(out), "NON_TTY_RAW_REQUIRED") && !strings.Contains(string(out), "non-interactive stdout") {
+		t.Errorf("expected error to explain non-interactive stdout safety, got: %s", string(out))
+	}
+
+	// Case 2: Piped execution with --raw should succeed and output secret
+	rawCmd := exec.Command(binPath, "get", "pipeline/token", "--raw", "--profile", profile)
+	rawCmd.Env = runEnv
+	rawOut, rawErr := rawCmd.CombinedOutput()
+	if rawErr != nil {
+		t.Fatalf("expected --raw to succeed, failed with: %v\nOutput: %s", rawErr, rawOut)
+	}
+	if string(rawOut) != "sensitive_plaintext_pat_12345" {
+		t.Errorf("expected 'sensitive_plaintext_pat_12345', got %q", string(rawOut))
 	}
 }

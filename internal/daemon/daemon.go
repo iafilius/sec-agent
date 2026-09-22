@@ -110,6 +110,7 @@ type AuditEventAction string
 const (
 	AuditEventOpen        AuditEventAction = "OPEN"
 	AuditEventGet         AuditEventAction = "GET"
+	AuditEventGetGroup    AuditEventAction = "GET_GROUP"
 	AuditEventSet         AuditEventAction = "SET"
 	AuditEventDelete      AuditEventAction = "DELETE"
 	AuditEventClear       AuditEventAction = "CLEAR"
@@ -119,12 +120,13 @@ const (
 	AuditEventHijack      AuditEventAction = "HIJACK_DENIED"
 	AuditEventConfirmProd AuditEventAction = "CONFIRM_PROD"
 	AuditEventExtend      AuditEventAction = "EXTEND"
+	AuditEventRecover     AuditEventAction = "RECOVER"
 )
 
 // Validate checks whether the AuditEventAction is supported.
 func (a AuditEventAction) Validate() error {
 	switch a {
-	case AuditEventOpen, AuditEventGet, AuditEventSet, AuditEventDelete, AuditEventClear, AuditEventAudit, AuditEventReexec, AuditEventRelabel, AuditEventHijack, AuditEventConfirmProd, AuditEventExtend:
+	case AuditEventOpen, AuditEventGet, AuditEventGetGroup, AuditEventSet, AuditEventDelete, AuditEventClear, AuditEventAudit, AuditEventReexec, AuditEventRelabel, AuditEventHijack, AuditEventConfirmProd, AuditEventExtend, AuditEventRecover:
 		return nil
 	default:
 		return fmt.Errorf("unknown or unsupported audit event action: %q", a)
@@ -400,10 +402,20 @@ func (d *Daemon) processRequest(c net.Conn, req IPCRequest, peerPID int) {
 
 	if req.Action != IPCActionOpen && req.Action != IPCActionPing {
 		if d.sessionToken == "" || d.masterKey == nil {
+			action := AuditEventGet
+			if req.Action == IPCActionGetGroup {
+				action = AuditEventGetGroup
+			}
+			d.logAudit(action, req.Path, peerPID, false, "session_locked")
 			d.sendResponse(c, IPCResponse{Success: false, Error: "Session locked or expired. Please run 'sec open' to authorize."})
 			return
 		}
 		if req.Token != "" && req.Token != d.sessionToken {
+			action := AuditEventGet
+			if req.Action == IPCActionGetGroup {
+				action = AuditEventGetGroup
+			}
+			d.logAudit(action, req.Path, peerPID, false, "invalid_token")
 			d.sendResponse(c, IPCResponse{Success: false, Error: "ACCESS DENIED: Invalid session token"})
 			return
 		}
@@ -548,17 +560,20 @@ func (d *Daemon) processRequest(c net.Conn, req IPCRequest, peerPID int) {
 
 	case IPCActionGet:
 		if d.masterKey == nil {
+			d.logAudit(AuditEventGet, req.Path, peerPID, false, "session_locked")
 			d.sendError(c, "Session locked. Please unlock first.")
 			return
 		}
 		entry, exists := d.resolveSecret(req.Path, req.ExtendsProfile)
 		if !exists {
+			d.logAudit(AuditEventGet, req.Path, peerPID, false, "secret_not_found")
 			d.sendError(c, fmt.Sprintf("secret %q not found", req.Path))
 			return
 		}
 
 		if !entry.Expires.IsZero() && time.Now().After(entry.Expires) {
 			if !req.ShowExpired {
+				d.logAudit(AuditEventGet, req.Path, peerPID, false, "secret_expired")
 				d.sendError(c, "Secret has expired")
 				return
 			}
@@ -849,6 +864,7 @@ func (d *Daemon) processRequest(c net.Conn, req IPCRequest, peerPID int) {
 
 	case IPCActionGetGroup:
 		if d.masterKey == nil {
+			d.logAudit(AuditEventGetGroup, req.Path, peerPID, false, "session_locked")
 			d.sendError(c, "Session locked. Please unlock first.")
 			return
 		}
@@ -870,6 +886,7 @@ func (d *Daemon) processRequest(c net.Conn, req IPCRequest, peerPID int) {
 			}
 		}
 		d.lastUsed = time.Now()
+		d.logAudit(AuditEventGetGroup, req.Path, peerPID, true, "")
 		d.sendResponse(c, IPCResponse{
 			Success: true,
 			Secrets: res,
@@ -1339,6 +1356,49 @@ func (d *Daemon) logAudit(action AuditEventAction, path string, peerPID int, suc
 		SecretVersion:   ver,
 		Success:         success,
 		Error:           errStr,
+	}
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return
+	}
+	// #nosec G304 G703
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err == nil {
+		_, _ = f.Write(append(data, '\n'))
+		_ = f.Close()
+	}
+}
+
+// LogAuditEvent writes a structured audit log entry directly to audit.log for lifecycle events.
+func LogAuditEvent(profile string, action AuditEventAction, path string, peerPID int, success bool, errStr string) {
+	cfgDir, err := config.GetConfigDir()
+	if err != nil {
+		return
+	}
+	logPath := filepath.Join(cfgDir, "audit.log")
+
+	storePath := ""
+	if p, err := store.GetStorePath(profile); err == nil {
+		storePath = p
+	}
+
+	procName := getProcessName(peerPID)
+	prof := profile
+	if prof == "" {
+		prof = "default"
+	}
+
+	entry := AuditLogEntry{
+		Timestamp:     time.Now().Format(time.RFC3339),
+		Action:        action,
+		Profile:       prof,
+		StoreFilePath: storePath,
+		Path:          path,
+		PeerPID:       peerPID,
+		ProcessName:   procName,
+		ClientMode:    "cli",
+		Success:       success,
+		Error:         errStr,
 	}
 	data, err := json.Marshal(entry)
 	if err != nil {

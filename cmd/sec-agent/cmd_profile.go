@@ -19,13 +19,21 @@ import (
 	"secure_secrets/internal/store"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
+	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 )
+
+const recoverySeedWarningBanner = `╔════════════════════════════════════════════════════════════════════════════╗
+║ ⚠️  CRITICAL SECURITY WARNING:                                            ║
+║ NEVER paste this recovery seed phrase into any chat, AI prompt, ticket,    ║
+║ browser window, or shared document. Store it offline or in a vault.        ║
+╚════════════════════════════════════════════════════════════════════════════╝`
 
 func getProfileEnvTier(profile store.ProfileName) config.EnvironmentTier {
 	resp, err := queryDaemonRaw(profile.String(), daemon.IPCRequest{
@@ -351,6 +359,7 @@ func handleProfileNew(args []string) {
 		}
 		mnemonic = m
 		words := strings.Fields(mnemonic)
+		fmt.Println(recoverySeedWarningBanner)
 		fmt.Printf("\n🔑 Your 24-word recovery mnemonic for profile %q (WRITE THIS DOWN NOW):\n", pName.String())
 		for i, w := range words {
 			fmt.Printf("  %2d. %-12s", i+1, w)
@@ -559,10 +568,13 @@ func handleLoad(profile string, args []string) {
 }
 
 type redactWriter struct {
-	target  io.Writer
-	secrets []string
-	buf     []byte
-	maxLen  int
+	target      io.Writer
+	secrets     []string
+	buf         []byte
+	maxLen      int
+	mu          sync.Mutex
+	flushTimer  *time.Timer
+	idleTimeout time.Duration
 }
 
 func newRedactWriter(target io.Writer, secrets []string) *redactWriter {
@@ -578,9 +590,10 @@ func newRedactWriter(target io.Writer, secrets []string) *redactWriter {
 		}
 	}
 	return &redactWriter{
-		target:  target,
-		secrets: validSecrets,
-		maxLen:  max,
+		target:      target,
+		secrets:     validSecrets,
+		maxLen:      max,
+		idleTimeout: 25 * time.Millisecond,
 	}
 }
 
@@ -589,29 +602,61 @@ func (w *redactWriter) Write(p []byte) (n int, err error) {
 		return w.target.Write(p)
 	}
 
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.flushTimer != nil {
+		w.flushTimer.Stop()
+		w.flushTimer = nil
+	}
+
 	w.buf = append(w.buf, p...)
 	out := string(w.buf)
 	for _, sec := range w.secrets {
 		out = strings.ReplaceAll(out, sec, "[REDACTED_BY_SEC]")
 	}
 
-	margin := w.maxLen - 1
-	if margin < 0 {
-		margin = 0
-	}
-	if len(out) <= margin {
-		w.buf = []byte(out)
-		return len(p), nil
+	L := longestSecretPrefixSuffix(out, w.secrets, w.maxLen)
+	if L == 0 {
+		w.buf = nil
+		_, err = w.target.Write([]byte(out))
+		return len(p), err
 	}
 
-	safeLen := len(out) - margin
+	safeLen := len(out) - L
 	toFlush := out[:safeLen]
 	w.buf = []byte(out[safeLen:])
-	_, err = w.target.Write([]byte(toFlush))
-	return len(p), err
+	if len(toFlush) > 0 {
+		if _, err = w.target.Write([]byte(toFlush)); err != nil {
+			return len(p), err
+		}
+	}
+
+	w.flushTimer = time.AfterFunc(w.idleTimeout, func() {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		if len(w.buf) > 0 {
+			toWrite := string(w.buf)
+			for _, sec := range w.secrets {
+				toWrite = strings.ReplaceAll(toWrite, sec, "[REDACTED_BY_SEC]")
+			}
+			w.buf = nil
+			_, _ = w.target.Write([]byte(toWrite))
+		}
+	})
+
+	return len(p), nil
 }
 
 func (w *redactWriter) Flush() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.flushTimer != nil {
+		w.flushTimer.Stop()
+		w.flushTimer = nil
+	}
+
 	if len(w.buf) == 0 {
 		return nil
 	}
@@ -622,6 +667,22 @@ func (w *redactWriter) Flush() error {
 	w.buf = nil
 	_, err := w.target.Write([]byte(out))
 	return err
+}
+
+func longestSecretPrefixSuffix(text string, secrets []string, maxLen int) int {
+	maxCheck := maxLen - 1
+	if len(text) < maxCheck {
+		maxCheck = len(text)
+	}
+	for l := maxCheck; l >= 1; l-- {
+		suffix := text[len(text)-l:]
+		for _, sec := range secrets {
+			if strings.HasPrefix(sec, suffix) {
+				return l
+			}
+		}
+	}
+	return 0
 }
 
 func setupEphemeralSSHAgent(profile, keyPath, passphraseVaultKey string) (socketPath string, cleanup func(), err error) {
@@ -943,8 +1004,22 @@ func handleRun(profile string, args []string) {
 	}
 	subProcess.Stdin = os.Stdin
 
+	isTerm := term.IsTerminal(int(os.Stdin.Fd()))
+	var origPgid int
+	if isTerm {
+		origPgid, _ = unix.IoctlGetInt(int(os.Stdin.Fd()), unix.TIOCGPGRP)
+		signal.Ignore(syscall.SIGTTOU, syscall.SIGTTIN)
+		defer func() {
+			if origPgid > 0 {
+				_ = unix.IoctlSetPointerInt(int(os.Stdin.Fd()), unix.TIOCSPGRP, origPgid)
+			}
+			signal.Reset(syscall.SIGTTOU, syscall.SIGTTIN)
+		}()
+	}
+
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	defer signal.Stop(sigChan)
 	go func() {
 		for sig := range sigChan {
 			if subProcess.Process != nil && subProcess.Process.Pid > 0 {
@@ -958,7 +1033,20 @@ func handleRun(profile string, args []string) {
 		}
 	}()
 
-	runErr := subProcess.Run()
+	startErr := subProcess.Start()
+	if startErr != nil {
+		fail("SUBPROCESS_EXEC_FAILED", fmt.Errorf("failed executing command %q: %v", targetCmd, startErr), "")
+	}
+
+	if isTerm && subProcess.Process != nil && subProcess.Process.Pid > 0 {
+		_ = unix.IoctlSetPointerInt(int(os.Stdin.Fd()), unix.TIOCSPGRP, subProcess.Process.Pid)
+	}
+
+	runErr := subProcess.Wait()
+	if isTerm && origPgid > 0 {
+		_ = unix.IoctlSetPointerInt(int(os.Stdin.Fd()), unix.TIOCSPGRP, origPgid)
+	}
+
 	if stdoutRedact != nil {
 		_ = stdoutRedact.Flush()
 	}

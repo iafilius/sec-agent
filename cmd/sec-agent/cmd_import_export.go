@@ -493,7 +493,8 @@ func handleMigrateV2(profile string, args []string) {
 	}
 
 	words := strings.Fields(mnemonic)
-	fmt.Println("🔑 Your 24-word recovery mnemonic (WRITE THIS DOWN NOW):")
+	fmt.Println(recoverySeedWarningBanner)
+	fmt.Println("\n🔑 Your 24-word recovery mnemonic (WRITE THIS DOWN NOW):")
 	for i, w := range words {
 		fmt.Printf("  %2d. %-12s", i+1, w)
 		if (i+1)%4 == 0 {
@@ -662,6 +663,7 @@ func handleSessionRecover(profile string) {
 	fmt.Println("\n⏳ Deriving recovery key (Argon2id, ~5 seconds)...")
 	masterKey, err := store.UnwrapMasterKey(mnemonic, env.Slot1)
 	if err != nil {
+		daemon.LogAuditEvent(profile, daemon.AuditEventRecover, "", os.Getpid(), false, "invalid_recovery_mnemonic")
 		fmt.Fprintf(os.Stderr, "\n❌ Recovery failed: %v\n", err)
 		fmt.Fprintln(os.Stderr, "   Double-check each word carefully — BIP39 words are case-sensitive (all lowercase).")
 		os.Exit(1)
@@ -672,6 +674,7 @@ func handleSessionRecover(profile string) {
 	fmt.Println("✅ Mnemonic verified. Testing vault decryption...")
 	_, decErr := store.LoadStore(profile, masterKey)
 	if decErr != nil {
+		daemon.LogAuditEvent(profile, daemon.AuditEventRecover, "", os.Getpid(), false, "payload_decryption_failed")
 		fmt.Fprintf(os.Stderr, "❌ Vault decryption test failed: %v\n", decErr)
 		fmt.Fprintln(os.Stderr, "   The mnemonic decrypted correctly but the vault payload could not be read.")
 		fmt.Fprintln(os.Stderr, "   The vault file may be corrupted. Restore from a backup: 'sec restore <file.kdbx>'")
@@ -686,12 +689,14 @@ func handleSessionRecover(profile string) {
 	kcAcc := "master"
 	fmt.Println("🔑 Re-enrolling master key in macOS Keychain (Touch ID required)...")
 	if err := keychain.Set(kcSvc, kcAcc, masterKey); err != nil {
+		daemon.LogAuditEvent(profile, daemon.AuditEventRecover, "", os.Getpid(), false, fmt.Sprintf("keychain_enroll_failed: %v", err))
 		fmt.Fprintf(os.Stderr, "❌ Failed to re-enroll in Keychain: %v\n", err)
 		os.Exit(1)
 	}
 
 	// Evict any stale background daemon for this profile to ensure fresh RAM cache on next open
 	evictStaleDaemon(profile)
+	daemon.LogAuditEvent(profile, daemon.AuditEventRecover, "", os.Getpid(), true, "")
 
 	fmt.Println()
 	fmt.Println("╔═══════════════════════════════════════════════════════════════╗")

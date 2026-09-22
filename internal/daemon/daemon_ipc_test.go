@@ -65,6 +65,56 @@ func TestLogAudit_HijackDenialRecordsReason(t *testing.T) {
 	}
 }
 
+// TestLogAudit_AccessDenialsAndLifecycle verifies that locked sessions, invalid tokens,
+// and recovery events write properly structured audit log entries.
+func TestLogAudit_AccessDenialsAndLifecycle(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("SEC_CONFIG_DIR", tmpDir)
+
+	d := &Daemon{profile: "denial-audit-test"}
+
+	// 1. Session locked on get
+	d.logAudit(AuditEventGet, "my/secret", 1234, false, "session_locked")
+
+	// 2. Invalid token on get_group
+	d.logAudit(AuditEventGetGroup, "api/", 1234, false, "invalid_token")
+
+	// 3. Vault recovery via LogAuditEvent
+	LogAuditEvent("denial-audit-test", AuditEventRecover, "", 5678, true, "")
+
+	data, err := os.ReadFile(filepath.Join(tmpDir, "audit.log"))
+	if err != nil {
+		t.Fatalf("expected audit.log to be written, got error: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("expected 3 audit log lines, got %d", len(lines))
+	}
+
+	var entry1, entry2, entry3 AuditLogEntry
+	if err := json.Unmarshal([]byte(lines[0]), &entry1); err != nil {
+		t.Fatalf("failed parsing entry 1: %v", err)
+	}
+	if entry1.Action != AuditEventGet || entry1.Success || entry1.Error != "session_locked" {
+		t.Errorf("unexpected entry 1: %+v", entry1)
+	}
+
+	if err := json.Unmarshal([]byte(lines[1]), &entry2); err != nil {
+		t.Fatalf("failed parsing entry 2: %v", err)
+	}
+	if entry2.Action != AuditEventGetGroup || entry2.Success || entry2.Error != "invalid_token" {
+		t.Errorf("unexpected entry 2: %+v", entry2)
+	}
+
+	if err := json.Unmarshal([]byte(lines[2]), &entry3); err != nil {
+		t.Fatalf("failed parsing entry 3: %v", err)
+	}
+	if entry3.Action != AuditEventRecover || !entry3.Success || entry3.ClientMode != "cli" {
+		t.Errorf("unexpected entry 3: %+v", entry3)
+	}
+}
+
 // TestDaemonProductionConfirmation verifies IPCActionConfirmProd transitions
 // the session state and persists ProductionConfirmed across ping and status,
 // and resets on wipeMemory.

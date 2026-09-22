@@ -3,6 +3,8 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -177,8 +179,7 @@ This workspace integrates with ` + "`sec-agent`" + ` for zero-plaintext secret m
 
 ## Core Rules for AI Assistants
 1. **Zero Plaintext Exposure**: Never print, log, or commit secret values to files, history, or chat output.
-2. **Conditional Pre-flight**: If ` + "`.secrc`" + ` exists in this repository or the task requires credentials, run ` + "`sec status --quick`" + ` (<5ms) to verify daemon session state. If locked and secrets are required, prompt the user:
-   > 🔑 ` + "`sec-agent`" + ` session is locked. Run ` + "`eval $(sec open)`" + ` or approve Touch ID to retain session access.
+2. **Conditional Pre-flight**: If ` + "`.secrc`" + ` exists in this repository or the task requires credentials, run ` + "`sec status --quick`" + ` (<5ms) to verify daemon session state. If locked and secrets are required, execute ` + "`sec open`" + ` or the target command directly in your tool terminal. macOS natively displays the system Touch ID biometric window on the operator's physical display for fingerprint confirmation with zero credentials exposed in chat channels.
 3. **Long-Running & Unattended Task Longevity**: Before launching long-running or autonomous jobs (e.g. ` + "`/goal`" + `, batch builds, migrations), verify session TTL via ` + "`sec status`" + `. Proactively run ` + "`sec extend --ttl <duration>`" + ` (e.g. ` + "`24h`" + `) without Touch ID or request extended unlock at Turn 1 to prevent unattended mid-job timeouts.
 4. **Isolated Process Execution**: Run pipelines and scripts using ` + "`sec run -- <cmd>`" + ` to inject secrets directly into memory without touching disk or shell history.
 
@@ -187,7 +188,7 @@ This workspace integrates with ` + "`sec-agent`" + ` for zero-plaintext secret m
 | :--- | :--- |
 | ` + "`sec status --quick`" + ` | Ultra-fast check (<5ms) of daemon session state |
 | ` + "`sec run -- <cmd>`" + ` | Execute command with secrets injected into process memory |
-| ` + "`sec open`" + ` | Unlock vault session via Touch ID (single auth covers full session) |
+| ` + "`sec open`" + ` | Unlock vault session via macOS native Touch ID popup (single auth covers full session) |
 | ` + "`sec extend [--ttl <dur>]`" + ` | Extend active session lifetime without Touch ID |
 | ` + "`sec get <key>`" + ` | Retrieve secret - always prints the real value to stdout, in any context. Prefer ` + "`sec run`" + ` for scripts/agents; reserve ` + "`get`" + ` for deliberate human/` + "`--raw`" + ` use |
 | ` + "`sec set <key>`" + ` | Store secret via secure hidden terminal prompt |
@@ -223,6 +224,9 @@ func writeSkillToFile(target, targetPath string) error {
 }
 
 func handleSkillInstallTarget(target, scope string) bool {
+	if target == "copilot" || target == "windsurf" {
+		scope = "workspace"
+	}
 	targetPath, err := resolveSkillPath(target, scope)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Skill error: %v\n", err)
@@ -613,14 +617,23 @@ func handleSkill(profile string, args []string) {
 				}
 			}
 			status := "[✓] Up to date"
+			diskHashStr := ""
+			// #nosec G304 G703
+			if data, err := os.ReadFile(targetPath); err == nil {
+				h := sha256.Sum256(data)
+				diskHashStr = hex.EncodeToString(h[:4])
+			}
+
 			if _, statErr := os.Stat(targetPath); statErr != nil {
 				status = "[✗] Missing on disk"
 			} else if !isSkillContentIdentical(s.Target, targetPath) {
 				if s.Version != "" && s.Version != Version {
-					status = fmt.Sprintf("[!] Outdated (installed %s)", s.Version)
+					status = fmt.Sprintf("[!] Outdated (installed %s, sha256:%s)", s.Version, diskHashStr)
 				} else {
-					status = "[!] Modified / Outdated"
+					status = fmt.Sprintf("[!] Modified / Outdated (sha256:%s)", diskHashStr)
 				}
+			} else {
+				status = fmt.Sprintf("[✓] Up to date (sha256:%s)", diskHashStr)
 			}
 			fmt.Printf("  • %-15s (%-9s) %s\n", s.Target, s.Scope, status)
 			fmt.Printf("    Path: %s\n", targetPath)
