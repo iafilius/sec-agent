@@ -253,13 +253,13 @@ func initRegistry() {
 			Name:        "profile",
 			Category:    "Profiles & Scope",
 			Description: "Inspect or configure secret profiles & environment tier",
-			Usage:       "sec profile [new <name> [--seed <mnemonic>] [--secrc | --no-secrc]] [ls] [set-env dev|dta|staging|prod]",
-			Flags:       []string{"--seed", "--secrc", "--no-secrc"},
+			Usage:       "sec profile [new <name> [--seed <mnemonic>] [--reuse-seed | --existing-seed] [--secrc | --no-secrc]] [ls] [set-env dev|dta|staging|prod]",
+			Flags:       []string{"--seed", "--reuse-seed", "--existing-seed", "--secrc", "--no-secrc"},
 			Subcommands: []SubcommandSpec{
 				{
 					Name:        "new",
 					Description: "Create a new named profile with Dual-Slot Touch ID and BIP39 recovery seed",
-					Flags:       []string{"--seed", "--secrc", "--no-secrc"},
+					Flags:       []string{"--seed", "--reuse-seed", "--existing-seed", "--secrc", "--no-secrc"},
 				},
 				{
 					Name:        "ls",

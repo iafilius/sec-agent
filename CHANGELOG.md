@@ -5,6 +5,23 @@ All notable changes to `sec-agent` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v2.14.2] - 2026-09-24
+
+### Added & Enhanced
+- **Upfront Recovery Seed Choice in Profile Provisioning**:
+  - `sec profile new <name>` now presents an upfront interactive prompt before generating any mnemonics, allowing operators to choose between generating a fresh 24-word seed phrase or directly linking an existing master recovery seed.
+  - Linking an existing seed avoids printing throwaway mnemonics and security warnings to the screen.
+- **Direct Seed Linking Flags (`--reuse-seed` / `--existing-seed`)**:
+  - Added `--reuse-seed` and `--existing-seed` flags to `sec profile new` to bypass the selection menu and prompt directly for an existing 24-word master recovery seed phrase.
+- **Command Registry & Shell Autocompletion Sync**:
+  - Registered `--reuse-seed` and `--existing-seed` in `CommandRegistry` usage and flags with 100% bidirectional parity across Zsh, Bash, and Fish completion generators.
+- **Comprehensive Unit Tests**:
+  - Added unit test scenarios covering upfront choice selection, `--reuse-seed` / `--existing-seed` flag handling, word verification fallback switching (`r`), and non-interactive barriers.
+- **Documentation & AI Skills Sync**:
+  - Updated embedded skill (`cmd/sec-agent/SKILL.md`), external skill (`docs/skills/sec-agent-integration/SKILL.md`), and `README.md` with upfront recovery seed linking guidelines and cryptographic independence notes.
+
+---
+
 ## [v2.14.1] - 2026-09-22
 
 ### Added & Enhanced

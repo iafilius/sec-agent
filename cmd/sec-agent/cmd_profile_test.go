@@ -734,6 +734,213 @@ func TestProfileNewSensitiveDirectoryWarning(t *testing.T) {
 	}
 }
 
+func TestProfileNewUpfrontChoiceLinkExisting(t *testing.T) {
+	tmpDir := t.TempDir()
+	binPath := filepath.Join(tmpDir, "sec_profile_choice_test")
+	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build test binary: %v, output: %s", err, string(out))
+	}
+
+	mnemonic, err := crypto.GenerateMnemonic()
+	if err != nil {
+		t.Fatalf("failed to generate mnemonic: %v", err)
+	}
+
+	// Stdin: choose "2", then provide mnemonic
+	cmd := exec.Command(binPath, "profile", "new", "reusedprof", "--no-secrc")
+	cmd.Env = append(os.Environ(),
+		"SEC_CONFIG_DIR="+tmpDir,
+		"SEC_TEST_MODE=1",
+	)
+	cmd.Stdin = strings.NewReader("2\n" + mnemonic + "\n")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("profile new with choice 2 failed: %v, output:\n%s", err, string(out))
+	}
+
+	outStr := string(out)
+	if !strings.Contains(outStr, `Profile "reusedprof" recovery seed setup:`) {
+		t.Errorf("expected output to contain upfront menu prompt, got:\n%s", outStr)
+	}
+	if !strings.Contains(outStr, "[1] Generate a new 24-word recovery seed (Default)") {
+		t.Errorf("expected option [1] in output, got:\n%s", outStr)
+	}
+	if !strings.Contains(outStr, "[2] Link an existing 24-word master recovery seed phrase") {
+		t.Errorf("expected option [2] in output, got:\n%s", outStr)
+	}
+	if !strings.Contains(outStr, "Existing recovery seed phrase verified and linked.") {
+		t.Errorf("expected seed phrase verified and linked notice, got:\n%s", outStr)
+	}
+	if strings.Contains(outStr, "WRITE THIS DOWN NOW") {
+		t.Errorf("expected throwaway mnemonic generation banner NOT to be printed, got:\n%s", outStr)
+	}
+
+	// Verify vault envelope and Slot 1 decryptability
+	vaultPath := filepath.Join(tmpDir, "secrets_reusedprof.enc")
+	env, err := store.ReadVaultEnvelope(vaultPath)
+	if err != nil {
+		t.Fatalf("failed to read vault envelope: %v", err)
+	}
+	if !env.HasSlot1() || env.Slot1 == nil {
+		t.Fatalf("expected vault to have Slot 1 enrolled")
+	}
+	recoveredKey, err := store.UnwrapMasterKey(mnemonic, env.Slot1)
+	if err != nil {
+		t.Fatalf("failed to unwrap master key using linked seed: %v", err)
+	}
+	if len(recoveredKey) != 32 {
+		t.Fatalf("expected 32-byte master key, got %d bytes", len(recoveredKey))
+	}
+}
+
+func TestProfileNewReuseSeedFlag(t *testing.T) {
+	tmpDir := t.TempDir()
+	binPath := filepath.Join(tmpDir, "sec_profile_reuse_flag_test")
+	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build test binary: %v, output: %s", err, string(out))
+	}
+
+	mnemonic, err := crypto.GenerateMnemonic()
+	if err != nil {
+		t.Fatalf("failed to generate mnemonic: %v", err)
+	}
+
+	// Test --reuse-seed
+	cmd := exec.Command(binPath, "profile", "new", "flagprof", "--reuse-seed", "--no-secrc")
+	cmd.Env = append(os.Environ(),
+		"SEC_CONFIG_DIR="+tmpDir,
+		"SEC_TEST_MODE=1",
+	)
+	cmd.Stdin = strings.NewReader(mnemonic + "\n")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("profile new with --reuse-seed failed: %v, output:\n%s", err, string(out))
+	}
+
+	outStr := string(out)
+	// Upfront menu prompt should be skipped
+	if strings.Contains(outStr, "Enter choice [1/2]") {
+		t.Errorf("expected upfront menu to be skipped with --reuse-seed flag, got:\n%s", outStr)
+	}
+	if !strings.Contains(outStr, "Enter your existing 24-word recovery seed phrase:") {
+		t.Errorf("expected direct seed prompt, got:\n%s", outStr)
+	}
+	if !strings.Contains(outStr, "Existing recovery seed phrase verified and linked.") {
+		t.Errorf("expected seed phrase verified and linked notice, got:\n%s", outStr)
+	}
+
+	// Test --existing-seed alias
+	cmd2 := exec.Command(binPath, "profile", "new", "aliasprof", "--existing-seed", "--no-secrc")
+	cmd2.Env = append(os.Environ(),
+		"SEC_CONFIG_DIR="+tmpDir,
+		"SEC_TEST_MODE=1",
+	)
+	cmd2.Stdin = strings.NewReader(mnemonic + "\n")
+	out2, err2 := cmd2.CombinedOutput()
+	if err2 != nil {
+		t.Fatalf("profile new with --existing-seed failed: %v, output:\n%s", err2, string(out2))
+	}
+	if !strings.Contains(string(out2), "Existing recovery seed phrase verified and linked.") {
+		t.Errorf("expected --existing-seed to link seed, got:\n%s", string(out2))
+	}
+}
+
+func TestProfileNewFallbackDuringVerification(t *testing.T) {
+	tmpDir := t.TempDir()
+	binPath := filepath.Join(tmpDir, "sec_profile_fallback_test")
+	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build test binary: %v, output: %s", err, string(out))
+	}
+
+	mnemonic, err := crypto.GenerateMnemonic()
+	if err != nil {
+		t.Fatalf("failed to generate mnemonic: %v", err)
+	}
+
+	// Select option 1 (generate new), then at Word #4 prompt enter 'r' to fallback to existing seed
+	cmd := exec.Command(binPath, "profile", "new", "fallbackprof", "--no-secrc")
+	cmd.Env = append(os.Environ(),
+		"SEC_CONFIG_DIR="+tmpDir,
+		"SEC_TEST_MODE=1",
+	)
+	cmd.Stdin = strings.NewReader("1\nr\n" + mnemonic + "\n")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("profile new with fallback failed: %v, output:\n%s", err, string(out))
+	}
+
+	outStr := string(out)
+	if !strings.Contains(outStr, "WRITE THIS DOWN NOW") {
+		t.Errorf("expected generated word grid for choice 1, got:\n%s", outStr)
+	}
+	if !strings.Contains(outStr, "Word #4:") {
+		t.Errorf("expected Word #4 verification prompt, got:\n%s", outStr)
+	}
+	if !strings.Contains(outStr, "Existing recovery seed phrase verified and linked.") {
+		t.Errorf("expected fallback seed phrase verified and linked notice, got:\n%s", outStr)
+	}
+}
+
+func TestProfileNewInvalidChoiceAndInvalidSeed(t *testing.T) {
+	tmpDir := t.TempDir()
+	binPath := filepath.Join(tmpDir, "sec_profile_invalid_test")
+	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build test binary: %v, output: %s", err, string(out))
+	}
+
+	// 1. Invalid choice '3'
+	cmd := exec.Command(binPath, "profile", "new", "badchoiceprof", "--no-secrc")
+	cmd.Env = append(os.Environ(),
+		"SEC_CONFIG_DIR="+tmpDir,
+		"SEC_TEST_MODE=1",
+	)
+	cmd.Stdin = strings.NewReader("3\n")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected profile new with choice 3 to fail, but succeeded with output:\n%s", string(out))
+	}
+	if !strings.Contains(string(out), "invalid choice") {
+		t.Errorf("expected error about invalid choice, got:\n%s", string(out))
+	}
+
+	// 2. Choice 2 with invalid mnemonic
+	cmd2 := exec.Command(binPath, "profile", "new", "badseedprof", "--no-secrc")
+	cmd2.Env = append(os.Environ(),
+		"SEC_CONFIG_DIR="+tmpDir,
+		"SEC_TEST_MODE=1",
+	)
+	cmd2.Stdin = strings.NewReader("2\nnot a valid twenty four word recovery phrase\n")
+	out2, err2 := cmd2.CombinedOutput()
+	if err2 == nil {
+		t.Fatalf("expected profile new with bad seed to fail, but succeeded with output:\n%s", string(out2))
+	}
+	if !strings.Contains(string(out2), "not a valid 24-word BIP39 mnemonic") {
+		t.Errorf("expected error about invalid BIP39 mnemonic, got:\n%s", string(out2))
+	}
+
+	// 3. Non-interactive with --reuse-seed should exit 78
+	cmd3 := exec.Command(binPath, "profile", "new", "blockedprof", "--reuse-seed")
+	cmd3.Env = append(os.Environ(),
+		"SEC_CONFIG_DIR="+tmpDir,
+		"NONINTERACTIVE=1",
+	)
+	out3, err3 := cmd3.CombinedOutput()
+	if err3 == nil {
+		t.Fatalf("expected non-interactive profile new --reuse-seed to fail, but succeeded")
+	}
+	exitErr, ok := err3.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 78 {
+		t.Errorf("expected exit code 78, got: %v (exit code: %d)", err3, exitErr.ExitCode())
+	}
+	if !strings.Contains(string(out3), "sec-agent profile new blockedprof --reuse-seed") {
+		t.Errorf("expected blocker box to recommend command with --reuse-seed, got:\n%s", string(out3))
+	}
+}
+
 
 
 

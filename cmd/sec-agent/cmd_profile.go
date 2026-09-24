@@ -298,11 +298,12 @@ func handleProfileNew(args []string) {
 	seedInput := ""
 	autoSecrc := false
 	noSecrc := false
+	reuseSeed := false
 
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if a == "--help" || a == "-h" || a == "help" {
-			fmt.Println("Usage: sec profile new <name> [--seed <mnemonic>] [--secrc|--no-secrc]")
+			fmt.Println("Usage: sec profile new <name> [--seed <mnemonic>] [--reuse-seed|--existing-seed] [--secrc|--no-secrc]")
 			fmt.Println("\nCreate a new named profile with Dual-Slot Touch ID (Slot 0) and BIP39 recovery seed (Slot 1).")
 			return
 		}
@@ -311,6 +312,8 @@ func handleProfileNew(args []string) {
 			i++
 		} else if strings.HasPrefix(a, "--seed=") {
 			seedInput = strings.Trim(strings.TrimPrefix(a, "--seed="), `"'`)
+		} else if a == "--reuse-seed" || a == "--existing-seed" {
+			reuseSeed = true
 		} else if a == "--secrc" {
 			autoSecrc = true
 		} else if a == "--no-secrc" {
@@ -321,7 +324,7 @@ func handleProfileNew(args []string) {
 	}
 
 	if name == "" {
-		fmt.Fprintln(os.Stderr, "Usage: sec profile new <name> [--seed <mnemonic>] [--secrc|--no-secrc]")
+		fmt.Fprintln(os.Stderr, "Usage: sec profile new <name> [--seed <mnemonic>] [--reuse-seed|--existing-seed] [--secrc|--no-secrc]")
 		os.Exit(1)
 	}
 
@@ -339,8 +342,12 @@ func handleProfileNew(args []string) {
 		fail("PROFILE_EXISTS", fmt.Errorf("profile %q already exists at %s", pName.String(), vaultPath), "Use 'sec open --profile "+pName.String()+"' to unlock this profile.")
 	}
 
-	if !isInteractiveTerminal() && seedInput == "" {
-		printInteractiveBlocker("sec-agent profile new "+pName.String(), "Profile creation enrolls Touch ID and a 24-word recovery seed")
+	if !isInteractiveTerminal() && seedInput == "" && os.Getenv("SEC_TEST_MODE") != "1" {
+		cmdStr := "sec-agent profile new " + pName.String()
+		if reuseSeed {
+			cmdStr += " --reuse-seed"
+		}
+		printInteractiveBlocker(cmdStr, "Profile creation enrolls Touch ID and a 24-word recovery seed")
 		os.Exit(78)
 	}
 
@@ -353,49 +360,79 @@ func handleProfileNew(args []string) {
 
 	mnemonic := seedInput
 	if mnemonic == "" {
-		m, err := crypto.GenerateMnemonic()
-		if err != nil {
-			fail("CRYPTO_ERROR", fmt.Errorf("failed to generate recovery mnemonic: %w", err), "")
-		}
-		mnemonic = m
-		words := strings.Fields(mnemonic)
-		fmt.Println(recoverySeedWarningBanner)
-		fmt.Printf("\n🔑 Your 24-word recovery mnemonic for profile %q (WRITE THIS DOWN NOW):\n", pName.String())
-		for i, w := range words {
-			fmt.Printf("  %2d. %-12s", i+1, w)
-			if (i+1)%4 == 0 {
-				fmt.Println()
+		reader := bufio.NewReader(os.Stdin)
+		choice := "1"
+
+		if reuseSeed {
+			choice = "2"
+		} else {
+			fmt.Printf("? Profile %q recovery seed setup:\n", pName.String())
+			fmt.Println("  [1] Generate a new 24-word recovery seed (Default)")
+			fmt.Println("  [2] Link an existing 24-word master recovery seed phrase")
+			fmt.Print("\nEnter choice [1/2] (press Enter for default): ")
+			input, _ := reader.ReadString('\n')
+			input = strings.TrimSpace(strings.ToLower(input))
+			if input != "" {
+				choice = input
 			}
 		}
-		fmt.Println()
 
-		fmt.Println("📋 Raw Mnemonic (triple-click to copy into password manager):")
-		fmt.Printf("   %s\n\n", mnemonic)
-
-		fmt.Println("To confirm you have saved the mnemonic, enter verification words (or enter 'r' to reuse an existing seed phrase instead):")
-		verificationWords := []int{4, 12, 20}
-		for _, pos := range verificationWords {
-			fmt.Printf("  Word #%d: ", pos)
-			reader := bufio.NewReader(os.Stdin)
-			entered, _ := reader.ReadString('\n')
-			entered = strings.TrimSpace(strings.ToLower(entered))
-			if entered == "r" || entered == "reuse" {
-				fmt.Print("Enter your existing 24-word recovery seed phrase: ")
-				existingSeed, _ := reader.ReadString('\n')
-				existingSeed = strings.Trim(strings.TrimSpace(existingSeed), `"'`)
-				if !crypto.MnemonicValid(existingSeed) {
-					fmt.Fprintln(os.Stderr, "\n❌ Provided seed phrase is not a valid 24-word BIP39 mnemonic. Aborting.")
-					os.Exit(1)
-				}
-				mnemonic = existingSeed
-				fmt.Println("✅ Existing recovery seed phrase verified and linked.")
-				break
-			}
-			expected := strings.ToLower(words[pos-1])
-			if entered != expected {
-				fmt.Fprintf(os.Stderr, "\n❌ Word #%d mismatch (expected %q, got %q). Aborting.\n", pos, expected, entered)
+		if choice == "2" || choice == "r" || choice == "reuse" || choice == "existing" || choice == "link" {
+			fmt.Print("Enter your existing 24-word recovery seed phrase: ")
+			existingSeed, _ := reader.ReadString('\n')
+			existingSeed = strings.Trim(strings.TrimSpace(existingSeed), `"'`)
+			if !crypto.MnemonicValid(existingSeed) {
+				fmt.Fprintln(os.Stderr, "\n❌ Provided seed phrase is not a valid 24-word BIP39 mnemonic. Aborting.")
 				os.Exit(1)
 			}
+			mnemonic = existingSeed
+			fmt.Println("✅ Existing recovery seed phrase verified and linked.")
+		} else if choice == "1" {
+			m, err := crypto.GenerateMnemonic()
+			if err != nil {
+				fail("CRYPTO_ERROR", fmt.Errorf("failed to generate recovery mnemonic: %w", err), "")
+			}
+			mnemonic = m
+			words := strings.Fields(mnemonic)
+			fmt.Println(recoverySeedWarningBanner)
+			fmt.Printf("\n🔑 Your 24-word recovery mnemonic for profile %q (WRITE THIS DOWN NOW):\n", pName.String())
+			for i, w := range words {
+				fmt.Printf("  %2d. %-12s", i+1, w)
+				if (i+1)%4 == 0 {
+					fmt.Println()
+				}
+			}
+			fmt.Println()
+
+			fmt.Println("📋 Raw Mnemonic (triple-click to copy into password manager):")
+			fmt.Printf("   %s\n\n", mnemonic)
+
+			fmt.Println("To confirm you have saved the mnemonic, enter verification words (or enter 'r' to reuse an existing seed phrase instead):")
+			verificationWords := []int{4, 12, 20}
+			for _, pos := range verificationWords {
+				fmt.Printf("  Word #%d: ", pos)
+				entered, _ := reader.ReadString('\n')
+				entered = strings.TrimSpace(strings.ToLower(entered))
+				if entered == "r" || entered == "reuse" {
+					fmt.Print("Enter your existing 24-word recovery seed phrase: ")
+					existingSeed, _ := reader.ReadString('\n')
+					existingSeed = strings.Trim(strings.TrimSpace(existingSeed), `"'`)
+					if !crypto.MnemonicValid(existingSeed) {
+						fmt.Fprintln(os.Stderr, "\n❌ Provided seed phrase is not a valid 24-word BIP39 mnemonic. Aborting.")
+						os.Exit(1)
+					}
+					mnemonic = existingSeed
+					fmt.Println("✅ Existing recovery seed phrase verified and linked.")
+					break
+				}
+				expected := strings.ToLower(words[pos-1])
+				if entered != expected {
+					fmt.Fprintf(os.Stderr, "\n❌ Word #%d mismatch (expected %q, got %q). Aborting.\n", pos, expected, entered)
+					os.Exit(1)
+				}
+			}
+		} else {
+			fail("INVALID_CHOICE", fmt.Errorf("invalid choice %q: must be 1 or 2", choice), "Select 1 to generate a new seed or 2 to link an existing seed.")
 		}
 	} else {
 		if !crypto.MnemonicValid(mnemonic) {

@@ -90,8 +90,11 @@ When `sec-agent` is updated on the workstation (e.g. via Homebrew or source rebu
 ### 1.5. Guided Profile Onboarding Wizard (`sec profile new <name>`)
 Creating a new isolated profile previously required multiple steps (`init`, `set`, and `migrate-v2`). Now you can provision a complete Dual-Slot vault in a single guided step:
 ```bash
-# Interactively generate Touch ID (Slot 0) + 24-word recovery seed (Slot 1) and bind workspace .secrc
+# Interactively choose between generating a new seed or linking an existing master recovery seed
 sec profile new <profile-name>
+
+# Directly link an existing 24-word master recovery seed phrase (skips menu and throwaway seed generation)
+sec profile new <profile-name> --reuse-seed   # alias: --existing-seed
 
 # Non-interactive / pre-supplied recovery seed
 sec profile new <profile-name> --seed "<24-word mnemonic>" [--secrc | --no-secrc]
@@ -99,9 +102,14 @@ sec profile new <profile-name> --seed "<24-word mnemonic>" [--secrc | --no-secrc
 # Inspect all discovered profile vaults and their schema health
 sec profile ls (alias: sec profile list)
 ```
+* **Upfront Recovery Seed Choice**: When invoked interactively without `--seed`, `sec profile new` offers a clear choice before generating anything:
+  * `[1] Generate a new 24-word recovery seed (Default)`: Generates a new 24-word mnemonic, displays the security warning and word grid, and verifies words #4, #12, and #20.
+  * `[2] Link an existing 24-word master recovery seed phrase`: Prompts directly for your existing 24-word seed without generating or printing any throwaway mnemonic, ensuring zero confusion.
+* **Direct Linking Flag (`--reuse-seed` / `--existing-seed`)**: Pass `--reuse-seed` to skip the menu and immediately prompt for your existing master recovery seed phrase.
+* **Word Verification Fallback**: If you selected Option 1 to generate a new seed, entering `r` or `reuse` during word verification still allows switching to link an existing seed phrase instead.
+* **Cryptographic Independence**: Reusing the same master 24-word recovery seed across profiles is 100% secure. Each profile envelope retains an independent 32-byte master key and a unique random Argon2id salt.
 * Automatically validates profile name invariants (rejecting slashes, spaces, and path traversals).
 * Outputs both a 4-column reading table and a raw single-line space-separated mnemonic string for 1-click password manager copying.
-* Interactively verifies recovery seed words 4, 12, and 20, or accepts `r` at verification prompt to supply and link an existing 24-word seed phrase.
 * Automatically offers to generate a workspace `.secrc` (`{"profile": "<name>"}`) binding the active directory to the new vault, echoing the resolved path and warning if outside a git repository.
 
 ---

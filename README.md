@@ -128,7 +128,7 @@ brew install sec-agent
 Download the latest pre-compiled, macOS Hardened Runtime signed binary tarball from [GitHub Releases](https://github.com/iafilius/sec-agent/releases/latest):
 ```bash
 # Extract and install binary to /usr/local/bin
-tar -xzf sec-agent_v2.14.1_darwin_arm64.tar.gz
+tar -xzf sec-agent_v2.14.2_darwin_arm64.tar.gz
 sudo mv sec-agent /usr/local/bin/
 ```
 
@@ -217,8 +217,14 @@ eval $(sec open)
 ### 2. Guided Profile Provisioning (`sec profile new`)
 Create a completely isolated profile vault in a single step with Touch ID (Slot 0) and offline 24-word recovery seed (Slot 1):
 ```bash
-# Interactively generate dual-slot vault and bind workspace .secrc
+# Interactively choose between generating a new recovery seed or linking an existing master seed
 sec profile new router-ax3600-prod
+
+# Directly link an existing 24-word master recovery seed phrase (skips menu and throwaway seed generation)
+sec profile new router-ax3600-prod --reuse-seed   # alias: --existing-seed
+
+# Non-interactive / pre-supplied recovery seed
+sec profile new router-ax3600-prod --seed "<24-word mnemonic>" [--secrc | --no-secrc]
 
 # Inspect status of all discovered profile stores on disk
 sec profile ls
