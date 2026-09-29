@@ -89,14 +89,51 @@ func initRegistry() {
 			},
 		},
 		{
-			Name:        "set",
+			Name:        "pipe",
 			Category:    "Core Secrets",
-			Description: "Store a secret with optional comment and env alias",
-			Usage:       "sec set <path> [<value>] [--stdin] [--no-trim] [--comment <comment>] [--env-alias <alias>] [--expires <ttl>] [--rotate-cmd <cmd>] [--rotate-ttl <ttl>] [--meta key=value ...]",
-			Flags:       []string{"--comment", "-c", "--meta", "-m", "--stdin", "--no-trim", "--env-alias", "-a", "--expires", "-e", "--rotate-cmd", "--rotate-ttl"},
+			Description: "Stream raw secret bytes directly to standard output for shell piping",
+			Usage:       "sec pipe <path>",
+			ExpectsKeys: true,
+			Handler:     handlePipe,
+		},
+		{
+			Name:        "describe",
+			Category:    "Core Secrets",
+			Description: "Display full metadata, timestamps, description, and notes for a secret",
+			Usage:       "sec describe <path> [--json]",
+			ExpectsKeys: true,
+			Flags:       []string{"--json"},
 			Handler: func(profile string, args []string) {
 				if len(args) < 1 {
-					fmt.Fprintln(os.Stderr, "Usage: sec set <path> [<value>] [--stdin] [--no-trim] [--comment <comment>] [--env-alias <alias>] [--expires <ttl>] [--rotate-cmd <cmd>] [--rotate-ttl <ttl>] [--meta key=value ...]")
+					fmt.Fprintln(os.Stderr, "Usage: sec describe <path> [--json]")
+					os.Exit(1)
+				}
+				handleDescribe(profile, args[0], args[1:])
+			},
+		},
+		{
+			Name:        "edit-notes",
+			Category:    "Core Secrets",
+			Description: "Edit multiline secret notes in $EDITOR using a secure temporary file",
+			Usage:       "sec edit-notes <path>",
+			ExpectsKeys: true,
+			Handler: func(profile string, args []string) {
+				if len(args) < 1 {
+					fmt.Fprintln(os.Stderr, "Usage: sec edit-notes <path>")
+					os.Exit(1)
+				}
+				handleEditNotes(profile, args[0], args[1:])
+			},
+		},
+		{
+			Name:        "set",
+			Category:    "Core Secrets",
+			Description: "Store a secret with optional description, notes, comment, and env alias",
+			Usage:       "sec set <path> [<value>] [--stdin] [--no-trim] [--desc <desc>] [--notes <notes>] [--comment <comment>] [--env-alias <alias>] [--expires <ttl>] [--rotate-cmd <cmd>] [--rotate-ttl <ttl>] [--meta key=value ...]",
+			Flags:       []string{"--desc", "--description", "--notes", "--comment", "-c", "--meta", "-m", "--stdin", "--no-trim", "--env-alias", "-a", "--expires", "-e", "--rotate-cmd", "--rotate-ttl"},
+			Handler: func(profile string, args []string) {
+				if len(args) < 1 {
+					fmt.Fprintln(os.Stderr, "Usage: sec set <path> [<value>] [--stdin] [--no-trim] [--desc <desc>] [--notes <notes>] [--comment <comment>] [--env-alias <alias>] [--expires <ttl>] [--rotate-cmd <cmd>] [--rotate-ttl <ttl>] [--meta key=value ...]")
 					os.Exit(1)
 				}
 				path := args[0]
@@ -131,10 +168,10 @@ func initRegistry() {
 			Name:        "relabel",
 			Aliases:     []string{"edit-meta"},
 			Category:    "Core Secrets",
-			Description: "Update comment, environment alias, or tags on an existing secret",
-			Usage:       "sec relabel <path> [--comment <text>] [--env-alias <alias>] [--expires <ttl>] [--meta <k=v>] [--clear-alias]",
+			Description: "Update comment, environment alias, description, notes, or tags on an existing secret",
+			Usage:       "sec relabel <path> [--comment <text>] [--env-alias <alias>] [--desc <text>] [--notes <text>] [--expires <ttl>] [--meta <k=v>] [--clear-alias] [--clear-desc] [--clear-notes]",
 			ExpectsKeys: true,
-			Flags:       []string{"--comment", "-c", "--env-alias", "-a", "--expires", "-e", "--meta", "-m", "--clear-alias"},
+			Flags:       []string{"--comment", "-c", "--env-alias", "-a", "--desc", "--description", "--notes", "--clear-desc", "--clear-notes", "--expires", "-e", "--meta", "-m", "--clear-alias"},
 			Handler: func(profile string, args []string) {
 				if len(args) < 1 {
 					fmt.Fprintln(os.Stderr, "Usage: sec relabel <path> [flags]")
@@ -253,18 +290,24 @@ func initRegistry() {
 			Name:        "profile",
 			Category:    "Profiles & Scope",
 			Description: "Inspect or configure secret profiles & environment tier",
-			Usage:       "sec profile [new <name> [--seed <mnemonic>] [--reuse-seed | --existing-seed] [--secrc | --no-secrc]] [ls] [set-env dev|dta|staging|prod]",
-			Flags:       []string{"--seed", "--reuse-seed", "--existing-seed", "--secrc", "--no-secrc"},
+			Usage:       "sec profile [new <name> [--summary <text>] [--seed <mnemonic>] [--reuse-seed | --existing-seed] [--secrc | --no-secrc]] [ls] [describe <name> [--summary <text>] [--clear-summary] [--json]] [set-env dev|dta|staging|prod]",
+			Flags:       []string{"--summary", "--seed", "--reuse-seed", "--existing-seed", "--secrc", "--no-secrc", "--clear-summary", "--json"},
 			Subcommands: []SubcommandSpec{
 				{
 					Name:        "new",
 					Description: "Create a new named profile with Dual-Slot Touch ID and BIP39 recovery seed",
-					Flags:       []string{"--seed", "--reuse-seed", "--existing-seed", "--secrc", "--no-secrc"},
+					Flags:       []string{"--summary", "--seed", "--reuse-seed", "--existing-seed", "--secrc", "--no-secrc"},
 				},
 				{
 					Name:        "ls",
 					Aliases:     []string{"list"},
 					Description: "List all discovered profiles on disk",
+				},
+				{
+					Name:        "describe",
+					Aliases:     []string{"info"},
+					Description: "Inspect or update unencrypted profile metadata and summary without Touch ID",
+					Flags:       []string{"--summary", "--clear-summary", "--json"},
 				},
 				{
 					Name:        "set-env",
@@ -306,8 +349,8 @@ func initRegistry() {
 			Name:        "run",
 			Category:    "Profiles & Scope",
 			Description: "Execute process with scoped secrets injected",
-			Usage:       "sec run [--redact] [--no-redact] [--dry-run] [--confirm-prod] [--group <p>] [--allow-keys k1,k2] [--ssh-key <path>] [--ssh-passphrase-key <key>] -- <cmd>",
-			Flags:       []string{"--redact", "--group", "--allow-keys", "--ssh-key", "--ssh-passphrase-key", "--dry-run", "--no-redact", "--confirm-prod"},
+			Usage:       "sec run [--redact] [--no-redact] [--dry-run] [--confirm-prod] [--group <p>] [--allow-keys k1,k2] [--stdin-key <k>] [--stdin-raw] [--ssh-key <path>] [--ssh-passphrase-key <key>] -- <cmd>",
+			Flags:       []string{"--redact", "--group", "--allow-keys", "--stdin-key", "--stdin-raw", "--stdin-no-newline", "--ssh-key", "--ssh-passphrase-key", "--dry-run", "--no-redact", "--confirm-prod"},
 			Handler:     handleRun,
 		},
 		{

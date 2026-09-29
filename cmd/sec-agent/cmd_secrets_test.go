@@ -434,6 +434,52 @@ func TestRelabelCommandAndExportIntegration(t *testing.T) {
 	if exportKey2 != "VELOCLOUD_TOKEN" {
 		t.Errorf("cleared alias should default to VELOCLOUD_TOKEN, got %q", exportKey2)
 	}
+
+	// 5. Test --desc and --notes relabeling
+	handleRelabel(profile, "velocloud/token", []string{
+		"--desc", "VCO Production Orchestrator Token",
+		"--notes", "Rotated monthly by DevOps automation\nContact: devops@example.com",
+	})
+
+	c, _ = net.Dial("unix", sockPath)
+	_ = json.NewEncoder(c).Encode(daemon.IPCRequest{
+		Action: "backup",
+		Token:  token,
+	})
+	var bkResp3 daemon.IPCResponse
+	_ = json.NewDecoder(c).Decode(&bkResp3)
+	c.Close()
+
+	entry3 := bkResp3.Secrets["velocloud/token"]
+	if entry3.Description != "VCO Production Orchestrator Token" {
+		t.Errorf("expected Description updated, got %q", entry3.Description)
+	}
+	if entry3.Notes != "Rotated monthly by DevOps automation\nContact: devops@example.com" {
+		t.Errorf("expected Notes updated, got %q", entry3.Notes)
+	}
+	if entry3.Value != "token-987654321" {
+		t.Errorf("secret value altered during relabel: got %q", entry3.Value)
+	}
+
+	// 6. Test --clear-desc and --clear-notes
+	handleRelabel(profile, "velocloud/token", []string{"--clear-desc", "--clear-notes"})
+
+	c, _ = net.Dial("unix", sockPath)
+	_ = json.NewEncoder(c).Encode(daemon.IPCRequest{
+		Action: "backup",
+		Token:  token,
+	})
+	var bkResp4 daemon.IPCResponse
+	_ = json.NewDecoder(c).Decode(&bkResp4)
+	c.Close()
+
+	entry4 := bkResp4.Secrets["velocloud/token"]
+	if entry4.Description != "" {
+		t.Errorf("expected Description cleared, got %q", entry4.Description)
+	}
+	if entry4.Notes != "" {
+		t.Errorf("expected Notes cleared, got %q", entry4.Notes)
+	}
 }
 
 func TestSetStdinAndNoTrim(t *testing.T) {
@@ -711,3 +757,397 @@ func TestNonTTYGetPlainTextGuard(t *testing.T) {
 		t.Errorf("expected 'sensitive_plaintext_pat_12345', got %q", string(rawOut))
 	}
 }
+
+func TestStandardizedExitCodes(t *testing.T) {
+	profile := "exitcodes-test-profile"
+	sockPath, _ := config.GetSocketPath(profile)
+	dbPath, _ := store.GetStorePath(profile)
+	os.Remove(sockPath)
+	os.Remove(dbPath)
+	defer os.Remove(sockPath)
+	defer os.Remove(dbPath)
+
+	tmpDir := t.TempDir()
+	binPath := filepath.Join(tmpDir, "sec_exitcode_bin")
+	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build test binary: %v\nOutput: %s", err, out)
+	}
+
+	d, err := daemon.NewDaemon(profile, 30*time.Second, Version)
+	if err != nil {
+		t.Fatalf("failed to create test daemon: %v", err)
+	}
+	token := "exitcode-test-token"
+	d.SetSessionTokenForTest(token)
+	d.SetMasterKeyForTest([]byte("01234567890123456789012345678901"))
+	d.SetSecretsForTest(map[string]store.SecretEntry{
+		"test/known-key": {Value: "known-value"},
+	})
+	go d.Start()
+	defer d.Stop()
+
+	sock, _ := config.GetSocketPath(profile)
+	for i := 0; i < 50; i++ {
+		if _, err := os.Stat(sock); err == nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// 1. Secret found -> Exit code 0
+	okCmd := exec.Command(binPath, "get", "test/known-key", "--raw", "--profile", profile)
+	okCmd.Env = append(os.Environ(), "SEC_SESSION_TOKEN="+token)
+	okOut, okErr := okCmd.CombinedOutput()
+	if okErr != nil {
+		t.Fatalf("expected exit code 0 for existing key, got error: %v, output: %s", okErr, okOut)
+	}
+	if strings.TrimSpace(string(okOut)) != "known-value" {
+		t.Errorf("expected 'known-value', got: %q", string(okOut))
+	}
+
+	// 2. Secret not found -> Exit code 2
+	missingCmd := exec.Command(binPath, "get", "test/missing-key", "--profile", profile)
+	missingCmd.Env = append(os.Environ(), "SEC_SESSION_TOKEN="+token)
+	missingOut, missingErr := missingCmd.CombinedOutput()
+	if missingErr == nil {
+		t.Fatalf("expected missing key to fail with exit code 2, but succeeded with output: %s", missingOut)
+	}
+	exitErr, ok := missingErr.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 2 {
+		t.Errorf("expected exit code 2 for missing key, got: %v (exit code %d), output:\n%s", missingErr, exitErr.ExitCode(), missingOut)
+	}
+	if !strings.Contains(string(missingOut), "Need help or found an edge case? Run 'sec feedback'") {
+		t.Errorf("expected missing key output to contain feedback tip, got:\n%s", missingOut)
+	}
+
+	// 2b. Missing key with --json -> Exit code 2
+	jsonMissingCmd := exec.Command(binPath, "get", "test/missing-key", "--json", "--profile", profile)
+	jsonMissingCmd.Env = append(os.Environ(), "SEC_SESSION_TOKEN="+token)
+	_, jsonMissingErr := jsonMissingCmd.CombinedOutput()
+	if jsonMissingErr == nil {
+		t.Fatalf("expected missing key with --json to fail with exit code 2, but succeeded")
+	}
+	jsonExitErr, ok := jsonMissingErr.(*exec.ExitError)
+	if !ok || jsonExitErr.ExitCode() != 2 {
+		t.Errorf("expected exit code 2 for missing key with --json, got: %v (exit code %d)", jsonMissingErr, jsonExitErr.ExitCode())
+	}
+
+	// 3. Daemon not running -> Exit code 3
+	offlineProfile := "exitcodes-offline-profile"
+	offlineCmd := exec.Command(binPath, "get", "test/known-key", "--profile", offlineProfile)
+	offlineOut, offlineErr := offlineCmd.CombinedOutput()
+	if offlineErr == nil {
+		t.Fatalf("expected offline daemon query to fail with exit code 3, but succeeded")
+	}
+	offExitErr, ok := offlineErr.(*exec.ExitError)
+	if !ok || offExitErr.ExitCode() != 3 {
+		t.Errorf("expected exit code 3 for offline daemon, got: %v (exit code %d), output:\n%s", offlineErr, offExitErr.ExitCode(), offlineOut)
+	}
+	if !strings.Contains(string(offlineOut), "Need help or found an edge case? Run 'sec feedback'") {
+		t.Errorf("expected offline daemon output to contain feedback tip, got:\n%s", offlineOut)
+	}
+}
+
+func TestPipeCommand(t *testing.T) {
+	profile := "pipe-test-profile"
+	sockPath, _ := config.GetSocketPath(profile)
+	dbPath, _ := store.GetStorePath(profile)
+	os.Remove(sockPath)
+	os.Remove(dbPath)
+	defer os.Remove(sockPath)
+	defer os.Remove(dbPath)
+
+	tmpDir := t.TempDir()
+	binPath := filepath.Join(tmpDir, "sec_pipe_bin")
+	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build test binary: %v\nOutput: %s", err, out)
+	}
+
+	d, err := daemon.NewDaemon(profile, 30*time.Second, Version)
+	if err != nil {
+		t.Fatalf("failed to create test daemon: %v", err)
+	}
+	token := "pipe-test-token"
+	d.SetSessionTokenForTest(token)
+	d.SetMasterKeyForTest([]byte("01234567890123456789012345678901"))
+	d.SetSecretsForTest(map[string]store.SecretEntry{
+		"kdbx/pass": {Value: "raw_binary_secret_1234"},
+	})
+	go d.Start()
+	defer d.Stop()
+
+	sock, _ := config.GetSocketPath(profile)
+	for i := 0; i < 50; i++ {
+		if _, err := os.Stat(sock); err == nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// 1. Success: pipes raw secret bytes without trailing newline or decoration
+	pipeCmd := exec.Command(binPath, "pipe", "kdbx/pass", "--profile", profile)
+	pipeCmd.Env = append(os.Environ(), "SEC_SESSION_TOKEN="+token)
+	pipeOut, pipeErr := pipeCmd.CombinedOutput()
+	if pipeErr != nil {
+		t.Fatalf("expected sec pipe to succeed, got error: %v, output: %s", pipeErr, pipeOut)
+	}
+	if string(pipeOut) != "raw_binary_secret_1234" {
+		t.Errorf("expected exact raw string 'raw_binary_secret_1234', got %q", string(pipeOut))
+	}
+
+	// 2. Missing key: exit code 2
+	missingCmd := exec.Command(binPath, "pipe", "missing/key", "--profile", profile)
+	missingCmd.Env = append(os.Environ(), "SEC_SESSION_TOKEN="+token)
+	missingOut, missingErr := missingCmd.CombinedOutput()
+	if missingErr == nil {
+		t.Fatalf("expected missing key to fail, but succeeded with output: %s", missingOut)
+	}
+	exitErr, ok := missingErr.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 2 {
+		t.Errorf("expected exit code 2, got: %v (exit code %d), output: %s", missingErr, exitErr.ExitCode(), missingOut)
+	}
+
+	// 3. Offline daemon: exit code 3
+	offCmd := exec.Command(binPath, "pipe", "kdbx/pass", "--profile", "nonexistent-offline-profile")
+	offOut, offErr := offCmd.CombinedOutput()
+	if offErr == nil {
+		t.Fatalf("expected offline daemon query to fail, but succeeded with output: %s", offOut)
+	}
+	offExitErr, ok := offErr.(*exec.ExitError)
+	if !ok || offExitErr.ExitCode() != 3 {
+		t.Errorf("expected exit code 3, got: %v (exit code %d), output: %s", offErr, offExitErr.ExitCode(), offOut)
+	}
+}
+
+func TestSetMetadataAndListFormatting(t *testing.T) {
+	profile := "meta-test-profile"
+	sockPath, _ := config.GetSocketPath(profile)
+	dbPath, _ := store.GetStorePath(profile)
+	os.Remove(sockPath)
+	os.Remove(dbPath)
+	defer os.Remove(sockPath)
+	defer os.Remove(dbPath)
+
+	tmpDir := t.TempDir()
+	binPath := filepath.Join(tmpDir, "sec_meta_bin")
+	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build test binary: %v\nOutput: %s", err, out)
+	}
+
+	d, err := daemon.NewDaemon(profile, 30*time.Second, Version)
+	if err != nil {
+		t.Fatalf("failed to create test daemon: %v", err)
+	}
+	token := "meta-test-token"
+	d.SetSessionTokenForTest(token)
+	d.SetMasterKeyForTest([]byte("01234567890123456789012345678901"))
+	d.SetSecretsForTest(map[string]store.SecretEntry{})
+	go d.Start()
+	defer d.Stop()
+
+	sock, _ := config.GetSocketPath(profile)
+	for i := 0; i < 50; i++ {
+		if _, err := os.Stat(sock); err == nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// 1. Set secret with --desc and --notes
+	setCmd1 := exec.Command(binPath, "set", "app/db_pass", "secret123", "--desc", "Primary database credentials", "--notes", "Rotated bi-weekly", "--profile", profile)
+	setCmd1.Env = append(os.Environ(), "SEC_SESSION_TOKEN="+token)
+	if out, err := setCmd1.CombinedOutput(); err != nil {
+		t.Fatalf("sec set with --desc and --notes failed: %v, output: %s", err, out)
+	}
+
+	// 2. Set secret with legacy --comment only
+	setCmd2 := exec.Command(binPath, "set", "app/legacy", "secret456", "--comment", "Legacy comment fallback", "--profile", profile)
+	setCmd2.Env = append(os.Environ(), "SEC_SESSION_TOKEN="+token)
+	if out, err := setCmd2.CombinedOutput(); err != nil {
+		t.Fatalf("sec set with --comment failed: %v, output: %s", err, out)
+	}
+
+	// 3. Set secret without any metadata
+	setCmd3 := exec.Command(binPath, "set", "app/bare", "secret789", "--profile", profile)
+	setCmd3.Env = append(os.Environ(), "SEC_SESSION_TOKEN="+token)
+	if out, err := setCmd3.CombinedOutput(); err != nil {
+		t.Fatalf("sec set bare failed: %v, output: %s", err, out)
+	}
+
+	// 4. Test sec ls table output
+	lsCmd := exec.Command(binPath, "ls", "--profile", profile)
+	lsCmd.Env = append(os.Environ(), "SEC_SESSION_TOKEN="+token)
+	lsOut, lsErr := lsCmd.CombinedOutput()
+	if lsErr != nil {
+		t.Fatalf("sec ls failed: %v, output: %s", lsErr, lsOut)
+	}
+	lsStr := string(lsOut)
+
+	if !strings.Contains(lsStr, "KEY PATH") || !strings.Contains(lsStr, "DESCRIPTION") {
+		t.Errorf("expected header 'KEY PATH' and 'DESCRIPTION' in table output, got:\n%s", lsStr)
+	}
+	if !strings.Contains(lsStr, "app/db_pass") || !strings.Contains(lsStr, "Primary database credentials") {
+		t.Errorf("expected app/db_pass with description, got:\n%s", lsStr)
+	}
+	if !strings.Contains(lsStr, "app/legacy") || !strings.Contains(lsStr, "Legacy comment fallback") {
+		t.Errorf("expected app/legacy falling back to comment, got:\n%s", lsStr)
+	}
+	if !strings.Contains(lsStr, "app/bare") {
+		t.Errorf("expected app/bare in listing, got:\n%s", lsStr)
+	}
+}
+
+func TestDescribeAndEditNotesCommand(t *testing.T) {
+	profile := "describe-test-profile"
+	sockPath, _ := config.GetSocketPath(profile)
+	dbPath, _ := store.GetStorePath(profile)
+	os.Remove(sockPath)
+	os.Remove(dbPath)
+	defer os.Remove(sockPath)
+	defer os.Remove(dbPath)
+
+	tmpDir := t.TempDir()
+	binPath := filepath.Join(tmpDir, "sec_desc_bin")
+	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build test binary: %v\nOutput: %s", err, out)
+	}
+
+	d, err := daemon.NewDaemon(profile, 30*time.Second, Version)
+	if err != nil {
+		t.Fatalf("failed to create test daemon: %v", err)
+	}
+	token := "desc-test-token"
+	d.SetSessionTokenForTest(token)
+	d.SetMasterKeyForTest([]byte("01234567890123456789012345678901"))
+	d.SetSecretsForTest(map[string]store.SecretEntry{
+		"app/db_pass": {
+			Value:        "supersecret123",
+			Description:  "Production PostgreSQL Cluster Master",
+			Notes:        "Rotated every month.\nLine 2 note.",
+			Created:      time.Now().Add(-2 * time.Hour),
+			LastModified: time.Now().Add(-1 * time.Hour),
+			Version:      2,
+		},
+	})
+	go d.Start()
+	defer d.Stop()
+
+	sock, _ := config.GetSocketPath(profile)
+	for i := 0; i < 50; i++ {
+		if _, err := os.Stat(sock); err == nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// 1. Text describe output
+	descCmd := exec.Command(binPath, "describe", "app/db_pass", "--profile", profile)
+	descCmd.Env = append(os.Environ(), "SEC_SESSION_TOKEN="+token)
+	descOut, err := descCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sec describe failed: %v, output: %s", err, descOut)
+	}
+	descStr := string(descOut)
+	if !strings.Contains(descStr, "Secret Overview: app/db_pass") {
+		t.Errorf("expected overview title, got:\n%s", descStr)
+	}
+	if !strings.Contains(descStr, "Production PostgreSQL Cluster Master") {
+		t.Errorf("expected description, got:\n%s", descStr)
+	}
+	if !strings.Contains(descStr, "Rotated every month.") || !strings.Contains(descStr, "Line 2 note.") {
+		t.Errorf("expected multiline notes, got:\n%s", descStr)
+	}
+
+	// 2. JSON describe output
+	jsonCmd := exec.Command(binPath, "describe", "app/db_pass", "--json", "--profile", profile)
+	jsonCmd.Env = append(os.Environ(), "SEC_SESSION_TOKEN="+token)
+	jsonOut, err := jsonCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sec describe --json failed: %v, output: %s", err, jsonOut)
+	}
+
+	var parsed struct {
+		Key          string `json:"key"`
+		Description  string `json:"description"`
+		Notes        string `json:"notes"`
+		Version      int    `json:"version"`
+		Created      string `json:"created"`
+		LastModified string `json:"last_modified"`
+	}
+	if err := json.Unmarshal(jsonOut, &parsed); err != nil {
+		t.Fatalf("failed to unmarshal describe JSON: %v, raw:\n%s", err, jsonOut)
+	}
+	if parsed.Key != "app/db_pass" || parsed.Description != "Production PostgreSQL Cluster Master" || parsed.Version != 2 {
+		t.Errorf("unexpected parsed describe: %+v", parsed)
+	}
+	if !strings.Contains(parsed.Notes, "Rotated every month.") {
+		t.Errorf("unexpected parsed notes: %q", parsed.Notes)
+	}
+
+	// 3. Edit notes via mock editor
+	mockEditor := filepath.Join(tmpDir, "mock_editor.sh")
+	editorScript := "#!/bin/sh\necho 'Edited by mock editor' > \"$1\"\n"
+	if err := os.WriteFile(mockEditor, []byte(editorScript), 0755); err != nil {
+		t.Fatalf("failed to write mock editor: %v", err)
+	}
+
+	editCmd := exec.Command(binPath, "edit-notes", "app/db_pass", "--profile", profile)
+	editCmd.Env = append(os.Environ(),
+		"SEC_SESSION_TOKEN="+token,
+		"SEC_TEST_MODE=1",
+		"EDITOR="+mockEditor,
+	)
+	editOut, err := editCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sec edit-notes failed: %v, output: %s", err, editOut)
+	}
+
+	// 4. Verify updated notes and untouched secret value
+	descCmd2 := exec.Command(binPath, "describe", "app/db_pass", "--json", "--profile", profile)
+	descCmd2.Env = append(os.Environ(), "SEC_SESSION_TOKEN="+token)
+	descOut2, err := descCmd2.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sec describe after edit failed: %v, output: %s", err, descOut2)
+	}
+	var parsed2 struct {
+		Notes string `json:"notes"`
+	}
+	_ = json.Unmarshal(descOut2, &parsed2)
+	if strings.TrimSpace(parsed2.Notes) != "Edited by mock editor" {
+		t.Errorf("expected updated notes 'Edited by mock editor', got %q", parsed2.Notes)
+	}
+
+	getCmd := exec.Command(binPath, "pipe", "app/db_pass", "--profile", profile)
+	getCmd.Env = append(os.Environ(), "SEC_SESSION_TOKEN="+token)
+	getOut, err := getCmd.CombinedOutput()
+	if err != nil || string(getOut) != "supersecret123" {
+		t.Errorf("expected secret value untouched 'supersecret123', got: %s (err: %v)", getOut, err)
+	}
+
+	// 5. Non-interactive terminal check
+	headlessCmd := exec.Command(binPath, "edit-notes", "app/db_pass", "--profile", profile)
+	headlessCmd.Env = append(os.Environ(),
+		"SEC_SESSION_TOKEN="+token,
+		"SEC_TEST_MODE=",
+		"CI=true",
+	)
+	headlessOut, headlessErr := headlessCmd.CombinedOutput()
+	if headlessErr == nil {
+		t.Fatalf("expected headless edit-notes to fail, but succeeded with output: %s", headlessOut)
+	}
+	exitErr, ok := headlessErr.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 78 {
+		t.Errorf("expected exit code 78, got: %v (exit code %d), output: %s", headlessErr, exitErr.ExitCode(), headlessOut)
+	}
+	if !strings.Contains(string(headlessOut), "INTERACTIVE TERMINAL REQUIRED") {
+		t.Errorf("expected interactive blocker banner in output, got:\n%s", headlessOut)
+	}
+}
+
+
+
+

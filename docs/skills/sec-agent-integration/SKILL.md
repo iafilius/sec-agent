@@ -1,10 +1,10 @@
 ---
 name: sec-agent-integration
 description: Use the sec-agent CLI utility to start background daemons, store secrets, run applications in isolated environments, migrate dotenv files, install AI skills, inspect snapshots, and manage backups.
-version: v2.14.0
+version: v2.14.4
 ---
 
-# sec-agent Secrets Management Integration (v2.14.0)
+# sec-agent Secrets Management Integration (v2.14.4)
 
 This skill enables AI coding agents and autonomous assistants to use the `sec-agent` CLI tool (v1.9.4+) to securely retrieve credentials, run application build/test/terraform pipelines in isolated process environments, migrate dotenv configuration files, install integration skills across IDEs, inspect point-in-time snapshots (`sec snapshot`), and manage KeePassXC `.kdbx` backups on macOS.
 
@@ -82,16 +82,19 @@ When `sec-agent` is updated on the workstation (e.g. via Homebrew or source rebu
 **CRITICAL RULE FOR AI ASSISTANTS**:
 1. **Dynamic Version Drift Detection**: When executing `sec status`, `sec status --quick`, or any CLI command, if the CLI output indicates:
    * An advisory upgrade notice (`[sec-agent] 💡 Active workspace AI skill instructions trail CLI version ... Run 'sec-agent skill update' to refresh.`), or
-   * A CLI version newer than this document's declared version (`v2.14.0`),
+   * A CLI version newer than this document's declared version (`v2.14.4`),
 2. **Immediate Update & Re-Read Obligation**:
    * Execute `sec-agent skill update` to refresh installed skills to the latest binary version.
    * Then **IMMEDIATELY INVOKE your file viewing tool** (e.g. `view_file`) on the installed skill path (such as `.agents/skills/sec-agent-integration/SKILL.md` or `~/.gemini/config/skills/sec-agent-integration/SKILL.md`) before taking further action. This purges stale cached instructions from the LLM conversation context and equips the agent with new commands, flags, and security rules.
 
-### 1.5. Guided Profile Onboarding Wizard (`sec profile new <name>`)
-Creating a new isolated profile previously required multiple steps (`init`, `set`, and `migrate-v2`). Now you can provision a complete Dual-Slot vault in a single guided step:
+### 1.5. Guided Profile Onboarding Wizard & Profile Summaries (`sec profile`)
+Creating a new isolated profile previously required multiple steps (`init`, `set`, and `migrate-v2`). Now you can provision a complete Dual-Slot vault in a single guided step with an optional human-readable profile summary:
 ```bash
 # Interactively choose between generating a new seed or linking an existing master recovery seed
 sec profile new <profile-name>
+
+# Provision a new profile with an unencrypted human-readable summary
+sec profile new <profile-name> --summary "Production Kubernetes cluster secrets"
 
 # Directly link an existing 24-word master recovery seed phrase (skips menu and throwaway seed generation)
 sec profile new <profile-name> --reuse-seed   # alias: --existing-seed
@@ -99,9 +102,17 @@ sec profile new <profile-name> --reuse-seed   # alias: --existing-seed
 # Non-interactive / pre-supplied recovery seed
 sec profile new <profile-name> --seed "<24-word mnemonic>" [--secrc | --no-secrc]
 
-# Inspect all discovered profile vaults and their schema health
+# Inspect unencrypted profile metadata, vault path, format, and summary without Touch ID biometrics
+sec profile describe <profile-name> [--json]
+
+# Update or clear unencrypted profile summary without unlocking biometrics or modifying cryptographic payload
+sec profile describe <profile-name> --summary "Updated cluster secrets description"
+sec profile describe <profile-name> --clear-summary
+
+# Inspect all discovered profile vaults, schema health, and summaries in a formatted columnar table
 sec profile ls (alias: sec profile list)
 ```
+* **Unencrypted Profile Summaries (`sec profile describe`)**: Vault profiles (`secrets_<profile>.enc`) contain an unencrypted `summary` field in their outer `VaultEnvelope`. This enables instant, zero-biometric inspection (`sec profile describe <name>`, `sec profile ls`) across multiple repositories and projects before unlocking.
 * **Upfront Recovery Seed Choice**: When invoked interactively without `--seed`, `sec profile new` offers a clear choice before generating anything:
   * `[1] Generate a new 24-word recovery seed (Default)`: Generates a new 24-word mnemonic, displays the security warning and word grid, and verifies words #4, #12, and #20.
   * `[2] Link an existing 24-word master recovery seed phrase`: Prompts directly for your existing 24-word seed without generating or printing any throwaway mnemonic, ensuring zero confusion.
@@ -244,14 +255,49 @@ echo "secret-value" | sec-agent set app-secrets/db-pass --stdin
 # Pipe multiline secrets (e.g. PEM private keys, TLS certs) preserving exact raw byte stream
 cat id_ed25519 | sec-agent set ssh/private_key --stdin --no-trim
 
+# Direct value with concise description and multiline notes (two-tier metadata)
+sec-agent set app-secrets/db-pass "secret-value" --desc "Primary DB password" --notes "Rotated monthly by DBA"
+
 # Direct value with custom environment alias and metadata
 sec-agent set app-secrets/db-pass "secret-value" --env-alias DB_PASSWORD --comment "Production DB password"
 ```
 
-### 5.4. Relabeling & Metadata Updates Without Plaintext Exposure (`sec-agent relabel`)
-Update environment aliases, comments, expiration timestamps, or custom metadata tags on an existing secret without retyping or exposing the secret plaintext:
+### 5.4. Formatted Metadata Inspection (`sec-agent describe`)
+Inspect full metadata, timestamps, versioning, access metrics, and multiline notes:
+```bash
+# Formatted human-readable overview with structured sections
+sec-agent describe app-secrets/db-pass
+
+# Machine-readable JSON output
+sec-agent describe app-secrets/db-pass --json
+```
+
+### 5.5. Editing Secret Notes Interactively (`sec-agent edit-notes`)
+Launch `$EDITOR` using a secure 0600 temporary file to edit multiline operational notes without altering the secret value:
+```bash
+sec-agent edit-notes app-secrets/db-pass
+```
+
+### 5.6. Subprocess Stdin Secret Streaming (`sec run --stdin-key` & `sec pipe`)
+Orchestrate external CLI utilities (e.g. `keepassxc-cli`, `gpg`, `docker login`) without temporary files or shell pipes:
+```bash
+# In-memory stdin injection (appends newline '\n' by default for interactive password prompts)
+sec-agent run --stdin-key kdbx/master_key -- keepassxc-cli merge -s target.kdbx incoming.kdbx
+
+# In-memory stdin injection without trailing newline (pure raw bytes)
+sec-agent run --stdin-key token/raw --stdin-raw -- ./service_consumer
+
+# Pure binary stream to stdout with zero decoration (exit codes 0: success, 2: not found, 3: locked)
+sec-agent pipe kdbx/master_key | keepassxc-cli ls target.kdbx
+```
+
+### 5.7. Relabeling & Metadata Updates Without Plaintext Exposure (`sec-agent relabel`)
+Update environment aliases, descriptions, multiline notes, comments, expiration timestamps, or custom metadata tags on an existing secret without retyping or exposing the secret plaintext:
 
 ```bash
+# Update description and notes without altering secret value or re-authenticating biometrics
+sec-agent relabel myapp/token --desc "Production API Token" --notes "Created by CI pipeline; rotated quarterly"
+
 # Update environment alias (controls variable name during 'sec export' and 'sec run')
 sec-agent relabel myapp/token --env-alias MYAPP_API_TOKEN
 
@@ -261,24 +307,24 @@ sec-agent relabel myapp/token --comment "Production API Token" --meta owner=devo
 # Update expiration timestamp
 sec-agent relabel myapp/token --expires 2026-12-31T23:59:59Z
 
-# Clear environment alias (reverts export mapping to default path-derived variable name)
-sec-agent relabel myapp/token --clear-alias
+# Clear environment alias, description, or notes
+sec-agent relabel myapp/token --clear-alias --clear-desc --clear-notes
 ```
 
-### 5.5. Querying & Renaming Secrets
+### 5.8. Querying & Renaming Secrets
 ```bash
 sec-agent get my-project/terraform/acceptance/ --prefix [--json]
 sec-agent mv old-path/ new-path/ --prefix
 ```
 * **`sec get` always prints the real value to stdout, in any context** — there is no automatic masking for non-interactive/piped consumers (including AI agent tool-call terminals). Prefer `sec run -- <cmd>` or env-injection for scripts/agents; reserve `sec get` for deliberate human/`--raw` use.
 
-### 5.6. Environment Isolation & Safety Badges
+### 5.9. Environment Isolation & Safety Badges
 ```bash
 sec-agent profile set-env prod --profile my-project-prod
 sec-agent run --confirm-prod --profile my-project-prod -- terraform apply
 ```
 
-### 5.7. Time-Bound Secret Leases & Revocation (`sec-agent lease`)
+### 5.10. Time-Bound Secret Leases & Revocation (`sec-agent lease`)
 ```bash
 # Grant a 15-minute temporary lease token for an AI subagent
 lease_token=$(sec-agent lease my-project-dev/vco_token --ttl 15m)
@@ -288,7 +334,7 @@ sec-agent lease revoke $lease_token
 ```
 Delegate temporary credential access to subagents with **zero credential lingering**.
 
-### 5.8. Real-Time Secret Redaction & Inline `sec://` Placeholders (`sec-agent run`)
+### 5.11. Real-Time Secret Redaction & Inline `sec://` Placeholders (`sec-agent run`)
 ```bash
 # Dynamic stream redaction: Automatically replaces all injected vault secrets in child stdout/stderr
 # with '[REDACTED_BY_SEC]' using buffer-boundary-aware sliding window streaming
@@ -301,7 +347,7 @@ sec-agent run --allow-keys VCO_URL,VCO_TOKEN --redact -- make test-unit
 sec-agent run -- ./legacy_tool -p "sec://db/password"
 ```
 
-### 5.9. Native Pure Go SSH Client & Target Wizard (`sec-agent ssh`)
+### 5.12. Native Pure Go SSH Client & Target Wizard (`sec-agent ssh`)
 `sec-agent` provides a built-in pure Go SSH client that authenticates directly using credentials stored in the active vault—completely eliminating the need for external `sshpass` utilities on macOS/Linux.
 
 ```bash
@@ -320,20 +366,20 @@ sec-agent ssh root@192.168.31.1 -- "uptime"
 * **Zero Disk Passwords**: Passwords and key passphrases are decrypted in-memory and passed to Go's `ssh.ClientConfig` without touching disk or process argument lists.
 * **Exit Code Propagation**: Remote command exit codes (`exitErr.ExitStatus()`) propagate directly to the calling shell.
 
-### 5.10. Companion Metadata Environment Variables
+### 5.13. Companion Metadata Environment Variables
 Stored secret metadata (e.g. `subnet=192.168.31.0/24`, `gateway=192.168.31.1`) is automatically exported as companion environment variables (`<KEY>_<META_KEY>`) during `sec run`:
 - `ROUTER_ADMIN="<secret>"`
 - `ROUTER_ADMIN_SUBNET="192.168.31.0/24"`
 - `ROUTER_ADMIN_GATEWAY="192.168.31.1"`
 
-### 5.11. Remote Configuration Drift Verification (`sec-agent check --remote`)
+### 5.14. Remote Configuration Drift Verification (`sec-agent check --remote`)
 ```bash
 # Compare live remote OpenWrt UCI settings or environment variables against vault keys (zero plaintext leak)
 sec-agent check --remote root@192.168.31.1 --uci wireless.wifinet_dev_5g.key=wifi/passphrase
 sec-agent check --remote deploy@api.prod --env API_TOKEN=prod/api_token
 ```
 
-### 5.12. Ephemeral SSH Agent & Passphrase Injection (`sec-agent run --ssh-key`)
+### 5.15. Ephemeral SSH Agent & Passphrase Injection (`sec-agent run --ssh-key`)
 ```bash
 # Launch ephemeral in-memory SSH agent with vault passphrase for SSH/Rsync/Git automation
 sec-agent run --ssh-key ~/.ssh/id_ed25519_ax3600 \
@@ -341,14 +387,14 @@ sec-agent run --ssh-key ~/.ssh/id_ed25519_ax3600 \
               -- ssh root@192.168.31.1 "uci show"
 ```
 
-### 5.13. Stdin Stream Injection & Redaction (`sec-agent stream`)
+### 5.16. Stdin Stream Injection & Redaction (`sec-agent stream`)
 ```bash
 # Evaluate {{key_path}} placeholders in-memory without process table (ps aux) exposure
 sec-agent stream --template "uci set network.wg0.private_key='{{router-ax3600-prod/nordvpn/private_key}}'" \
   | ssh root@192.168.31.1 "cat | sh"
 ```
 
-### 5.14. Multi-Profile Inheritance (`extends` in `.secrc`)
+### 5.17. Multi-Profile Inheritance (`extends` in `.secrc`)
 ```json
 {
   "profile": "router-ax3600-prod",
@@ -357,7 +403,7 @@ sec-agent stream --template "uci set network.wg0.private_key='{{router-ax3600-pr
 ```
 Child profiles recursively fallback to parent profile stores for missing keys.
 
-### 5.15. Dynamic Flag Aliases (`flag_aliases` in `.secrc`)
+### 5.18. Dynamic Flag Aliases (`flag_aliases` in `.secrc`)
 ```json
 {
   "flag_aliases": {
@@ -367,13 +413,13 @@ Child profiles recursively fallback to parent profile stores for missing keys.
 ```
 Automatically injects credentials as command-line flags into subprocess arguments.
 
-### 5.16. Network Host Reachability Guard (`sec-agent check --ping-host`)
+### 5.19. Network Host Reachability Guard (`sec-agent check --ping-host`)
 ```bash
 # Pre-flight TCP connectivity verification (<50ms)
 sec-agent check --ping-host 192.168.31.1:22
 ```
 
-### 5.17. Full Record Metadata Preservation Standard
+### 5.20. Full Record Metadata Preservation Standard
 When migrating credentials from external vaults (KeePassXC, 1Password, Bitwarden) into `sec-agent`:
 1. **Never limit extraction to `username` and `password` alone.**
 2. **Preserve URLs and Notes:** Store `<profile>/<entry>/url` and `<profile>/<entry>/notes`.
@@ -382,47 +428,47 @@ When migrating credentials from external vaults (KeePassXC, 1Password, Bitwarden
 5. **Full KDBX Import:** Use `sec-agent restore <file.kdbx> --merge --full-metadata --profile <p>` to preserve all `URL`, `Notes`, and `StringData` attributes.
 6. **Zero-Disk Exposure Stdin Import:** Pass `-` as the file path (`cat vault.kdbx | sec-agent restore - --password <pass> --full-metadata --merge`) to stream and parse raw KeePassXC databases directly in memory without writing intermediate files to disk.
 
-### 5.18. AI & User Feedback Guidance Protocol (`sec-agent feedback`)
+### 5.21. AI & User Feedback Guidance Protocol (`sec-agent feedback`)
 When users request new features or report friction during tool usage:
 1. **Run `sec-agent feedback` / `sec-agent feedback --example`**: Fetch structured feedback guidelines, client environment fingerprint, situation sketch format, and impact tier template.
 2. **Always Document Operational Rationale & Diagnostics:** Capture the exact problem statement, client runtime telemetry (code editor, AI assistant/extension, model, tool execution mode), an ASCII situation sketch of the flow and friction point, impact classification (Critical Security Leak vs. Boundary vs. Agent Friction vs. Token Waste), and real-world usecases.
 3. **High Quality OpenSpec Proposals:** Create clear, well-motivated OpenSpec proposals (`proposal.md`, `design.md`, `specs/`, `tasks.md`) detailing the operational motivation before implementing.
 4. **Proactive Feedback Escalation Directive**: Whenever an AI agent encounters unexpected CLI errors, unhandled edge-cases (e.g. envelope nesting anomalies), process lockouts, or has to perform an undocumented workaround, the agent **MUST** surface the friction point to the user and offer to generate a structured feedback proposal using `sec-agent feedback --example`. Never silently swallow or ignore tooling friction.
 
-### 5.19. Secret Version History & Soft-Delete Recovery Protocol
+### 5.22. Secret Version History & Soft-Delete Recovery Protocol
 1. **View Secret History:** Use `sec-agent history <path>` to review past version snapshots, timestamps, and comments before updating or troubleshooting.
 2. **Non-Destructive Rollbacks:** Use `sec-agent rollback <path> --version N` to revert a secret key to a previous version snapshot without losing current data.
 3. **Soft-Delete Safety:** `sec-agent rm <path>` soft-deletes keys by default. List soft-deleted secrets using `sec-agent ls --trash` and un-delete keys using `sec-agent restore-deleted <path>`. Use `sec-agent rm <path> --permanent` only when hard erasure is explicitly requested.
 
-### 5.20. High-Volume Performance & Memory Guardrail Protocol
+### 5.23. High-Volume Performance & Memory Guardrail Protocol
 1. **Scoped Prefix Queries:** For vaults containing over 10,000 secret keys, always pass `<prefix>` namespace arguments to `sec-agent ls <prefix>` or `sec-agent get <prefix> --record` to leverage pre-allocated capacity maps and reduce IPC buffer memory spikes.
 2. **RAM Guardrail Protection:** The background daemon operates under a 256 MB soft memory limit (`debug.SetMemoryLimit`). If a query triggers `RESOURCE_EXHAUSTED` error, break down bulk exports using scoped prefix filters (`sec-agent ls prod/services`).
 
-### 5.21. macOS MenuBar GUI Utility & Access Hygiene Protocol
+### 5.24. macOS MenuBar GUI Utility & Access Hygiene Protocol
 1. **Menu Bar GUI (`sec-agent-gui`)**: Launch `sec-agent-gui` for visual secret hierarchy inspection, real-time TTL countdown timer, active profile selector dropdown (`default`, `dev`, `staging`, `prod`), and single-click copy actions with 15s clipboard auto-wipe.
 2. **Detailed Audit Dump (`sec-agent ls -l`)**: Execute `sec-agent ls -l` to display creation, modification, and last access timestamps (`LastAccessed`), version numbers, and read counts in a clean terminal table.
 3. **Stale Credential Audit (`sec-agent ls --stale <days>`)**: Run `sec-agent ls --stale 30` to identify credentials unread for >30 days for routine vault hygiene and soft-delete cleanup.
 4. **Profile-Aware Export (`sec-agent export --all-profiles --format json`)**: Use `--all-profiles` or `--envelope` to include top-level envelope metadata (`profile`, `database_file`, `exported_at`) so exported backups preserve database origin when imported into different environments.
 
-### 5.22. Workspace Vault Isolation & High-Level Schema Design Protocol
+### 5.25. Workspace Vault Isolation & High-Level Schema Design Protocol
 When initializing secret management for a new workspace or migrating an existing project:
 1. **Design High-Level Schema First**: Establish a domain taxonomy (`<domain>/<entity>/<attribute>`, e.g., `orchestrator/vco_url`, `bgp/inbound_password`) before populating secrets.
 2. **Dedicated Workspace Profile**: Always create a `.secrc` file in the project root targeting a dedicated profile (`"profile": "<project>-dev"`).
 3. **Use Relative Keys (`"prefix": ""`)**: Set `"prefix": ""` in `.secrc` so keys resolve to clean relative paths inside dedicated stores (`secrets_<profile>.enc`) without double-scoping.
-4. **Hygienic Migration & Context Purge Protocol**: Once credentials are enrolled in `sec-agent`, the agent must immediately offer to sanitize and delete any temporary plaintext files (e.g. `prompt.txt`, `.env`, temporary notes) and commit to zero in-memory plaintext string retention, exclusively relying on dynamic `sec-agent run` environment injection. Follow `docs/VAULT_DESIGN_AND_PROJECT_MIGRATION_GUIDE.md` to purge legacy keys from `secrets.enc` (default profile) and remove old socket files.
+444: 4. **Hygienic Migration & Context Purge Protocol**: Once credentials are enrolled in `sec-agent`, the agent must immediately offer to sanitize and delete any temporary plaintext files (e.g. `prompt.txt`, `.env`, temporary notes) and commit to zero in-memory plaintext string retention, exclusively relying on dynamic `sec-agent run` environment injection. Follow `docs/VAULT_DESIGN_AND_PROJECT_MIGRATION_GUIDE.md` to purge legacy keys from `secrets.enc` (default profile) and remove old socket files.
 
-### 5.23. Granular Storage Cleanup & Security Scorecard Protocol (v2.3.0)
+### 5.26. Granular Storage Cleanup & Security Scorecard Protocol (v2.3.0)
 1. **Preview Before Deleting (`sec cleanup --dry-run`)**: Execute `sec cleanup --dry-run` to preview all historical rolling backup snapshots (`secrets*.enc.<timestamp>`), legacy `.bak` files, and orphaned `.sock` / `.pid` files along with a list of `🛡️ Protected Active Vaults` that are guaranteed to remain untouched.
 2. **Purge Obsolete Snapshots (`sec cleanup`)**: Execute `sec cleanup` to delete identified snapshot files and reclaim disk space.
 3. **Inspect Security Scorecard (`sec status`)**: Check vault schema (`v2.0 Dual-Slot Envelope` vs `v1.0 Legacy`) and active Secure Enclave policy (`BiometryCurrentSet`).
 4. **Offline Recovery Seed Preparation**: Ensure users save their 24-word Argon2id recovery seed phrase generated during `sec init` or `sec session recover` in an offline safe location.
 
-### 5.24. v2.0 Unified Seed Migration & Seed Rotation Protocol
+### 5.27. v2.0 Unified Seed Migration & Seed Rotation Protocol
 1. **Unified Seed Migration (`sec migrate-v2 --seed "<mnemonic>"`)**: Use `--seed "<mnemonic>"` flag when performing v2.0 vault migrations to bind all workstation profile stores (`default`, `dev`, `prod`, `router-ax3600-prod`) to a single 24-word BIP39 recovery seed.
 2. **Seed Rotation (`sec session rotate-seed`)**: Rotate or change recovery seed phrases across all active v2.0 profile stores in a single operation without invalidating Touch ID Keychain items.
 3. **Actionable Un-bricking (`sec session recover --profile <name>`)**: When biometric sets change, use `sec session recover` to un-brick vault envelopes using the single 24-word seed.
 
-### 5.25. Workspace `.secrc` Auto-Open & Native Cross-Profile Copy (`sec copy`)
+### 5.28. Workspace `.secrc` Auto-Open & Native Cross-Profile Copy (`sec copy`)
 1. **Workspace `.secrc` Auto-Open**: Place a `.secrc` (or `.secenv` / `.sec.json`) file in your repository root to configure workspace profile binding:
    ```json
    {
@@ -435,19 +481,19 @@ When initializing secret management for a new workspace or migrating an existing
    sec copy wifi/passphrase router/wifi_passphrase --from-profile default --to-profile router-ax3600-prod
    ```
 
-### 5.26. One-Click Shell Integration & Workspace Binding Indicators (v2.4.0)
+### 5.29. One-Click Shell Integration & Workspace Binding Indicators (v2.4.0)
 1. **One-Click Shell Installer (`sec init-shell`)**: Run `sec-agent init-shell [zsh|bash]` to idempotently add `alias sec=sec-agent` and Zsh/Bash autocompletions to `~/.zshrc` or `~/.bashrc`.
 2. **Workspace Profile Binding Indicator**: `sec status` and `sec status --all` display explicit active workspace `.secrc` bindings (e.g. `📌 Active Workspace Profile: router-ax3600-prod (bound via .secrc in /path/to/dir)`).
 3. **Auto-Target Workspace Profile in `sec copy`**: Omit `--to-profile` when passing `--from-profile` to automatically target the active workspace profile bound by `.secrc`.
 
-### 5.27. CLI Safety, Profile Ergonomics & AI Skill Drift Detection (v2.9.0)
+### 5.30. CLI Safety, Profile Ergonomics & AI Skill Drift Detection (v2.9.0)
 1. **Universal Subcommand `--help`**: Any subcommand executed with `--help`, `-h`, or `help` (e.g. `sec-agent migrate-v2 --help`, `sec-agent rm --help`) exits 0 and prints usage without side effects or mutations.
 2. **Dynamic Shell Profile Binding**: Unlocking a named profile via `sec-agent --profile <name> open` outputs `export SEC_PROFILE="<name>"` alongside `SEC_SESSION_TOKEN` so subshells bind to the target profile immediately. Tip advice dynamically reflects `eval $(sec --profile <name> open)`.
 3. **Unified Profile Discovery**: `sec-agent status --all` inspects all physical vault stores (`secrets_*.enc`) via `store.ListVaultFiles()` regardless of configuration subdirectories.
 4. **Transparent Multi-Profile Migration**: `sec-agent migrate-v2` supports `--profile <name>` and `--all-profiles`, logs individual vault progress, and displays actionable Keychain access warnings.
 5. **AI Skill Drift Diagnostics**: `sec-agent status` and `sec-agent version` automatically warn when an installed AI assistant skill document trails the CLI version and recommend running `sec-agent skill update`.
 
-### 5.28. Multi-Environment Workspace Contexts & Zero-Disk Switching (v2.14.0)
+### 5.31. Multi-Environment Workspace Contexts & Zero-Disk Switching (v2.14.0)
 1. **Schema v2 Multi-Environment Configuration (`.secrc`)**:
    Projects can declare multiple environment aliases and safety tiers in `.secrc` while preserving 100% backward compatibility for legacy v1 files (`{"profile": "<name>"}`):
    ```json
@@ -491,7 +537,7 @@ When initializing secret management for a new workspace or migrating an existing
    sec -E prod get db/password
    ```
 
-### 5.29. Production Blast-Radius Mutation Guardrails (v2.14.0)
+### 5.32. Production Blast-Radius Mutation Guardrails (v2.14.0)
 1. **Protected Mutating Commands**:
    Any operation that modifies or deletes vault state (`set`, `rm`, `mv`, `rollback`, `restore-deleted`, `rotate`) targeting an environment or profile with `tier: "prod"` is strictly intercepted.
 2. **Non-Interactive Abort Protocol**:
@@ -506,13 +552,29 @@ When initializing secret management for a new workspace or migrating an existing
 4. **Read Operations Pass Freely**:
    Read commands (`get`, `ls`, `history`, `export`, `run`, `stream`) never prompt or block, ensuring automation pipelines inspect safely without friction.
 
-### 5.30. Cross-Profile Template Interpolation in `sec stream` (v2.14.0)
+### 5.33. Cross-Profile Template Interpolation in `sec stream` (v2.14.0)
 `sec stream` supports cross-profile placeholder syntax using the `@<alias_or_profile>:` namespace prefix:
 ```bash
 # Stream template interpolating both local environment and cross-profile secrets
 sec stream --template "export APP_KEY='{{db/password}}' GLOBAL_CA='{{@global-shared:pki/ca_cert}}'" | sh
 ```
 * If the target profile daemon is stopped or locked, `sec stream` halts execution before outputting partial templates and prints actionable diagnostic remediation directing the operator to run `sec -P <target> open`.
+
+### 5.34. Standard Machine-Readable Exit Codes & Seed Diagnostics (v2.14.4)
+1. **Standard Machine-Readable Exit Status Codes**:
+   Automated orchestrators and AI subagents can programmatically classify operational outcomes without string parsing:
+   * **`0`**: Success — Operation completed cleanly.
+   * **`1`**: General / Syntax Error — Invalid flags, syntax errors, or unhandled internal faults.
+   * **`2`**: Secret Not Found (`ErrSecretNotFound`) — Requested secret key does not exist in the active profile.
+   * **`3`**: Daemon Offline or Locked (`DAEMON_NOT_RUNNING`) — Daemon process is inactive or locked; run `sec open` to authorize.
+   * **`78`**: Interactive Terminal Barrier (`EX_CONFIG`) — TTY safety lock reached in non-interactive environment (requires physical terminal).
+2. **Actionable Recovery Seed Diagnostics**:
+   When entering recovery mnemonics in `sec profile new`, `sec migrate-v2`, or `sec backup`, validation errors detail the exact failure root cause:
+   * Word count mismatch (e.g. `mnemonic must have 24 words, got 23`).
+   * Unknown BIP39 word with offending string (e.g. `mnemonic word "aple" is not in BIP39 wordlist`).
+   * Checksum failure (`mnemonic checksum verification failed — mnemonic may be corrupted`).
+3. **Universal Community Feedback Pointers**:
+   All root and subcommand `--help` pages, error remediation banners, and `--version` screens provide direct pointers to `sec feedback` and upstream issue trackers.
 
 ---
 
@@ -532,6 +594,7 @@ sec stream --template "export APP_KEY='{{db/password}}' GLOBAL_CA='{{@global-sha
 8. **Long-Running & Autonomous Job Safety**: Before launching unattended or long tasks (e.g. `/goal`, multi-hour builds, batch migrations), AI agents MUST check session TTL via `sec status` and proactively run `sec extend --ttl <dur>` (e.g. `24h`) without Touch ID or guide the user to unlock with sufficient duration at Turn 1 to avoid mid-session timeouts.
 9. **Process-Isolated Context Switching**: Use `eval $(sec use <alias>)` to switch subshell contexts across multi-environment `.secrc` setups, or pass `-E <alias>` for one-off commands. Inspect environments with `sec env ls --json`.
 10. **Production Mutation Guardrail Awareness**: When modifying secrets in production tiers (`tier: "prod"`), automated scripts and AI tools MUST explicitly pass `--confirm-prod` to avoid non-interactive failure (`PROD_MUTATION_CONFIRMATION_REQUIRED`, exit code 2).
+11. **Machine-Readable Exit Code Handling**: Check exit codes in automated scripts: code 2 indicates missing keys (safe to initialize or skip), code 3 indicates daemon offline/locked (prompt or run `sec open`), code 78 indicates interactive blocker requiring operator terminal intervention.
 
 ---
 

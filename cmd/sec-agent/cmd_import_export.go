@@ -289,8 +289,8 @@ func handleBackup(profile string, outputFile string, explicitPassword string) {
 					}
 					fmt.Println("📖 Enter your 24-word recovery mnemonic to set the KDBX backup password.")
 					mnemonic := readMnemonicFromTTY()
-					if !crypto.MnemonicValid(mnemonic) {
-						fmt.Fprintln(os.Stderr, "❌ Invalid mnemonic checksum. Aborting backup.")
+					if err := crypto.ValidateMnemonic(mnemonic); err != nil {
+						fmt.Fprintf(os.Stderr, "❌ Invalid mnemonic: %v. Aborting backup.\n", err)
 						os.Exit(1)
 					}
 					passphrase := crypto.MnemonicToPassphrase(mnemonic)
@@ -409,8 +409,8 @@ func handleMigrateV2(profile string, args []string) {
 	}
 
 	if seedInput != "" {
-		if !crypto.MnemonicValid(seedInput) {
-			fmt.Fprintln(os.Stderr, "❌ Provided seed phrase is not a valid 24-word BIP39 mnemonic.")
+		if err := crypto.ValidateMnemonic(seedInput); err != nil {
+			fmt.Fprintf(os.Stderr, "❌ Provided seed phrase is not a valid 24-word BIP39 mnemonic: %v\n", err)
 			os.Exit(1)
 		}
 	}

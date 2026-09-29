@@ -59,33 +59,46 @@ _sec() {
         args)
             case $words[1] in
 `)
-		var keyCmds []string
 		for _, cmd := range CommandRegistry {
 			if cmd.ExpectsKeys {
-				keyCmds = append(keyCmds, cmd.Name)
-				for _, alias := range cmd.Aliases {
-					keyCmds = append(keyCmds, alias)
+				var matchNames []string
+				matchNames = append(matchNames, cmd.Name)
+				matchNames = append(matchNames, cmd.Aliases...)
+				if len(cmd.Flags) > 0 {
+					var quotedFlags []string
+					for _, f := range cmd.Flags {
+						quotedFlags = append(quotedFlags, fmt.Sprintf("'%s'", f))
+					}
+					zshBuf.WriteString(fmt.Sprintf("                %s)\n                    if [[ \"$words[CURRENT]\" == -* ]]; then\n                        _values '%s flags' %s\n                    else\n                        _sec_keys\n                    fi\n                    ;;\n", strings.Join(matchNames, "|"), cmd.Name, strings.Join(quotedFlags, " ")))
+				} else {
+					zshBuf.WriteString(fmt.Sprintf("                %s)\n                    _sec_keys\n                    ;;\n", strings.Join(matchNames, "|")))
 				}
-			}
-		}
-		if len(keyCmds) > 0 {
-			zshBuf.WriteString(fmt.Sprintf("                %s)\n                    _sec_keys\n                    ;;\n", strings.Join(keyCmds, "|")))
-		}
-
-		for _, cmd := range CommandRegistry {
-			if len(cmd.Subcommands) > 0 {
+			} else if len(cmd.Subcommands) > 0 {
 				var names []string
 				names = append(names, cmd.Name)
 				names = append(names, cmd.Aliases...)
-				zshBuf.WriteString(fmt.Sprintf("                %s)\n                    local -a subcmds\n                    subcmds=(\n", strings.Join(names, "|")))
+				zshBuf.WriteString(fmt.Sprintf("                %s)\n                    if [ $CURRENT -eq 2 ]; then\n                        local -a subcmds\n                        subcmds=(\n", strings.Join(names, "|")))
 				for _, sub := range cmd.Subcommands {
-					zshBuf.WriteString(fmt.Sprintf("                        '%s:%s'\n", sub.Name, sub.Description))
+					zshBuf.WriteString(fmt.Sprintf("                            '%s:%s'\n", sub.Name, sub.Description))
 					for _, alias := range sub.Aliases {
-						zshBuf.WriteString(fmt.Sprintf("                        '%s:%s'\n", alias, sub.Description))
+						zshBuf.WriteString(fmt.Sprintf("                            '%s:%s'\n", alias, sub.Description))
 					}
 				}
-				zshBuf.WriteString("                    )\n                    _describe -t subcmds '" + cmd.Name + " subcommand' subcmds\n                    ;;\n")
-			} else if len(cmd.Flags) > 0 && !cmd.ExpectsKeys {
+				zshBuf.WriteString("                        )\n                        _describe -t subcmds '" + cmd.Name + " subcommand' subcmds\n                    else\n                        case $words[2] in\n")
+				for _, sub := range cmd.Subcommands {
+					if len(sub.Flags) > 0 {
+						var subMatch []string
+						subMatch = append(subMatch, sub.Name)
+						subMatch = append(subMatch, sub.Aliases...)
+						var subQuoted []string
+						for _, sf := range sub.Flags {
+							subQuoted = append(subQuoted, fmt.Sprintf("'%s'", sf))
+						}
+						zshBuf.WriteString(fmt.Sprintf("                            %s)\n                                _values '%s %s flags' %s\n                                ;;\n", strings.Join(subMatch, "|"), cmd.Name, sub.Name, strings.Join(subQuoted, " ")))
+					}
+				}
+				zshBuf.WriteString("                        esac\n                    fi\n                    ;;\n")
+			} else if len(cmd.Flags) > 0 {
 				var names []string
 				names = append(names, cmd.Name)
 				names = append(names, cmd.Aliases...)
@@ -136,26 +149,31 @@ _sec_completions() {
 				var matchNames []string
 				matchNames = append(matchNames, cmd.Name)
 				matchNames = append(matchNames, cmd.Aliases...)
-				bashBuf.WriteString(fmt.Sprintf("        %s)\n            COMPREPLY=( $(compgen -W \"%s\" -- ${cur}) )\n            ;;\n", strings.Join(matchNames, "|"), strings.Join(subNames, " ")))
-			} else if len(cmd.Flags) > 0 && !cmd.ExpectsKeys {
+				bashBuf.WriteString(fmt.Sprintf("        %s)\n            if [ $COMP_CWORD -eq 2 ]; then\n                COMPREPLY=( $(compgen -W \"%s\" -- ${cur}) )\n            else\n                case \"${COMP_WORDS[2]}\" in\n", strings.Join(matchNames, "|"), strings.Join(subNames, " ")))
+				for _, sub := range cmd.Subcommands {
+					if len(sub.Flags) > 0 {
+						var subMatch []string
+						subMatch = append(subMatch, sub.Name)
+						subMatch = append(subMatch, sub.Aliases...)
+						bashBuf.WriteString(fmt.Sprintf("                    %s)\n                        COMPREPLY=( $(compgen -W \"%s\" -- ${cur}) )\n                        ;;\n", strings.Join(subMatch, "|"), strings.Join(sub.Flags, " ")))
+					}
+				}
+				bashBuf.WriteString("                esac\n            fi\n            ;;\n")
+			} else if cmd.ExpectsKeys {
+				var matchNames []string
+				matchNames = append(matchNames, cmd.Name)
+				matchNames = append(matchNames, cmd.Aliases...)
+				if len(cmd.Flags) > 0 {
+					bashBuf.WriteString(fmt.Sprintf("        %s)\n            if [[ \"${cur}\" == -* ]]; then\n                COMPREPLY=( $(compgen -W \"%s\" -- ${cur}) )\n            elif command -v sec-agent >/dev/null 2>&1; then\n                local keys=$(sec-agent ls --json 2>/dev/null | grep -o '\"key\":\"[^\"]*\"' | cut -d'\"' -f4)\n                COMPREPLY=( $(compgen -W \"${keys}\" -- ${cur}) )\n            fi\n            ;;\n", strings.Join(matchNames, "|"), strings.Join(cmd.Flags, " ")))
+				} else {
+					bashBuf.WriteString(fmt.Sprintf("        %s)\n            if command -v sec-agent >/dev/null 2>&1; then\n                local keys=$(sec-agent ls --json 2>/dev/null | grep -o '\"key\":\"[^\"]*\"' | cut -d'\"' -f4)\n                COMPREPLY=( $(compgen -W \"${keys}\" -- ${cur}) )\n            fi\n            ;;\n", strings.Join(matchNames, "|")))
+				}
+			} else if len(cmd.Flags) > 0 {
 				var matchNames []string
 				matchNames = append(matchNames, cmd.Name)
 				matchNames = append(matchNames, cmd.Aliases...)
 				bashBuf.WriteString(fmt.Sprintf("        %s)\n            COMPREPLY=( $(compgen -W \"%s\" -- ${cur}) )\n            ;;\n", strings.Join(matchNames, "|"), strings.Join(cmd.Flags, " ")))
 			}
-		}
-
-		var keyCmds []string
-		for _, cmd := range CommandRegistry {
-			if cmd.ExpectsKeys {
-				keyCmds = append(keyCmds, cmd.Name)
-				for _, alias := range cmd.Aliases {
-					keyCmds = append(keyCmds, alias)
-				}
-			}
-		}
-		if len(keyCmds) > 0 {
-			bashBuf.WriteString(fmt.Sprintf("        %s)\n            if command -v sec-agent >/dev/null 2>&1; then\n                local keys=$(sec-agent ls --json 2>/dev/null | grep -o '\"key\":\"[^\"]*\"' | cut -d'\"' -f4)\n                COMPREPLY=( $(compgen -W \"${keys}\" -- ${cur}) )\n            fi\n            ;;\n", strings.Join(keyCmds, "|")))
 		}
 
 		bashBuf.WriteString(`    esac
@@ -183,7 +201,19 @@ complete -F _sec_completions sec sec-agent
 					}
 				}
 				fishBuf.WriteString(fmt.Sprintf("complete -c sec -n \"__fish_seen_subcommand_from %s\" -a \"%s\"\n", cmd.Name, strings.Join(subNames, " ")))
-			} else if len(cmd.Flags) > 0 && !cmd.ExpectsKeys {
+				for _, sub := range cmd.Subcommands {
+					for _, flag := range sub.Flags {
+						if strings.HasPrefix(flag, "--") {
+							cleanFlag := strings.TrimPrefix(flag, "--")
+							fishBuf.WriteString(fmt.Sprintf("complete -c sec -n \"__fish_seen_subcommand_from %s; and __fish_seen_subcommand_from %s\" -l %s\n", cmd.Name, sub.Name, cleanFlag))
+						} else if strings.HasPrefix(flag, "-") {
+							cleanFlag := strings.TrimPrefix(flag, "-")
+							fishBuf.WriteString(fmt.Sprintf("complete -c sec -n \"__fish_seen_subcommand_from %s; and __fish_seen_subcommand_from %s\" -s %s\n", cmd.Name, sub.Name, cleanFlag))
+						}
+					}
+				}
+			}
+			if len(cmd.Flags) > 0 {
 				for _, flag := range cmd.Flags {
 					if strings.HasPrefix(flag, "--") {
 						cleanFlag := strings.TrimPrefix(flag, "--")

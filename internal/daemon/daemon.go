@@ -59,8 +59,12 @@ type IPCRequest struct {
 	Action         IPCAction                    `json:"action"`
 	Path           string                       `json:"path,omitempty"`
 	Value          string                       `json:"value,omitempty"`
-	Comment        string                       `json:"comment,omitempty"`
-	Metadata       map[string]string            `json:"metadata,omitempty"`
+	Comment          string                       `json:"comment,omitempty"`
+	Description      string                       `json:"description,omitempty"`
+	Notes            string                       `json:"notes,omitempty"`
+	ClearDescription bool                         `json:"clear_description,omitempty"`
+	ClearNotes       bool                         `json:"clear_notes,omitempty"`
+	Metadata         map[string]string            `json:"metadata,omitempty"`
 	TTL            string                       `json:"ttl,omitempty"`
 	Grace          string                       `json:"grace,omitempty"`
 	Secrets        map[string]store.SecretEntry `json:"secrets,omitempty"`
@@ -174,6 +178,8 @@ type IPCResponse struct {
 	Success             bool                         `json:"success"`
 	Value               string                       `json:"value,omitempty"`
 	Comment             string                       `json:"comment,omitempty"`
+	Description         string                       `json:"description,omitempty"`
+	Notes               string                       `json:"notes,omitempty"`
 	Metadata            map[string]string            `json:"metadata,omitempty"`
 	Error               string                       `json:"error,omitempty"`
 	ErrorCode           store.ErrorCode              `json:"error_code,omitempty"`
@@ -598,6 +604,8 @@ func (d *Daemon) processRequest(c net.Conn, req IPCRequest, peerPID int) {
 			Success:      true,
 			Value:        entry.Value,
 			Comment:      entry.Comment,
+			Description:  entry.Description,
+			Notes:        entry.Notes,
 			Metadata:     entry.Metadata,
 			Created:      entry.Created,
 			LastModified: entry.LastModified,
@@ -636,6 +644,8 @@ func (d *Daemon) processRequest(c net.Conn, req IPCRequest, peerPID int) {
 				Version:      existing.Version,
 				Value:        existing.Value,
 				Comment:      existing.Comment,
+				Description:  existing.Description,
+				Notes:        existing.Notes,
 				Metadata:     existing.Metadata,
 				LastModified: existing.LastModified,
 			}
@@ -645,9 +655,20 @@ func (d *Daemon) processRequest(c net.Conn, req IPCRequest, peerPID int) {
 			}
 		}
 
+		desc := req.Description
+		if desc == "" && ok && !req.ClearDescription {
+			desc = existing.Description
+		}
+		notes := req.Notes
+		if notes == "" && ok && !req.ClearNotes {
+			notes = existing.Notes
+		}
+
 		entry := store.SecretEntry{
 			Value:        req.Value,
 			Comment:      req.Comment,
+			Description:  desc,
+			Notes:        notes,
 			Metadata:     req.Metadata,
 			Created:      time.Now(),
 			LastModified: time.Now(),
@@ -683,6 +704,18 @@ func (d *Daemon) processRequest(c net.Conn, req IPCRequest, peerPID int) {
 
 		if req.Comment != "" {
 			entry.Comment = req.Comment
+		}
+
+		if req.ClearDescription {
+			entry.Description = ""
+		} else if req.Description != "" {
+			entry.Description = req.Description
+		}
+
+		if req.ClearNotes {
+			entry.Notes = ""
+		} else if req.Notes != "" {
+			entry.Notes = req.Notes
 		}
 
 		if req.Expires != "" {
@@ -839,6 +872,9 @@ func (d *Daemon) processRequest(c net.Conn, req IPCRequest, peerPID int) {
 		var list []string
 		now := time.Now()
 		for k, entry := range all {
+			if req.Path != "" && !strings.HasPrefix(k, req.Path) {
+				continue
+			}
 			if req.ShowTrash {
 				if entry.DeletedAt != nil {
 					list = append(list, k)
@@ -856,10 +892,27 @@ func (d *Daemon) processRequest(c net.Conn, req IPCRequest, peerPID int) {
 			list = append(list, k)
 		}
 		sort.Strings(list)
+
+		res := make(map[string]store.SecretEntry, len(list))
+		for _, k := range list {
+			e := all[k]
+			res[k] = store.SecretEntry{
+				Comment:      e.Comment,
+				Description:  e.Description,
+				Notes:        e.Notes,
+				Metadata:     e.Metadata,
+				Created:      e.Created,
+				LastModified: e.LastModified,
+				Expires:      e.Expires,
+				Version:      e.Version,
+			}
+		}
+
 		d.lastUsed = time.Now()
 		d.sendResponse(c, IPCResponse{
 			Success: true,
 			Value:   strings.Join(list, "\n"),
+			Secrets: res,
 		})
 
 	case IPCActionGetGroup:
@@ -1054,6 +1107,8 @@ func (d *Daemon) processRequest(c net.Conn, req IPCRequest, peerPID int) {
 			Version:      oldVer,
 			Value:        entry.Value,
 			Comment:      entry.Comment,
+			Description:  entry.Description,
+			Notes:        entry.Notes,
 			Metadata:     entry.Metadata,
 			LastModified: entry.LastModified,
 		}
@@ -1065,6 +1120,8 @@ func (d *Daemon) processRequest(c net.Conn, req IPCRequest, peerPID int) {
 		entry.Version = oldVer + 1
 		entry.Value = found.Value
 		entry.Comment = found.Comment
+		entry.Description = found.Description
+		entry.Notes = found.Notes
 		entry.Metadata = found.Metadata
 		entry.LastModified = time.Now()
 		entry.DeletedAt = nil

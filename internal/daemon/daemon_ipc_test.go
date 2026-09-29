@@ -445,3 +445,134 @@ func TestDaemonSessionExtension(t *testing.T) {
 	}
 }
 
+func TestIPCDescriptionAndNotes(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("SEC_CONFIG_DIR", tmpDir)
+
+	d := &Daemon{
+		profile:        "desc-notes-test",
+		version:        "v2.14.4",
+		masterKey:      make([]byte, 32),
+		sessionToken:   "valid-token",
+		sessionStart:   time.Now(),
+		sessionTTL:     2 * time.Hour,
+		graceTTL:       30 * time.Minute,
+		lastUsed:       time.Now(),
+		lastActivity:   time.Now(),
+		IsTestInstance: true,
+	}
+	d.ensureStoreInitialized()
+
+	sendReq := func(req IPCRequest) IPCResponse {
+		clientConn, serverConn := net.Pipe()
+		defer clientConn.Close()
+
+		var resp IPCResponse
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			_ = json.NewDecoder(clientConn).Decode(&resp)
+		}()
+
+		d.processRequest(serverConn, req, 1234)
+		_ = serverConn.Close()
+		<-done
+		return resp
+	}
+
+	// 1. Set secret with Description and Notes
+	setResp := sendReq(IPCRequest{
+		Action:      IPCActionSet,
+		Path:        "app/db_pass",
+		Value:       "secret123",
+		Description: "Primary database credentials",
+		Notes:       "Rotated bi-weekly by ops team.\nLine 2 notes.",
+	})
+	if !setResp.Success {
+		t.Fatalf("IPCActionSet failed: %v", setResp.Error)
+	}
+
+	// 2. Get secret and verify Description and Notes are returned
+	getResp := sendReq(IPCRequest{
+		Action: IPCActionGet,
+		Path:   "app/db_pass",
+	})
+	if !getResp.Success {
+		t.Fatalf("IPCActionGet failed: %v", getResp.Error)
+	}
+	if getResp.Description != "Primary database credentials" {
+		t.Errorf("expected Description %q, got %q", "Primary database credentials", getResp.Description)
+	}
+	if getResp.Notes != "Rotated bi-weekly by ops team.\nLine 2 notes." {
+		t.Errorf("expected Notes %q, got %q", "Rotated bi-weekly by ops team.\nLine 2 notes.", getResp.Notes)
+	}
+
+	// 3. Relabel to update Notes only, preserving Description
+	relabResp := sendReq(IPCRequest{
+		Action: IPCActionRelabel,
+		Path:   "app/db_pass",
+		Notes:  "Updated single line note",
+	})
+	if !relabResp.Success {
+		t.Fatalf("IPCActionRelabel failed: %v", relabResp.Error)
+	}
+
+	getResp2 := sendReq(IPCRequest{
+		Action: IPCActionGet,
+		Path:   "app/db_pass",
+	})
+	if getResp2.Description != "Primary database credentials" {
+		t.Errorf("expected Description preserved, got %q", getResp2.Description)
+	}
+	if getResp2.Notes != "Updated single line note" {
+		t.Errorf("expected Notes updated, got %q", getResp2.Notes)
+	}
+
+	// 4. Update value via Set without specifying desc/notes - should preserve existing
+	setResp2 := sendReq(IPCRequest{
+		Action: IPCActionSet,
+		Path:   "app/db_pass",
+		Value:  "secret456",
+	})
+	if !setResp2.Success {
+		t.Fatalf("IPCActionSet update failed: %v", setResp2.Error)
+	}
+
+	getResp3 := sendReq(IPCRequest{
+		Action: IPCActionGet,
+		Path:   "app/db_pass",
+	})
+	if getResp3.Value != "secret456" {
+		t.Errorf("expected new value, got %q", getResp3.Value)
+	}
+	if getResp3.Description != "Primary database credentials" {
+		t.Errorf("expected Description preserved across value update, got %q", getResp3.Description)
+	}
+	if getResp3.Notes != "Updated single line note" {
+		t.Errorf("expected Notes preserved across value update, got %q", getResp3.Notes)
+	}
+
+	// 5. Relabel with ClearDescription and ClearNotes
+	clearResp := sendReq(IPCRequest{
+		Action:           IPCActionRelabel,
+		Path:             "app/db_pass",
+		ClearDescription: true,
+		ClearNotes:       true,
+	})
+	if !clearResp.Success {
+		t.Fatalf("IPCActionRelabel clear failed: %v", clearResp.Error)
+	}
+
+	getResp4 := sendReq(IPCRequest{
+		Action: IPCActionGet,
+		Path:   "app/db_pass",
+	})
+	if getResp4.Description != "" {
+		t.Errorf("expected Description cleared, got %q", getResp4.Description)
+	}
+	if getResp4.Notes != "" {
+		t.Errorf("expected Notes cleared, got %q", getResp4.Notes)
+	}
+}
+
+

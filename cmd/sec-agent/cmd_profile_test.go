@@ -734,6 +734,94 @@ func TestProfileNewSensitiveDirectoryWarning(t *testing.T) {
 	}
 }
 
+func TestProfileNewProjectRootMarkers(t *testing.T) {
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get current wd: %v", err)
+	}
+
+	tmpDir := t.TempDir()
+	binPath := filepath.Join(tmpDir, "sec_markers_test_bin")
+	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build test binary: %v\nOutput: %s", err, string(out))
+	}
+
+	mnemonic, err := crypto.GenerateMnemonic()
+	if err != nil {
+		t.Fatalf("failed to generate mnemonic: %v", err)
+	}
+
+	configDir := filepath.Join(tmpDir, "config")
+	_ = os.MkdirAll(configDir, 0700)
+
+	// 1. Directory WITHOUT markers: should emit warning with "All child subdirectories will inherit"
+	noMarkerDir := filepath.Join(tmpDir, "nomarkers")
+	_ = os.MkdirAll(noMarkerDir, 0700)
+	if err := os.Chdir(noMarkerDir); err != nil {
+		t.Fatalf("failed to chdir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(origWd)
+	}()
+
+	cmd := exec.Command(binPath, "profile", "new", "testnomarkers", "--seed", mnemonic, "--secrc")
+	cmd.Env = append(os.Environ(),
+		"SEC_CONFIG_DIR="+configDir,
+		"SEC_TEST_MODE=1",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("profile new failed: %v\nOutput: %s", err, string(out))
+	}
+	outStr := string(out)
+	if !strings.Contains(outStr, "All child subdirectories will inherit profile \"testnomarkers\" via upward traversal!") {
+		t.Errorf("expected warning copy to mention 'All child subdirectories will inherit', got:\n%s", outStr)
+	}
+
+	// 2. Directory WITH pyproject.toml: should NOT emit missing project root warning
+	pythonDir := filepath.Join(tmpDir, "pythondir")
+	_ = os.MkdirAll(pythonDir, 0700)
+	_ = os.WriteFile(filepath.Join(pythonDir, "pyproject.toml"), []byte("[project]\nname=\"sample\"\n"), 0644)
+	if err := os.Chdir(pythonDir); err != nil {
+		t.Fatalf("failed to chdir: %v", err)
+	}
+
+	cmd2 := exec.Command(binPath, "profile", "new", "testpython", "--seed", mnemonic, "--secrc")
+	cmd2.Env = append(os.Environ(),
+		"SEC_CONFIG_DIR="+configDir,
+		"SEC_TEST_MODE=1",
+	)
+	out2, err2 := cmd2.CombinedOutput()
+	if err2 != nil {
+		t.Fatalf("profile new failed: %v\nOutput: %s", err2, string(out2))
+	}
+	if strings.Contains(string(out2), "does not appear to be a Git repository") {
+		t.Errorf("expected pyproject.toml to suppress missing project root warning, but got:\n%s", string(out2))
+	}
+
+	// 3. Umbrella directory with child .git: should NOT emit missing project root warning
+	umbrellaDir := filepath.Join(tmpDir, "umbrelladir")
+	childGit := filepath.Join(umbrellaDir, "childrepo", ".git")
+	_ = os.MkdirAll(childGit, 0700)
+	if err := os.Chdir(umbrellaDir); err != nil {
+		t.Fatalf("failed to chdir: %v", err)
+	}
+
+	cmd3 := exec.Command(binPath, "profile", "new", "testumbrella", "--seed", mnemonic, "--secrc")
+	cmd3.Env = append(os.Environ(),
+		"SEC_CONFIG_DIR="+configDir,
+		"SEC_TEST_MODE=1",
+	)
+	out3, err3 := cmd3.CombinedOutput()
+	if err3 != nil {
+		t.Fatalf("profile new failed: %v\nOutput: %s", err3, string(out3))
+	}
+	if strings.Contains(string(out3), "does not appear to be a Git repository") {
+		t.Errorf("expected child .git to suppress missing project root warning, but got:\n%s", string(out3))
+	}
+}
+
 func TestProfileNewUpfrontChoiceLinkExisting(t *testing.T) {
 	tmpDir := t.TempDir()
 	binPath := filepath.Join(tmpDir, "sec_profile_choice_test")
@@ -907,7 +995,7 @@ func TestProfileNewInvalidChoiceAndInvalidSeed(t *testing.T) {
 		t.Errorf("expected error about invalid choice, got:\n%s", string(out))
 	}
 
-	// 2. Choice 2 with invalid mnemonic
+	// 2. Choice 2 with invalid mnemonic (word count error)
 	cmd2 := exec.Command(binPath, "profile", "new", "badseedprof", "--no-secrc")
 	cmd2.Env = append(os.Environ(),
 		"SEC_CONFIG_DIR="+tmpDir,
@@ -920,6 +1008,25 @@ func TestProfileNewInvalidChoiceAndInvalidSeed(t *testing.T) {
 	}
 	if !strings.Contains(string(out2), "not a valid 24-word BIP39 mnemonic") {
 		t.Errorf("expected error about invalid BIP39 mnemonic, got:\n%s", string(out2))
+	}
+	if !strings.Contains(string(out2), "mnemonic must have 24 words, got 8") {
+		t.Errorf("expected detailed word count diagnostic, got:\n%s", string(out2))
+	}
+
+	// 2b. Choice 2 with unknown dictionary word in 24-word phrase
+	unknownWordPhrase := "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon aple"
+	cmd2b := exec.Command(binPath, "profile", "new", "badwordprof", "--no-secrc")
+	cmd2b.Env = append(os.Environ(),
+		"SEC_CONFIG_DIR="+tmpDir,
+		"SEC_TEST_MODE=1",
+	)
+	cmd2b.Stdin = strings.NewReader("2\n" + unknownWordPhrase + "\n")
+	out2b, err2b := cmd2b.CombinedOutput()
+	if err2b == nil {
+		t.Fatalf("expected profile new with unknown word to fail, but succeeded with output:\n%s", string(out2b))
+	}
+	if !strings.Contains(string(out2b), `mnemonic word "aple" is not in BIP39 wordlist`) {
+		t.Errorf("expected detailed unknown word diagnostic for 'aple', got:\n%s", string(out2b))
 	}
 
 	// 3. Non-interactive with --reuse-seed should exit 78
@@ -940,6 +1047,147 @@ func TestProfileNewInvalidChoiceAndInvalidSeed(t *testing.T) {
 		t.Errorf("expected blocker box to recommend command with --reuse-seed, got:\n%s", string(out3))
 	}
 }
+
+func TestProfileDescribeAndSummaryIntegration(t *testing.T) {
+	tmpDir := t.TempDir()
+	binPath := filepath.Join(tmpDir, "sec_profile_summary_bin")
+	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build binary: %v, output: %s", err, string(out))
+	}
+
+	mnemonic, err := crypto.GenerateMnemonic()
+	if err != nil {
+		t.Fatalf("failed to generate mnemonic: %v", err)
+	}
+
+	// 1. Create a new profile with --summary
+	cmdNew := exec.Command(binPath, "profile", "new", "k8s-infra", "--seed", mnemonic, "--summary", "Kubernetes cluster production keys", "--no-secrc")
+	cmdNew.Env = append(os.Environ(),
+		"SEC_CONFIG_DIR="+tmpDir,
+		"SEC_TEST_MODE=1",
+	)
+	outNew, errNew := cmdNew.CombinedOutput()
+	if errNew != nil {
+		t.Fatalf("profile new with summary failed: %v, output:\n%s", errNew, string(outNew))
+	}
+
+	// 2. Describe profile (text output)
+	cmdDesc := exec.Command(binPath, "profile", "describe", "k8s-infra")
+	cmdDesc.Env = append(os.Environ(), "SEC_CONFIG_DIR="+tmpDir)
+	outDesc, errDesc := cmdDesc.CombinedOutput()
+	if errDesc != nil {
+		t.Fatalf("profile describe failed: %v, output:\n%s", errDesc, string(outDesc))
+	}
+	descStr := string(outDesc)
+	if !strings.Contains(descStr, "Profile:    k8s-infra") {
+		t.Errorf("expected profile describe output to contain profile name, got:\n%s", descStr)
+	}
+	if !strings.Contains(descStr, "Summary:    Kubernetes cluster production keys") {
+		t.Errorf("expected profile describe output to contain summary, got:\n%s", descStr)
+	}
+	if !strings.Contains(descStr, "Format:     v2.0 Dual-Slot") {
+		t.Errorf("expected format v2.0 Dual-Slot, got:\n%s", descStr)
+	}
+
+	// 3. Describe profile (--json)
+	cmdDescJSON := exec.Command(binPath, "profile", "describe", "k8s-infra", "--json")
+	cmdDescJSON.Env = append(os.Environ(), "SEC_CONFIG_DIR="+tmpDir)
+	outJSON, errJSON := cmdDescJSON.CombinedOutput()
+	if errJSON != nil {
+		t.Fatalf("profile describe --json failed: %v, output:\n%s", errJSON, string(outJSON))
+	}
+	var jsonMap map[string]interface{}
+	if err := json.Unmarshal(outJSON, &jsonMap); err != nil {
+		t.Fatalf("failed to parse JSON from profile describe --json: %v, output: %s", err, string(outJSON))
+	}
+	if jsonMap["profile"] != "k8s-infra" {
+		t.Errorf("expected json profile 'k8s-infra', got: %v", jsonMap["profile"])
+	}
+	if jsonMap["summary"] != "Kubernetes cluster production keys" {
+		t.Errorf("expected json summary 'Kubernetes cluster production keys', got: %v", jsonMap["summary"])
+	}
+	if jsonMap["is_v2"] != true || jsonMap["has_slot1"] != true {
+		t.Errorf("expected is_v2 and has_slot1 true, got: %v, %v", jsonMap["is_v2"], jsonMap["has_slot1"])
+	}
+
+	// 4. List profiles and verify columnar formatting
+	cmdLs := exec.Command(binPath, "profile", "ls")
+	cmdLs.Env = append(os.Environ(), "SEC_CONFIG_DIR="+tmpDir)
+	outLs, errLs := cmdLs.CombinedOutput()
+	if errLs != nil {
+		t.Fatalf("profile ls failed: %v, output:\n%s", errLs, string(outLs))
+	}
+	lsStr := string(outLs)
+	if !strings.Contains(lsStr, "k8s-infra") || !strings.Contains(lsStr, "[v2.0 Dual-Slot]") || !strings.Contains(lsStr, "Kubernetes cluster production keys") {
+		t.Errorf("expected profile ls to show profile, status, and summary, got:\n%s", lsStr)
+	}
+
+	// 5. Update summary via describe
+	cmdUpdate := exec.Command(binPath, "profile", "describe", "k8s-infra", "--summary", "Updated cluster secrets")
+	cmdUpdate.Env = append(os.Environ(), "SEC_CONFIG_DIR="+tmpDir)
+	outUpdate, errUpdate := cmdUpdate.CombinedOutput()
+	if errUpdate != nil {
+		t.Fatalf("profile describe update summary failed: %v, output:\n%s", errUpdate, string(outUpdate))
+	}
+	if !strings.Contains(string(outUpdate), "Summary updated for profile \"k8s-infra\": Updated cluster secrets") {
+		t.Errorf("expected update confirmation message, got:\n%s", string(outUpdate))
+	}
+
+	// Verify update took effect
+	cmdCheckUpdate := exec.Command(binPath, "profile", "describe", "k8s-infra")
+	cmdCheckUpdate.Env = append(os.Environ(), "SEC_CONFIG_DIR="+tmpDir)
+	outCheck, errCheck := cmdCheckUpdate.CombinedOutput()
+	if errCheck != nil {
+		t.Fatalf("profile describe check failed: %v, output:\n%s", errCheck, string(outCheck))
+	}
+	if !strings.Contains(string(outCheck), "Summary:    Updated cluster secrets") {
+		t.Errorf("expected updated summary in describe output, got:\n%s", string(outCheck))
+	}
+
+	// 6. Clear summary via describe
+	cmdClear := exec.Command(binPath, "profile", "describe", "k8s-infra", "--clear-summary")
+	cmdClear.Env = append(os.Environ(), "SEC_CONFIG_DIR="+tmpDir)
+	outClear, errClear := cmdClear.CombinedOutput()
+	if errClear != nil {
+		t.Fatalf("profile describe --clear-summary failed: %v, output:\n%s", errClear, string(outClear))
+	}
+	if !strings.Contains(string(outClear), "Summary cleared for profile \"k8s-infra\"") {
+		t.Errorf("expected clear confirmation message, got:\n%s", string(outClear))
+	}
+
+	// Verify cleared summary
+	cmdCheckClear := exec.Command(binPath, "profile", "describe", "k8s-infra")
+	cmdCheckClear.Env = append(os.Environ(), "SEC_CONFIG_DIR="+tmpDir)
+	outCheckClear, _ := cmdCheckClear.CombinedOutput()
+	if !strings.Contains(string(outCheckClear), "Summary:    (none)") {
+		t.Errorf("expected (none) for cleared summary, got:\n%s", string(outCheckClear))
+	}
+}
+
+func TestHasProjectRootMarkersExtended(t *testing.T) {
+	markers := []string{".arjan", ".agent", "config.yaml", "config.yml"}
+	for _, m := range markers {
+		tmpDir := t.TempDir()
+		if hasProjectRootMarkers(tmpDir) {
+			t.Errorf("expected empty dir to not have root markers")
+		}
+		markerPath := filepath.Join(tmpDir, m)
+		if strings.HasPrefix(m, ".") {
+			if err := os.Mkdir(markerPath, 0755); err != nil {
+				t.Fatalf("failed to create dir marker %s: %v", m, err)
+			}
+		} else {
+			if err := os.WriteFile(markerPath, []byte("key: val\n"), 0644); err != nil {
+				t.Fatalf("failed to create file marker %s: %v", m, err)
+			}
+		}
+		if !hasProjectRootMarkers(tmpDir) {
+			t.Errorf("expected dir with %s to be recognized as project root", m)
+		}
+	}
+}
+
 
 
 

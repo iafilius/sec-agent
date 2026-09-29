@@ -615,6 +615,8 @@ func TestSubcommandHelpFlagsPureNoOp(t *testing.T) {
 		args        []string
 		expectedSub string
 	}{
+		{[]string{"--help"}, "Usage: sec-agent"},
+		{[]string{"-h"}, "Usage: sec-agent"},
 		{[]string{"migrate-v2", "--help"}, "Command:     migrate-v2"},
 		{[]string{"migrate-v2", "-h"}, "Command:     migrate-v2"},
 		{[]string{"help", "migrate-v2"}, "Command:     migrate-v2"},
@@ -632,6 +634,9 @@ func TestSubcommandHelpFlagsPureNoOp(t *testing.T) {
 		}
 		if !strings.Contains(string(out), tc.expectedSub) {
 			t.Errorf("expected output to contain %q for args %v, got: %s", tc.expectedSub, tc.args, string(out))
+		}
+		if !strings.Contains(string(out), "Feedback & Proposals: Run 'sec feedback' or visit https://github.com/iafilius/sec-agent") {
+			t.Errorf("expected help output to contain feedback notice for args %v, got: %s", tc.args, string(out))
 		}
 		// Confirm NO mutation / migration ran
 		if strings.Contains(string(out), "24-word recovery mnemonic") {

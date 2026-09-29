@@ -148,10 +148,16 @@ func MnemonicToEntropy(mnemonic string) ([]byte, error) {
 	return entropy, nil
 }
 
+// ValidateMnemonic verifies that the string is a valid 24-word BIP39 mnemonic with a valid checksum.
+// Returns a descriptive error detailing why validation failed (e.g. word count, unknown word, or checksum mismatch).
+func ValidateMnemonic(mnemonic string) error {
+	_, err := MnemonicToEntropy(mnemonic)
+	return err
+}
+
 // MnemonicValid returns true if the 24-word BIP39 mnemonic is valid and its checksum passes.
 func MnemonicValid(mnemonic string) bool {
-	_, err := MnemonicToEntropy(mnemonic)
-	return err == nil
+	return ValidateMnemonic(mnemonic) == nil
 }
 
 // MnemonicToPassphrase converts a 24-word mnemonic to a passphrase string

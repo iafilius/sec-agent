@@ -170,6 +170,11 @@ func TestShellCompletionOutput(t *testing.T) {
 		if !strings.Contains(out, "env") {
 			t.Errorf("expected shell completion for %s to contain 'env', got:\n%s", shell, out)
 		}
+		for _, cmd := range []string{"pipe", "describe", "edit-notes"} {
+			if !strings.Contains(out, cmd) {
+				t.Errorf("expected shell completion for %s to contain command %q, got:\n%s", shell, cmd, out)
+			}
+		}
 		if shell == "fish" {
 			if !strings.Contains(out, "-l repair") {
 				t.Errorf("expected shell completion for fish to contain '-l repair', got:\n%s", out)
@@ -177,12 +182,18 @@ func TestShellCompletionOutput(t *testing.T) {
 			if !strings.Contains(out, "-s E") {
 				t.Errorf("expected shell completion for fish to contain '-s E', got:\n%s", out)
 			}
+			if !strings.Contains(out, "-l stdin-key") {
+				t.Errorf("expected shell completion for fish to contain '-l stdin-key', got:\n%s", out)
+			}
 		} else {
 			if !strings.Contains(out, "--repair") {
 				t.Errorf("expected shell completion for %s to contain '--repair', got:\n%s", shell, out)
 			}
 			if !strings.Contains(out, "-E") {
 				t.Errorf("expected shell completion for %s to contain '-E', got:\n%s", shell, out)
+			}
+			if !strings.Contains(out, "--stdin-key") {
+				t.Errorf("expected shell completion for %s to contain '--stdin-key', got:\n%s", shell, out)
 			}
 		}
 	}
@@ -265,6 +276,15 @@ var recognizedFlagAliases = map[string]map[string]bool{
 		"--scan-leaks":   true, // Alias for --leaks
 		"--history":      true, // Alias for --leaks
 		"--scan-scripts": true, // Alias for --scripts
+	},
+	"set": {
+		"--description": true, // Alias for --desc
+	},
+	"relabel": {
+		"--description": true, // Alias for --desc
+	},
+	"run": {
+		"--stdin-no-newline": true, // Alias for --stdin-raw
 	},
 }
 

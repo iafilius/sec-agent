@@ -17,6 +17,8 @@ type SecretVersion struct {
 	Version      int               `json:"version"`
 	Value        string            `json:"value"`
 	Comment      string            `json:"comment,omitempty"`
+	Description  string            `json:"description,omitempty"`
+	Notes        string            `json:"notes,omitempty"`
 	Metadata     map[string]string `json:"metadata,omitempty"`
 	LastModified time.Time         `json:"last_modified"`
 }
@@ -25,6 +27,8 @@ type SecretVersion struct {
 type SecretEntry struct {
 	Value        string            `json:"value"`
 	Comment      string            `json:"comment,omitempty"`
+	Description  string            `json:"description,omitempty"`
+	Notes        string            `json:"notes,omitempty"`
 	Metadata     map[string]string `json:"metadata,omitempty"`
 	Created      time.Time         `json:"created"`
 	LastModified time.Time         `json:"last_modified"`
@@ -269,6 +273,7 @@ func SaveStore(profile string, store *EncryptedStore, masterKey []byte) error {
 	if IsV2Vault(path) {
 		if existingEnv, err := ReadVaultEnvelope(path); err == nil && existingEnv != nil {
 			env.UpgradedAt = existingEnv.UpgradedAt
+			env.Summary = existingEnv.Summary
 			env.Slot1 = existingEnv.Slot1
 		}
 	}

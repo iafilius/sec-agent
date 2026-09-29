@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -239,6 +240,9 @@ func handleProfile(profile string, args []string) {
 	case "ls", "list":
 		handleProfileList()
 		return
+	case "describe", "info":
+		handleProfileDescribe(profile, args[1:])
+		return
 	case "set-env":
 		if len(args) < 2 {
 			fmt.Fprintln(os.Stderr, "Usage: sec profile set-env <dev|dta|staging|prod> [--profile <name>]")
@@ -266,7 +270,7 @@ func handleProfile(profile string, args []string) {
 		return
 	}
 
-	fmt.Fprintln(os.Stderr, "Usage: sec profile [new <name> [--seed <mnemonic>]] [ls] [set-env dev|dta|staging|prod]")
+	fmt.Fprintln(os.Stderr, "Usage: sec profile [new <name> [--summary <text>] [--seed <mnemonic>]] [ls] [describe <name> [--summary <text>] [--clear-summary] [--json]] [set-env dev|dta|staging|prod]")
 	os.Exit(1)
 }
 
@@ -280,6 +284,13 @@ func handleProfileList() {
 		return
 	}
 	fmt.Println("Discovered Profiles:")
+	hasAnySummary := false
+	for _, v := range vaults {
+		if v.Summary != "" {
+			hasAnySummary = true
+			break
+		}
+	}
 	for _, v := range vaults {
 		status := "v1.0"
 		if v.IsV2 {
@@ -289,13 +300,165 @@ func handleProfileList() {
 				status = "v2.0 (Slot 1 missing)"
 			}
 		}
-		fmt.Printf("  • %-20s [%s]\n", v.Profile, status)
+		statusStr := fmt.Sprintf("[%s]", status)
+		if hasAnySummary {
+			if v.Summary != "" {
+				fmt.Printf("  • %-20s %-16s  %s\n", v.Profile, statusStr, v.Summary)
+			} else {
+				fmt.Printf("  • %-20s %s\n", v.Profile, statusStr)
+			}
+		} else {
+			fmt.Printf("  • %-20s [%s]\n", v.Profile, status)
+		}
+	}
+}
+
+func handleProfileDescribe(profile string, args []string) {
+	var name string
+	var summaryText string
+	hasSummary := false
+	clearSummary := false
+	jsonOutput := false
+
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--help" || a == "-h" || a == "help" {
+			fmt.Println("Usage: sec profile describe <name> [--summary <text>] [--clear-summary] [--json]")
+			fmt.Println("\nInspect or update unencrypted profile metadata and summary without Touch ID biometrics.")
+			return
+		}
+		if a == "--json" {
+			jsonOutput = true
+		} else if a == "--clear-summary" {
+			clearSummary = true
+		} else if a == "--summary" && i+1 < len(args) {
+			summaryText = args[i+1]
+			hasSummary = true
+			i++
+		} else if strings.HasPrefix(a, "--summary=") {
+			summaryText = strings.TrimPrefix(a, "--summary=")
+			hasSummary = true
+		} else if a == "--profile" && i+1 < len(args) {
+			name = args[i+1]
+			i++
+		} else if strings.HasPrefix(a, "--profile=") {
+			name = strings.TrimPrefix(a, "--profile=")
+		} else if !strings.HasPrefix(a, "-") && name == "" {
+			name = a
+		}
+	}
+
+	if name == "" {
+		if profile != "" {
+			name = profile
+		} else {
+			name = "default"
+		}
+	}
+
+	pName := store.ProfileName(name)
+	if err := pName.Validate(); err != nil {
+		fail("INVALID_PROFILE_NAME", fmt.Errorf("invalid profile name %q: %w", name, err), "Profile names must contain only alphanumeric characters, dashes, and underscores.")
+	}
+
+	vaultPath := store.GetStorePathForProfile(pName.String())
+	// #nosec G304 G703
+	if _, err := os.Stat(vaultPath); os.IsNotExist(err) {
+		fail("PROFILE_NOT_FOUND", fmt.Errorf("profile %q not found at %s", pName.String(), vaultPath), "Run 'sec profile ls' to view existing profiles or 'sec profile new "+pName.String()+"' to create it.")
+	}
+
+	if hasSummary && clearSummary {
+		fail("INVALID_ARGUMENT", fmt.Errorf("cannot specify both --summary and --clear-summary"), "")
+	}
+
+	if clearSummary {
+		if err := store.UpdateProfileSummary(pName.String(), ""); err != nil {
+			fail("UPDATE_SUMMARY_FAILED", fmt.Errorf("failed to clear profile summary: %w", err), "")
+		}
+		if jsonOutput {
+			fmt.Printf("{\"profile\":%q,\"summary\":\"\",\"status\":\"cleared\"}\n", pName.String())
+		} else {
+			fmt.Printf("✅ Summary cleared for profile %q.\n", pName.String())
+		}
+		return
+	}
+
+	if hasSummary {
+		summaryText = strings.Trim(strings.TrimSpace(summaryText), `"'`)
+		if err := store.UpdateProfileSummary(pName.String(), summaryText); err != nil {
+			fail("UPDATE_SUMMARY_FAILED", fmt.Errorf("failed to update profile summary: %w", err), "")
+		}
+		if jsonOutput {
+			fmt.Printf("{\"profile\":%q,\"summary\":%q,\"status\":\"updated\"}\n", pName.String(), summaryText)
+		} else {
+			if summaryText == "" {
+				fmt.Printf("✅ Summary cleared for profile %q.\n", pName.String())
+			} else {
+				fmt.Printf("✅ Summary updated for profile %q: %s\n", pName.String(), summaryText)
+			}
+		}
+		return
+	}
+
+	// Read and inspect profile envelope
+	env, err := store.ReadVaultEnvelope(vaultPath)
+	if err != nil {
+		fail("VAULT_READ_ERROR", fmt.Errorf("failed to read vault envelope: %w", err), "")
+	}
+
+	status := "v1.0"
+	isV2 := env != nil && env.SchemaVersion == store.SchemaV2
+	hasSlot1 := env != nil && env.Slot1 != nil
+	if isV2 {
+		if hasSlot1 {
+			status = "v2.0 Dual-Slot"
+		} else {
+			status = "v2.0 (Slot 1 missing)"
+		}
+	}
+
+	summary := ""
+	if env != nil {
+		summary = env.Summary
+	}
+
+	if jsonOutput {
+		type profileInfo struct {
+			Profile  string `json:"profile"`
+			Summary  string `json:"summary,omitempty"`
+			Path     string `json:"path"`
+			IsV2     bool   `json:"is_v2"`
+			HasSlot1 bool   `json:"has_slot1"`
+			Status   string `json:"status"`
+		}
+		info := profileInfo{
+			Profile:  pName.String(),
+			Summary:  summary,
+			Path:     vaultPath,
+			IsV2:     isV2,
+			HasSlot1: hasSlot1,
+			Status:   status,
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(info)
+		return
+	}
+
+	fmt.Printf("Profile:    %s\n", pName.String())
+	fmt.Printf("Vault Path: %s\n", vaultPath)
+	fmt.Printf("Format:     %s\n", status)
+	if summary != "" {
+		fmt.Printf("Summary:    %s\n", summary)
+	} else {
+		fmt.Printf("Summary:    (none)\n")
 	}
 }
 
 func handleProfileNew(args []string) {
 	var name string
 	seedInput := ""
+	summaryInput := ""
 	autoSecrc := false
 	noSecrc := false
 	reuseSeed := false
@@ -303,11 +466,16 @@ func handleProfileNew(args []string) {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if a == "--help" || a == "-h" || a == "help" {
-			fmt.Println("Usage: sec profile new <name> [--seed <mnemonic>] [--reuse-seed|--existing-seed] [--secrc|--no-secrc]")
+			fmt.Println("Usage: sec profile new <name> [--summary <text>] [--seed <mnemonic>] [--reuse-seed|--existing-seed] [--secrc|--no-secrc]")
 			fmt.Println("\nCreate a new named profile with Dual-Slot Touch ID (Slot 0) and BIP39 recovery seed (Slot 1).")
 			return
 		}
-		if a == "--seed" && i+1 < len(args) {
+		if a == "--summary" && i+1 < len(args) {
+			summaryInput = strings.Trim(args[i+1], `"'`)
+			i++
+		} else if strings.HasPrefix(a, "--summary=") {
+			summaryInput = strings.Trim(strings.TrimPrefix(a, "--summary="), `"'`)
+		} else if a == "--seed" && i+1 < len(args) {
 			seedInput = strings.Trim(args[i+1], `"'`)
 			i++
 		} else if strings.HasPrefix(a, "--seed=") {
@@ -324,7 +492,7 @@ func handleProfileNew(args []string) {
 	}
 
 	if name == "" {
-		fmt.Fprintln(os.Stderr, "Usage: sec profile new <name> [--seed <mnemonic>] [--reuse-seed|--existing-seed] [--secrc|--no-secrc]")
+		fmt.Fprintln(os.Stderr, "Usage: sec profile new <name> [--summary <text>] [--seed <mnemonic>] [--reuse-seed|--existing-seed] [--secrc|--no-secrc]")
 		os.Exit(1)
 	}
 
@@ -381,8 +549,8 @@ func handleProfileNew(args []string) {
 			fmt.Print("Enter your existing 24-word recovery seed phrase: ")
 			existingSeed, _ := reader.ReadString('\n')
 			existingSeed = strings.Trim(strings.TrimSpace(existingSeed), `"'`)
-			if !crypto.MnemonicValid(existingSeed) {
-				fmt.Fprintln(os.Stderr, "\n❌ Provided seed phrase is not a valid 24-word BIP39 mnemonic. Aborting.")
+			if err := crypto.ValidateMnemonic(existingSeed); err != nil {
+				fmt.Fprintf(os.Stderr, "\n❌ Provided seed phrase is not a valid 24-word BIP39 mnemonic: %v. Aborting.\n", err)
 				os.Exit(1)
 			}
 			mnemonic = existingSeed
@@ -417,8 +585,8 @@ func handleProfileNew(args []string) {
 					fmt.Print("Enter your existing 24-word recovery seed phrase: ")
 					existingSeed, _ := reader.ReadString('\n')
 					existingSeed = strings.Trim(strings.TrimSpace(existingSeed), `"'`)
-					if !crypto.MnemonicValid(existingSeed) {
-						fmt.Fprintln(os.Stderr, "\n❌ Provided seed phrase is not a valid 24-word BIP39 mnemonic. Aborting.")
+					if err := crypto.ValidateMnemonic(existingSeed); err != nil {
+						fmt.Fprintf(os.Stderr, "\n❌ Provided seed phrase is not a valid 24-word BIP39 mnemonic: %v. Aborting.\n", err)
 						os.Exit(1)
 					}
 					mnemonic = existingSeed
@@ -435,8 +603,8 @@ func handleProfileNew(args []string) {
 			fail("INVALID_CHOICE", fmt.Errorf("invalid choice %q: must be 1 or 2", choice), "Select 1 to generate a new seed or 2 to link an existing seed.")
 		}
 	} else {
-		if !crypto.MnemonicValid(mnemonic) {
-			fmt.Fprintln(os.Stderr, "❌ Provided seed phrase is not a valid 24-word BIP39 mnemonic.")
+		if err := crypto.ValidateMnemonic(mnemonic); err != nil {
+			fmt.Fprintf(os.Stderr, "❌ Provided seed phrase is not a valid 24-word BIP39 mnemonic: %v\n", err)
 			os.Exit(1)
 		}
 	}
@@ -469,6 +637,9 @@ func handleProfileNew(args []string) {
 	}
 	env.Slot1 = slot1
 	env.UpgradedAt = time.Now().UTC()
+	if summaryInput != "" {
+		env.Summary = summaryInput
+	}
 	if writeErr := store.WriteVaultEnvelope(vaultPath, env); writeErr != nil {
 		store.ZeroBytes(masterKey)
 		fail("VAULT_WRITE_ERROR", fmt.Errorf("failed to write complete Dual-Slot vault: %w", writeErr), "")
@@ -529,18 +700,9 @@ func handleProfileNew(args []string) {
 				fmt.Printf("⚠️  Notice: Creating .secrc in a home/system directory (%s).\n", cwd)
 				fmt.Printf("   All child projects without their own .secrc will inherit profile %q via upward traversal!\n", pName.String())
 				fmt.Printf("   Consider running 'sec profile new' inside your specific project repository.\n")
-			} else {
-				isGit := false
-				for _, marker := range []string{".git", "go.mod", "package.json", "Makefile"} {
-					if _, err := os.Stat(filepath.Join(cwd, marker)); err == nil {
-						isGit = true
-						break
-					}
-				}
-				if !isGit {
-					fmt.Printf("⚠️  Warning: Current directory (%s) does not appear to be a Git repository or project root.\n", cwd)
-					fmt.Printf("   Any sibling/subdirectories will inherit profile %q via upward traversal!\n", pName.String())
-				}
+			} else if !hasProjectRootMarkers(cwd) {
+				fmt.Printf("⚠️  Warning: Current directory (%s) does not appear to be a Git repository or project root.\n", cwd)
+				fmt.Printf("   All child subdirectories will inherit profile %q via upward traversal!\n", pName.String())
 			}
 		}
 
@@ -553,6 +715,43 @@ func handleProfileNew(args []string) {
 			fmt.Printf("   Scope: Active for this directory and all subdirectories.\n")
 		}
 	}
+}
+
+func hasProjectRootMarkers(dir string) bool {
+	markers := []string{
+		".git",
+		".arjan",
+		".agent",
+		"config.yaml",
+		"config.yml",
+		"go.mod",
+		"package.json",
+		"Makefile",
+		"pyproject.toml",
+		"requirements.txt",
+		"Cargo.toml",
+		"docker-compose.yml",
+		"compose.yaml",
+		"README.md",
+	}
+	for _, m := range markers {
+		if _, err := os.Stat(filepath.Join(dir, m)); err == nil {
+			return true
+		}
+	}
+
+	// Check immediate subdirectories for .git (e.g. umbrella workspace with child sub-repository)
+	entries, err := os.ReadDir(dir)
+	if err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() {
+				if _, err := os.Stat(filepath.Join(dir, entry.Name(), ".git")); err == nil {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func handleLegacyExportEnv(profile string, args []string) {
@@ -833,6 +1032,8 @@ func handleRun(profile string, args []string) {
 	noRedact := false
 	sshKeyPath := ""
 	sshPassphraseVaultKey := ""
+	stdinKeyPath := ""
+	stdinRaw := false
 
 	cmdIndex := -1
 	for i := 0; i < len(args); i++ {
@@ -845,6 +1046,13 @@ func handleRun(profile string, args []string) {
 			i++
 		} else if strings.HasPrefix(args[i], "--group=") {
 			groupPrefix = strings.TrimPrefix(args[i], "--group=")
+		} else if args[i] == "--stdin-key" && i+1 < len(args) {
+			stdinKeyPath = args[i+1]
+			i++
+		} else if strings.HasPrefix(args[i], "--stdin-key=") {
+			stdinKeyPath = strings.TrimPrefix(args[i], "--stdin-key=")
+		} else if args[i] == "--stdin-raw" || args[i] == "--stdin-no-newline" {
+			stdinRaw = true
 		} else if args[i] == "--allow-keys" && i+1 < len(args) {
 			allowedKeys = strings.Split(args[i+1], ",")
 			i++
@@ -870,13 +1078,38 @@ func handleRun(profile string, args []string) {
 	}
 
 	if cmdIndex == -1 || cmdIndex >= len(args) {
-		fail("INVALID_ARGUMENTS", fmt.Errorf("no target command specified. Separate subagent flags and target command using '--'"), "Usage: sec run [--group <prefix>] [--ssh-key <path>] -- <cmd> [args...]")
+		fail("INVALID_ARGUMENTS", fmt.Errorf("no target command specified. Separate subagent flags and target command using '--'"), "Usage: sec run [--group <prefix>] [--stdin-key <key>] [--stdin-raw] [--ssh-key <path>] -- <cmd> [args...]")
 	}
 
 	targetCmd := args[cmdIndex]
 	targetArgs := args[cmdIndex+1:]
 
 	checkProductionGuard(store.ProfileName(profile), args)
+
+	var stdinSecretBytes []byte
+	if stdinKeyPath != "" {
+		getResp, err := queryDaemon(profile, daemon.IPCRequest{
+			Action: "get",
+			Path:   stdinKeyPath,
+		})
+		if err != nil {
+			failDaemonNotRunning(profile)
+		}
+		if !getResp.Success {
+			code, rem := mapDaemonError(getResp.Error)
+			fail(code, fmt.Errorf("failed to fetch stdin key %q: %s", stdinKeyPath, getResp.Error), rem)
+		}
+		val := getResp.Value
+		if !stdinRaw {
+			val += "\n"
+		}
+		stdinSecretBytes = []byte(val)
+	}
+	defer func() {
+		if len(stdinSecretBytes) > 0 {
+			store.ZeroBytes(stdinSecretBytes)
+		}
+	}()
 
 	resp, err := queryDaemon(profile, daemon.IPCRequest{
 		Action: "get_group",
@@ -1011,6 +1244,9 @@ func handleRun(profile string, args []string) {
 			tier = config.TierDev
 		}
 		fmt.Printf("Vault Profile:      %s (Tier: %s)\n", profile, strings.ToUpper(tier.String()))
+		if stdinKeyPath != "" {
+			fmt.Printf("Stdin Injection:    %s (append newline: %t)\n", stdinKeyPath, !stdinRaw)
+		}
 		fmt.Printf("Redaction Enabled:  true\n\n")
 		fmt.Printf("%-24s %-36s %s\n", "INJECTED ENV VAR", "VAULT KEY PATH", "VALUE PREVIEW")
 		fmt.Println(strings.Repeat("-", 80))
@@ -1064,7 +1300,11 @@ func handleRun(profile string, args []string) {
 		subProcess.Stdout = stdoutRedact
 		subProcess.Stderr = stderrRedact
 	}
-	subProcess.Stdin = os.Stdin
+	if len(stdinSecretBytes) > 0 {
+		subProcess.Stdin = bytes.NewReader(stdinSecretBytes)
+	} else {
+		subProcess.Stdin = os.Stdin
+	}
 
 	isTerm := term.IsTerminal(int(os.Stdin.Fd()))
 	var origPgid int

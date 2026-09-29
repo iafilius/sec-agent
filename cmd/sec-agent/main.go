@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -39,7 +40,7 @@ var (
 	confirmProdFlag bool
 )
 var (
-	Version   = "v2.14.2"
+	Version   = "v2.14.4"
 	BuildDate = "unknown"
 )
 
@@ -94,8 +95,18 @@ func fail(code string, err error, remediation string) {
 		} else {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		}
+		fmt.Fprintln(os.Stderr, "Need help or found an edge case? Run 'sec feedback'")
 	}
-	os.Exit(1)
+
+	exitCode := 1
+	if errors.Is(err, store.ErrSecretNotFound) || code == "SECRET_NOT_FOUND" {
+		exitCode = 2
+	} else if code == "DAEMON_NOT_RUNNING" {
+		exitCode = 3
+	} else if code == "INTERACTIVE_BLOCKER" {
+		exitCode = 78
+	}
+	os.Exit(exitCode)
 }
 
 func daemonNotRunningError(profile string) (error, string) {
@@ -1377,6 +1388,7 @@ func printCommandHelp(spec CommandSpec) {
 			fmt.Printf("  %s\n", f)
 		}
 	}
+	fmt.Println(feedbackNotice)
 }
 
 func main() {

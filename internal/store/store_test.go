@@ -106,3 +106,61 @@ func TestAccessTrackingAndProfileExport(t *testing.T) {
 		t.Error("expected LastAccessed to be set")
 	}
 }
+
+func TestTwoTierMetadataBackwardCompatibility(t *testing.T) {
+	// 1. Vault without description/notes must unmarshal with empty strings without error
+	legacyVaultJSON := []byte(`{
+		"secrets": {
+			"db/password": {
+				"value": "supersecret",
+				"comment": "legacy comment",
+				"created": "2026-09-01T12:00:00Z",
+				"last_modified": "2026-09-01T12:00:00Z",
+				"version": 1
+			}
+		}
+	}`)
+
+	var es EncryptedStore
+	if err := json.Unmarshal(legacyVaultJSON, &es); err != nil {
+		t.Fatalf("failed to unmarshal legacy vault: %v", err)
+	}
+
+	entry, ok := es.Secrets["db/password"]
+	if !ok {
+		t.Fatalf("expected 'db/password' to exist")
+	}
+	if entry.Description != "" {
+		t.Errorf("expected empty description, got %q", entry.Description)
+	}
+	if entry.Notes != "" {
+		t.Errorf("expected empty notes, got %q", entry.Notes)
+	}
+	if entry.Comment != "legacy comment" {
+		t.Errorf("expected comment 'legacy comment', got %q", entry.Comment)
+	}
+
+	// 2. Set description and notes, marshal, and verify round-trip
+	entry.Description = "Primary production database master password"
+	entry.Notes = "Rotated bi-weekly by DBA automation.\nContact #data-eng for access requests."
+	es.Secrets["db/password"] = entry
+
+	data, err := json.Marshal(&es)
+	if err != nil {
+		t.Fatalf("failed to marshal vault with metadata: %v", err)
+	}
+
+	var roundTrip EncryptedStore
+	if err := json.Unmarshal(data, &roundTrip); err != nil {
+		t.Fatalf("failed to unmarshal roundtrip vault: %v", err)
+	}
+
+	rtEntry := roundTrip.Secrets["db/password"]
+	if rtEntry.Description != "Primary production database master password" {
+		t.Errorf("unexpected description: %q", rtEntry.Description)
+	}
+	if rtEntry.Notes != "Rotated bi-weekly by DBA automation.\nContact #data-eng for access requests." {
+		t.Errorf("unexpected notes: %q", rtEntry.Notes)
+	}
+}
+

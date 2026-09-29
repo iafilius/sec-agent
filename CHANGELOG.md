@@ -5,6 +5,49 @@ All notable changes to `sec-agent` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v2.14.4] - 2026-09-28
+
+### Added & Enhanced
+- **`sec relabel` Flag Parity for Two-Tier Metadata**:
+  - Added `--desc`, `--description`, `--notes`, `--clear-desc`, and `--clear-notes` to `sec relabel` (and alias `sec edit-meta`), allowing updating or clearing descriptions and notes on existing secrets without modifying ciphertext or prompting for biometrics.
+- **Unencrypted Profile Summaries & Zero-Biometric Inventory (`sec profile describe` & `sec profile ls`)**:
+  - Added an optional unencrypted human-readable `Summary` string to the outer `VaultEnvelope` of `secrets_<profile>.enc` vault stores.
+  - Implemented `sec profile describe <name> [--summary <text>] [--clear-summary] [--json]` to inspect or mutate profile metadata and summaries without requiring Touch ID Keychain unlocks.
+  - Enhanced `sec profile new <name> [--summary <text>]` to store profile summaries upon initial envelope provisioning.
+  - Formatted `sec profile ls` (and `sec profile list`) output into a structured columnar table displaying profile names, schema status (`[v2.0 Dual-Slot]`), and aligned summaries.
+- **Project Root Marker Heuristic Hardening**:
+  - Extended `hasProjectRootMarkers` to recognize `.arjan`, `.agent`, `config.yaml`, and `config.yml`, preventing false-positive "not a Git repository" warnings when creating `.secrc` in multi-tier repositories or workspaces.
+- **Shell Autocompletion & Command Registry Bidirectional Parity**:
+  - Updated `CommandRegistry` with metadata and summary flags for `relabel` and `profile`.
+  - Updated shell completions across Zsh, Bash, and Fish with dynamic flag completion for `relabel` and `profile describe` / `profile new`.
+  - Verified 100% bidirectional parity via `TestCommandRegistryBidirectionalParity`.
+- **AI Skill & Documentation Sync**:
+  - Updated embedded `SKILL.md`, external integration skill, and `README.md` to `v2.14.4`.
+
+---
+
+## [v2.14.3] - 2026-09-28
+
+### Added & Enhanced
+- **Subprocess Standard Input Streaming (`sec run --stdin-key` & `sec pipe`)**:
+  - Implemented `sec run --stdin-key <key>` to inject secret values directly into a child subprocess's standard input stream in memory.
+  - Added default trailing newline (`\n`) appending required by CLI password prompts (e.g. `keepassxc-cli`, `gpg`, `docker login`), with `--stdin-raw` / `--stdin-no-newline` flag to stream exact raw bytes without newline modification.
+  - Implemented `sec pipe <key>` as a dedicated, pure binary streaming command outputting the raw decrypted secret directly to stdout with zero prefixes or ANSI color escapes, returning exit code 0 on success, 2 on not found, and 3 when locked.
+- **Two-Tier Secret Metadata Architecture (`Description` & `Notes`)**:
+  - Added first-class `Description` (concise single-line summary) and `Notes` (unbounded multiline documentation) fields to `store.SecretEntry` and `store.SecretVersion` while maintaining 100% backward compatibility with legacy v2.0 vault envelopes.
+  - Updated `sec set` with `--desc` / `--description` and `--notes` flags.
+  - Modernized `sec ls` table layout to feature a dedicated `DESCRIPTION` column with dynamic terminal truncation, falling back seamlessly to legacy `Comment`.
+- **Secret Metadata Inspection & Interactive Editor (`sec describe` & `sec edit-notes`)**:
+  - Implemented `sec describe <key> [--json]` providing a structured human-readable or JSON overview of secret metadata, creation/modification timestamps, version history, read metrics, and multiline notes.
+  - Implemented `sec edit-notes <key>` to edit operational notes via `$EDITOR` using a secure 0600 temporary file with zero-fill memory wiping on exit and strict non-interactive terminal barrier protection (exit code 78).
+- **Command Registry, Shell Completion & Universal Help Parity**:
+  - Registered `describe`, `edit-notes`, and `pipe` subcommands along with flags for `set` and `run` in `CommandRegistry`.
+  - Updated bidirectional completion parity tests and autocompletion generators across Zsh, Bash, and Fish shells.
+- **AI Agent Skill & Documentation Synchronization**:
+  - Updated embedded `SKILL.md`, external skill docs, and root `README.md` to version `v2.14.3` with detailed usage guidelines and examples.
+
+---
+
 ## [v2.14.2] - 2026-09-24
 
 ### Added & Enhanced

@@ -84,6 +84,50 @@ func TestMnemonicChecksumRejection(t *testing.T) {
 	}
 }
 
+// TestValidateMnemonicDiagnostics verifies that ValidateMnemonic returns descriptive errors.
+func TestValidateMnemonicDiagnostics(t *testing.T) {
+	mnemonic, err := GenerateMnemonic()
+	if err != nil {
+		t.Fatalf("GenerateMnemonic error: %v", err)
+	}
+
+	// 1. Valid mnemonic returns nil
+	if err := ValidateMnemonic(mnemonic); err != nil {
+		t.Errorf("expected valid mnemonic to return nil, got: %v", err)
+	}
+
+	// 2. Incorrect word count error
+	words := strings.Fields(mnemonic)
+	short := strings.Join(words[:23], " ")
+	err = ValidateMnemonic(short)
+	if err == nil || !strings.Contains(err.Error(), "mnemonic must have 24 words, got 23") {
+		t.Errorf("expected word count error 'mnemonic must have 24 words, got 23', got: %v", err)
+	}
+
+	// 3. Unknown dictionary word error
+	wordsBad := make([]string, 24)
+	copy(wordsBad, words)
+	wordsBad[13] = "aple" // not in BIP39
+	err = ValidateMnemonic(strings.Join(wordsBad, " "))
+	if err == nil || !strings.Contains(err.Error(), `mnemonic word "aple" is not in BIP39 wordlist`) {
+		t.Errorf("expected unknown word error, got: %v", err)
+	}
+
+	// 4. Checksum mismatch error
+	wordsChecksum := make([]string, 24)
+	copy(wordsChecksum, words)
+	// Change last word to another valid word to trigger checksum failure
+	if wordsChecksum[23] == "abandon" {
+		wordsChecksum[23] = "zoo"
+	} else {
+		wordsChecksum[23] = "abandon"
+	}
+	err = ValidateMnemonic(strings.Join(wordsChecksum, " "))
+	if err == nil || !strings.Contains(err.Error(), "checksum verification failed") {
+		t.Errorf("expected checksum verification error, got: %v", err)
+	}
+}
+
 // TestArgon2idKey verifies Argon2id key derivation produces 32-byte output
 // and is deterministic for the same inputs.
 func TestArgon2idKey(t *testing.T) {

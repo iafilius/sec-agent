@@ -10,6 +10,8 @@ import (
 	"secure_secrets/internal/daemon"
 )
 
+const feedbackNotice = "\n💬 Feedback & Proposals: Run 'sec feedback' or visit https://github.com/iafilius/sec-agent"
+
 func printVerboseUsage(profile string) {
 	if len(CommandRegistry) == 0 {
 		initRegistry()
@@ -104,6 +106,7 @@ func printVerboseUsage(profile string) {
 		}
 		fmt.Println()
 	}
+	fmt.Println(feedbackNotice)
 }
 
 func printUsage() {
@@ -139,6 +142,7 @@ func printUsage() {
 
 		fmt.Printf("  %-32s %s%s\n", usageText, spec.Description, aliasStr)
 	}
+	fmt.Println(feedbackNotice)
 }
 
 // HelpFlagDTO represents a CLI flag entry in JSON help output.

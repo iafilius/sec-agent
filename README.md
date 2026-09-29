@@ -24,6 +24,8 @@ It functions similarly to `ssh-agent` or `gpg-agent`, but is engineered specific
 | 🛡️ **Active Session Hijack Interceptor** | Process tree & environment scanner detects remote SSH (`sshd`, `SSH_CLIENT`) and VNC/screensharing, self-locking instantly. | Active daemon defense |
 | 📁 **Multi-Tier Environment Contexts** | Switch between `dev`, `dta`, `staging`, `prod` in memory with zero disk writes. | `sec use staging` / `sec env ls` |
 | 🚀 **Zero-Plaintext Process Injection** | Inject secrets into child processes with dynamic streaming log redaction (`[REDACTED_BY_SEC]`). | `sec run --redact -- <cmd>` |
+| 🌊 **Subprocess Stdin Streaming** | Feed secrets into child process stdin or stdout stream pipes directly in memory with zero temp files. | `sec run --stdin-key` / `sec pipe` |
+| 🔑 **Two-Tier Secret Metadata** | Separate concise summaries from multiline notes, inspectable via CLI or JSON, with interactive `$EDITOR` editing. | `sec describe` / `sec edit-notes` |
 | 📄 **Cross-Profile Template Streaming** | Interpolate mustache `{{key}}` and cross-profile `{{@env:key}}` templates from files or stdin in memory. | `sec stream <file>` |
 | 🛡️ **Git Pre-Commit Privacy Guard** | Staged file scanner combining Shannon entropy analysis and active vault exact-match leak detection. | `sec githook install / check` |
 | 🤖 **Autonomous AI Coding Partner** | Turn-1 biometric protocol, dual-audience diagnostics, and bundled Agent Skill for Antigravity & IDEs. | `sec skill install / update` |
@@ -128,7 +130,7 @@ brew install sec-agent
 Download the latest pre-compiled, macOS Hardened Runtime signed binary tarball from [GitHub Releases](https://github.com/iafilius/sec-agent/releases/latest):
 ```bash
 # Extract and install binary to /usr/local/bin
-tar -xzf sec-agent_v2.14.2_darwin_arm64.tar.gz
+tar -xzf sec-agent_v2.14.4_darwin_arm64.tar.gz
 sudo mv sec-agent /usr/local/bin/
 ```
 
@@ -214,11 +216,14 @@ eval $(sec open)
 # Prompt: Touch ID request to authorize keychain access
 ```
 
-### 2. Guided Profile Provisioning (`sec profile new`)
-Create a completely isolated profile vault in a single step with Touch ID (Slot 0) and offline 24-word recovery seed (Slot 1):
+### 2. Guided Profile Provisioning & Zero-Biometric Summaries (`sec profile`)
+Create a completely isolated profile vault in a single step with Touch ID (Slot 0), offline 24-word recovery seed (Slot 1), and an optional unencrypted profile summary:
 ```bash
 # Interactively choose between generating a new recovery seed or linking an existing master seed
 sec profile new router-ax3600-prod
+
+# Provision a new profile with an unencrypted human-readable summary
+sec profile new router-ax3600-prod --summary "OpenWrt home router gateway & Wi-Fi keys"
 
 # Directly link an existing 24-word master recovery seed phrase (skips menu and throwaway seed generation)
 sec profile new router-ax3600-prod --reuse-seed   # alias: --existing-seed
@@ -226,7 +231,14 @@ sec profile new router-ax3600-prod --reuse-seed   # alias: --existing-seed
 # Non-interactive / pre-supplied recovery seed
 sec profile new router-ax3600-prod --seed "<24-word mnemonic>" [--secrc | --no-secrc]
 
-# Inspect status of all discovered profile stores on disk
+# Inspect unencrypted profile metadata and summary without Touch ID biometrics
+sec profile describe router-ax3600-prod [--json]
+
+# Update or clear unencrypted profile summary offline without Touch ID
+sec profile describe router-ax3600-prod --summary "Updated description"
+sec profile describe router-ax3600-prod --clear-summary
+
+# Inspect status of all discovered profile stores on disk in an aligned columnar table
 sec profile ls
 ```
 
@@ -243,8 +255,21 @@ echo "secret-value" | sec set app-secrets/db-pass --stdin
 # 3. Pipe Multiline Secrets (e.g. PEM private keys, TLS certs) preserving exact bytes
 cat id_ed25519 | sec set ssh/key --stdin --no-trim
 
-# 4. Direct Positional Value
-sec set app-secrets/db-pass "my-super-secret-password"
+# 4. Direct Positional Value with Two-Tier Metadata (Description & Multiline Notes)
+sec set app-secrets/db-pass "my-super-secret-password" --desc "Primary DB master password" --notes "Rotated monthly by DBA team"
+
+# 5. Formatted Metadata Inspection (Timestamps, Versioning, Access Stats & Notes)
+sec describe app-secrets/db-pass
+sec describe app-secrets/db-pass --json
+
+# 6. Interactive Notes Editing with $EDITOR (Zero Secret Modification)
+sec edit-notes app-secrets/db-pass
+
+# 7. Update Secret Metadata Without Modifying Value or Prompting Biometrics (`sec relabel`)
+sec relabel app-secrets/db-pass --desc "Primary DB master password" --notes "Rotated monthly by DBA team"
+
+# 8. List Secrets with Description Column
+sec ls
 ```
 
 > [!TIP]
@@ -255,6 +280,15 @@ Instead of sourcing `.env` files, execute commands directly in a wrapped environ
 ```bash
 # Execute test process with secrets injected & buffer-boundary-aware redaction
 sec run --redact -- go test -v ./...
+
+# Feed secret directly into child process stdin (appends '\n' for password prompts like keepassxc-cli or gpg)
+sec run --stdin-key kdbx/master_key -- keepassxc-cli merge -s target.kdbx incoming.kdbx
+
+# In-memory stdin injection without trailing newline (pure raw bytes)
+sec run --stdin-key token/raw --stdin-raw -- ./service_consumer
+
+# Dedicated raw binary stdout stream for shell composition (0: ok, 2: not found, 3: locked)
+sec pipe kdbx/master_key | keepassxc-cli ls target.kdbx
 
 # Restrict injection strictly to specified keys (Principle of Least Privilege for AI subagents)
 sec run --allow-keys VCO_URL,VCO_ENTERPRISE_ID --redact -- make test-unit

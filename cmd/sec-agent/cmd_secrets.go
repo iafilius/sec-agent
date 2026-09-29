@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"secure_secrets/internal/config"
 	"secure_secrets/internal/daemon"
 	"sort"
@@ -218,6 +219,245 @@ func handleGet(profile string, path string, args []string) {
 	}
 }
 
+func handlePipe(profile string, args []string) {
+	if len(args) < 1 {
+		fail("INVALID_ARGUMENTS", fmt.Errorf("missing secret path argument"), "Usage: sec pipe <path>")
+	}
+	path := args[0]
+	resp, err := queryDaemon(profile, daemon.IPCRequest{
+		Action: "get",
+		Path:   path,
+	})
+	if err != nil {
+		failDaemonNotRunning(profile)
+	}
+	if !resp.Success {
+		code, rem := mapDaemonError(resp.Error)
+		fail(code, fmt.Errorf("%s", resp.Error), rem)
+	}
+
+	_, _ = os.Stdout.Write([]byte(resp.Value))
+}
+
+func handleDescribe(profile string, path string, args []string) {
+	showJSON := false
+	for _, a := range args {
+		if a == "--json" {
+			showJSON = true
+		}
+	}
+
+	resp, err := queryDaemon(profile, daemon.IPCRequest{
+		Action: daemon.IPCActionGet,
+		Path:   path,
+	})
+	if err != nil {
+		failDaemonNotRunning(profile)
+	}
+	if !resp.Success {
+		code, rem := mapDaemonError(resp.Error)
+		fail(code, fmt.Errorf("%s", resp.Error), rem)
+	}
+
+	if showJSON {
+		type DescribeJSONOutput struct {
+			Key          string            `json:"key"`
+			Description  string            `json:"description,omitempty"`
+			Notes        string            `json:"notes,omitempty"`
+			Comment      string            `json:"comment,omitempty"`
+			Created      string            `json:"created"`
+			LastModified string            `json:"last_modified"`
+			LastAccessed string            `json:"last_accessed,omitempty"`
+			AccessCount  uint64            `json:"access_count,omitempty"`
+			Expires      string            `json:"expires,omitempty"`
+			Version      int               `json:"version"`
+			Metadata     map[string]string `json:"metadata,omitempty"`
+		}
+		out := DescribeJSONOutput{
+			Key:          path,
+			Description:  resp.Description,
+			Notes:        resp.Notes,
+			Comment:      resp.Comment,
+			Created:      resp.Created.Format(time.RFC3339),
+			LastModified: resp.LastModified.Format(time.RFC3339),
+			AccessCount:  resp.AccessCount,
+			Version:      resp.ItemVersion,
+			Metadata:     resp.Metadata,
+		}
+		if !resp.LastAccessed.IsZero() {
+			out.LastAccessed = resp.LastAccessed.Format(time.RFC3339)
+		}
+		if !resp.Expires.IsZero() {
+			out.Expires = resp.Expires.Format(time.RFC3339)
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(out)
+		return
+	}
+
+	verStr := fmt.Sprintf("v%d", resp.ItemVersion)
+	if resp.ItemVersion == 0 {
+		verStr = "v1"
+	}
+	createdStr := resp.Created.Format("2006-01-02 15:04:05 MST")
+	if resp.Created.IsZero() {
+		createdStr = "-"
+	}
+	modStr := resp.LastModified.Format("2006-01-02 15:04:05 MST")
+	if resp.LastModified.IsZero() {
+		modStr = "-"
+	}
+	accStr := "Never"
+	if !resp.LastAccessed.IsZero() {
+		accStr = resp.LastAccessed.Format("2006-01-02 15:04:05 MST")
+	}
+	expStr := "Never"
+	if !resp.Expires.IsZero() {
+		expStr = resp.Expires.Format("2006-01-02 15:04:05 MST")
+	}
+
+	descStr := resp.Description
+	if descStr == "" && resp.Comment != "" {
+		descStr = resp.Comment + " (legacy comment)"
+	}
+	if descStr == "" {
+		descStr = "-"
+	}
+
+	fmt.Printf("=== 🔑 Secret Overview: %s ===\n\n", path)
+	fmt.Println("Overview:")
+	fmt.Printf("  Key:          %s\n", path)
+	fmt.Printf("  Description:  %s\n", descStr)
+	fmt.Printf("  Version:      %s\n", verStr)
+	fmt.Printf("  Access Count: %d\n\n", resp.AccessCount)
+
+	fmt.Println("Timestamps:")
+	fmt.Printf("  Created:       %s\n", createdStr)
+	fmt.Printf("  Last Modified: %s\n", modStr)
+	fmt.Printf("  Last Accessed: %s\n", accStr)
+	fmt.Printf("  Expires:       %s\n", expStr)
+
+	if len(resp.Metadata) > 0 {
+		fmt.Println("\nMetadata:")
+		var keys []string
+		for k := range resp.Metadata {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			fmt.Printf("  %s: %s\n", k, resp.Metadata[k])
+		}
+	}
+
+	fmt.Println("\nNotes:")
+	if resp.Notes != "" {
+		lines := strings.Split(resp.Notes, "\n")
+		for _, line := range lines {
+			fmt.Printf("  %s\n", line)
+		}
+	} else {
+		fmt.Println("  (No notes recorded. Run 'sec edit-notes <key>' to add notes.)")
+	}
+}
+
+func handleEditNotes(profile string, path string, args []string) {
+	if os.Getenv("SEC_TEST_MODE") != "1" && !isInteractiveTerminal() {
+		printInteractiveBlocker(fmt.Sprintf("sec edit-notes %s", path), "Opening $EDITOR requires an interactive terminal.")
+		os.Exit(78)
+	}
+
+	resp, err := queryDaemon(profile, daemon.IPCRequest{
+		Action: daemon.IPCActionGet,
+		Path:   path,
+	})
+	if err != nil {
+		failDaemonNotRunning(profile)
+	}
+	if !resp.Success {
+		code, rem := mapDaemonError(resp.Error)
+		fail(code, fmt.Errorf("%s", resp.Error), rem)
+	}
+
+	tmpFile, err := os.CreateTemp("", "sec-notes-*.txt")
+	if err != nil {
+		fail("TEMP_FILE_ERROR", fmt.Errorf("failed to create temporary notes file: %w", err), "")
+	}
+	tmpPath := tmpFile.Name()
+	defer func() {
+		if fi, err := os.Stat(tmpPath); err == nil && fi.Size() > 0 {
+			zeros := make([]byte, fi.Size())
+			// #nosec G304 G703
+			_ = os.WriteFile(tmpPath, zeros, 0600)
+		}
+		_ = os.Remove(tmpPath)
+	}()
+
+	if err := tmpFile.Chmod(0600); err != nil {
+		_ = tmpFile.Close()
+		fail("FILE_PERM_ERROR", fmt.Errorf("failed to set 0600 permissions on temp file: %w", err), "")
+	}
+
+	if _, err := tmpFile.WriteString(resp.Notes); err != nil {
+		_ = tmpFile.Close()
+		fail("TEMP_FILE_WRITE_ERROR", fmt.Errorf("failed to write existing notes to temp file: %w", err), "")
+	}
+	_ = tmpFile.Close()
+
+	editor := os.Getenv("EDITOR")
+	if editor == "" {
+		editor = os.Getenv("VISUAL")
+	}
+	if editor == "" {
+		editor = "nano"
+		if _, err := exec.LookPath("nano"); err != nil {
+			editor = "vim"
+		}
+	}
+
+	editorParts := strings.Fields(editor)
+	editorCmd := editorParts[0]
+	editorArgs := append(editorParts[1:], tmpPath)
+
+	// #nosec G204 G702
+	cmd := exec.Command(editorCmd, editorArgs...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		fail("EDITOR_EXIT_ERROR", fmt.Errorf("editor exited with error: %w", err), "Notes were not modified.")
+	}
+
+	// #nosec G304 G703
+	newNotesBytes, err := os.ReadFile(tmpPath)
+	if err != nil {
+		fail("TEMP_FILE_READ_ERROR", fmt.Errorf("failed to read back modified notes: %w", err), "")
+	}
+	newNotes := strings.TrimRight(string(newNotesBytes), "\r\n")
+
+	updateReq := daemon.IPCRequest{
+		Action: daemon.IPCActionRelabel,
+		Path:   path,
+	}
+	if newNotes == "" {
+		updateReq.ClearNotes = true
+	} else {
+		updateReq.Notes = newNotes
+	}
+
+	relabResp, err := queryDaemon(profile, updateReq)
+	if err != nil {
+		failDaemonNotRunning(profile)
+	}
+	if !relabResp.Success {
+		code, rem := mapDaemonError(relabResp.Error)
+		fail(code, fmt.Errorf("%s", relabResp.Error), rem)
+	}
+
+	fmt.Printf("Notes updated successfully for %q.\n", path)
+}
+
 func parseJwtExp(val string) (time.Time, bool) {
 	val = strings.TrimSpace(val)
 	if !strings.HasPrefix(val, "eyJ") {
@@ -346,6 +586,8 @@ func handleSet(profile string, path, value string, args []string) {
 	}
 
 	comment := ""
+	description := ""
+	notes := ""
 	metadata := make(map[string]string)
 	expiresStr := ""
 	useStdin := false
@@ -402,6 +644,22 @@ func handleSet(profile string, path, value string, args []string) {
 				i++
 			} else {
 				fmt.Fprintln(os.Stderr, "Error: --comment requires a value")
+				os.Exit(1)
+			}
+		} else if args[i] == "--desc" || args[i] == "--description" {
+			if i+1 < len(args) {
+				description = args[i+1]
+				i++
+			} else {
+				fmt.Fprintln(os.Stderr, "Error: --desc requires a value")
+				os.Exit(1)
+			}
+		} else if args[i] == "--notes" {
+			if i+1 < len(args) {
+				notes = args[i+1]
+				i++
+			} else {
+				fmt.Fprintln(os.Stderr, "Error: --notes requires a value")
 				os.Exit(1)
 			}
 		} else if args[i] == "--expires" || args[i] == "-e" {
@@ -469,12 +727,14 @@ func handleSet(profile string, path, value string, args []string) {
 	}
 
 	resp, err := queryDaemon(profile, daemon.IPCRequest{
-		Action:   daemon.IPCActionSet,
-		Path:     path,
-		Value:    value,
-		Comment:  comment,
-		Metadata: metadata,
-		Expires:  expiresTimeStr,
+		Action:      daemon.IPCActionSet,
+		Path:        path,
+		Value:       value,
+		Comment:     comment,
+		Description: description,
+		Notes:       notes,
+		Metadata:    metadata,
+		Expires:     expiresTimeStr,
 	})
 	if err != nil {
 		failDaemonNotRunning(profile)
@@ -724,12 +984,34 @@ func handleRelabel(profile string, path string, args []string) {
 	}
 
 	comment := ""
+	desc := ""
+	clearDesc := false
+	notes := ""
+	clearNotes := false
 	metadata := make(map[string]string)
 	expiresStr := ""
 	clearAlias := false
 
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
+		case "--desc", "--description":
+			if i+1 < len(args) {
+				desc = args[i+1]
+				i++
+			} else {
+				fail("MISSING_ARGUMENT", fmt.Errorf("flag --desc requires a value"), fmt.Sprintf("Example: sec relabel %s --desc \"Production DB\"", path))
+			}
+		case "--clear-desc", "--clear-description":
+			clearDesc = true
+		case "--notes":
+			if i+1 < len(args) {
+				notes = args[i+1]
+				i++
+			} else {
+				fail("MISSING_ARGUMENT", fmt.Errorf("flag --notes requires a value"), fmt.Sprintf("Example: sec relabel %s --notes \"Rotated monthly\"", path))
+			}
+		case "--clear-notes":
+			clearNotes = true
 		case "--comment", "-c":
 			if i+1 < len(args) {
 				comment = args[i+1]
@@ -783,12 +1065,16 @@ func handleRelabel(profile string, path string, args []string) {
 	}
 
 	resp, err := queryDaemon(profile, daemon.IPCRequest{
-		Action:     daemon.IPCActionRelabel,
-		Path:       path,
-		Comment:    comment,
-		Metadata:   metadata,
-		Expires:    expiresTimeStr,
-		ClearAlias: clearAlias,
+		Action:           daemon.IPCActionRelabel,
+		Path:             path,
+		Comment:          comment,
+		Description:      desc,
+		ClearDescription: clearDesc,
+		Notes:            notes,
+		ClearNotes:       clearNotes,
+		Metadata:         metadata,
+		Expires:          expiresTimeStr,
+		ClearAlias:       clearAlias,
 	})
 	if err != nil {
 		failDaemonNotRunning(profile)
@@ -1028,7 +1314,40 @@ func handleList(profile string, args []string) {
 	if showTrash {
 		fmt.Println("=== 🗑️ Soft-Deleted Secrets (Trash Bin) ===")
 	}
-	fmt.Println(resp.Value)
+
+	paths := strings.Split(resp.Value, "\n")
+	hasAnyDesc := false
+	for _, p := range paths {
+		if sec, ok := resp.Secrets[p]; ok {
+			if sec.Description != "" || sec.Comment != "" {
+				hasAnyDesc = true
+				break
+			}
+		}
+	}
+
+	if hasAnyDesc {
+		fmt.Printf("%-35s %s\n", "KEY PATH", "DESCRIPTION")
+		fmt.Println(strings.Repeat("-", 70))
+		for _, p := range paths {
+			desc := ""
+			if sec, ok := resp.Secrets[p]; ok {
+				desc = sec.Description
+				if desc == "" {
+					desc = sec.Comment
+				}
+			}
+			if desc != "" {
+				fmt.Printf("%-35s %s\n", p, desc)
+			} else {
+				fmt.Println(p)
+			}
+		}
+	} else {
+		for _, p := range paths {
+			fmt.Println(p)
+		}
+	}
 }
 
 func handleDelete(profile string, path string, args []string) {

@@ -508,3 +508,100 @@ func TestVaultEnvelopePreSaveInvariant(t *testing.T) {
 	}
 }
 
+func TestVaultEnvelopeSummary(t *testing.T) {
+	tmpDir := t.TempDir()
+	origConfigDir := os.Getenv("SEC_CONFIG_DIR")
+	defer os.Setenv("SEC_CONFIG_DIR", origConfigDir)
+	os.Setenv("SEC_CONFIG_DIR", tmpDir)
+
+	profile := "summary-test"
+	vaultPath, err := GetStorePath(profile)
+	if err != nil {
+		t.Fatalf("GetStorePath error = %v", err)
+	}
+
+	// 1. Write an initial clean envelope without summary
+	initialEnv := &VaultEnvelope{
+		SchemaVersion: SchemaV2,
+		UpgradedAt:    time.Now().UTC(),
+		Payload:       []byte("raw-cipher-data"),
+	}
+	if err := WriteVaultEnvelope(vaultPath, initialEnv); err != nil {
+		t.Fatalf("WriteVaultEnvelope error = %v", err)
+	}
+
+	// Verify initial envelope has empty summary and backward compatibility
+	readBack, err := ReadVaultEnvelope(vaultPath)
+	if err != nil {
+		t.Fatalf("ReadVaultEnvelope error = %v", err)
+	}
+	if readBack.Summary != "" {
+		t.Errorf("expected empty summary, got %q", readBack.Summary)
+	}
+
+	// Verify ListVaultFiles sees empty summary
+	vaults, err := ListVaultFiles()
+	if err != nil {
+		t.Fatalf("ListVaultFiles error = %v", err)
+	}
+	var found *VaultFileInfo
+	for i := range vaults {
+		if vaults[i].Profile == profile {
+			found = &vaults[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("profile %s not found in ListVaultFiles", profile)
+	}
+	if found.Summary != "" {
+		t.Errorf("expected found.Summary empty, got %q", found.Summary)
+	}
+
+	// 2. Update profile summary
+	testSummary := "Personal KeePass Multi-Vault Synchronization"
+	if err := UpdateProfileSummary(profile, testSummary); err != nil {
+		t.Fatalf("UpdateProfileSummary error = %v", err)
+	}
+
+	// 3. Query via GetProfileSummary
+	summary, err := GetProfileSummary(profile)
+	if err != nil {
+		t.Fatalf("GetProfileSummary error = %v", err)
+	}
+	if summary != testSummary {
+		t.Errorf("GetProfileSummary got %q, want %q", summary, testSummary)
+	}
+
+	// 4. Verify ListVaultFiles now reflects the summary
+	vaults2, err := ListVaultFiles()
+	if err != nil {
+		t.Fatalf("ListVaultFiles error = %v", err)
+	}
+	found2 := false
+	for _, v := range vaults2 {
+		if v.Profile == profile {
+			found2 = true
+			if v.Summary != testSummary {
+				t.Errorf("ListVaultFiles summary got %q, want %q", v.Summary, testSummary)
+			}
+		}
+	}
+	if !found2 {
+		t.Errorf("profile %s missing in second ListVaultFiles query", profile)
+	}
+
+	// 5. Clear profile summary
+	if err := UpdateProfileSummary(profile, ""); err != nil {
+		t.Fatalf("UpdateProfileSummary clear error = %v", err)
+	}
+	clearedSummary, err := GetProfileSummary(profile)
+	if err != nil {
+		t.Fatalf("GetProfileSummary error = %v", err)
+	}
+	if clearedSummary != "" {
+		t.Errorf("expected cleared summary, got %q", clearedSummary)
+	}
+}
+
+

@@ -32,6 +32,7 @@ func ZeroBytes(b []byte) { zeroBytes(b) }
 type VaultFileInfo struct {
 	Path         string // absolute path to the .enc file
 	Profile      string // derived profile name (e.g. "default", "dev", "prod")
+	Summary      string // optional unencrypted profile summary
 	IsV2         bool   // true if in JSON envelope format (starts with '{')
 	HasSlot1     bool   // true if Slot1 BIP39 recovery key is enrolled and non-empty
 	NestingDepth int    // envelope nesting depth (0 for non-v2, 1 for clean v2.0, >1 for nested)
@@ -70,17 +71,20 @@ func ListVaultFiles() ([]VaultFileInfo, error) {
 
 		isV2 := IsV2Vault(absPath)
 		hasSlot1 := false
+		summary := ""
 		nestingDepth := 0
 		if isV2 {
 			nestingDepth = InspectVaultNesting(absPath)
 			if env, err := ReadVaultEnvelope(absPath); err == nil && env != nil {
 				hasSlot1 = env.HasSlot1()
+				summary = env.Summary
 			}
 		}
 
 		vaults = append(vaults, VaultFileInfo{
 			Path:         absPath,
 			Profile:      profile,
+			Summary:      summary,
 			IsV2:         isV2,
 			HasSlot1:     hasSlot1,
 			NestingDepth: nestingDepth,
@@ -116,6 +120,8 @@ type VaultEnvelope struct {
 	SchemaVersion string `json:"schema_version"`
 	// UpgradedAt is the UTC timestamp when the vault was migrated to v2.0.
 	UpgradedAt time.Time `json:"upgraded_at"`
+	// Summary is an optional human-readable profile description stored in the unencrypted outer envelope.
+	Summary string `json:"summary,omitempty"`
 	// MasterKeySHA256 is the first 16 hex characters of SHA-256(masterKey)
 	MasterKeySHA256 string `json:"master_key_sha256,omitempty"`
 	// Slot1 is the BIP39/Argon2id recovery slot.
@@ -209,6 +215,7 @@ func FlattenVaultFile(path string) (int, error) {
 	cleanEnv := &VaultEnvelope{
 		SchemaVersion:   SchemaV2,
 		UpgradedAt:      outerEnv.UpgradedAt,
+		Summary:         outerEnv.Summary,
 		MasterKeySHA256: outerEnv.MasterKeySHA256,
 		Slot1:           outerEnv.Slot1,
 		Payload:         currPayload,
@@ -402,8 +409,8 @@ func UnwrapMasterKey(mnemonic string, slot1 *Slot1Header) ([]byte, error) {
 	}
 
 	// Validate mnemonic checksum before expensive KDF
-	if !crypto.MnemonicValid(mnemonic) {
-		return nil, fmt.Errorf("recovery mnemonic checksum failed — please verify all 24 words carefully")
+	if err := crypto.ValidateMnemonic(mnemonic); err != nil {
+		return nil, fmt.Errorf("invalid recovery mnemonic: %w", err)
 	}
 
 	passphrase := crypto.MnemonicToPassphrase(mnemonic)
@@ -485,6 +492,44 @@ func MigrateStageRemove() error {
 		return nil
 	}
 	return err
+}
+
+// UpdateProfileSummary updates the unencrypted profile summary in the vault envelope
+// without decrypting the inner payload or requiring Touch ID biometrics.
+func UpdateProfileSummary(profile string, summary string) error {
+	path, err := GetStorePath(profile)
+	if err != nil {
+		return err
+	}
+	if !IsV2Vault(path) {
+		return fmt.Errorf("profile %q vault is not a v2.0 envelope or does not exist", profile)
+	}
+	env, err := ReadVaultEnvelope(path)
+	if err != nil {
+		return fmt.Errorf("failed to read vault envelope: %w", err)
+	}
+	env.Summary = strings.TrimSpace(summary)
+	return WriteVaultEnvelope(path, env)
+}
+
+// GetProfileSummary reads the unencrypted profile summary from a profile's vault envelope
+// without prompting for biometrics or decrypting secrets.
+func GetProfileSummary(profile string) (string, error) {
+	path, err := GetStorePath(profile)
+	if err != nil {
+		return "", err
+	}
+	if !IsV2Vault(path) {
+		return "", nil
+	}
+	env, err := ReadVaultEnvelope(path)
+	if err != nil {
+		return "", err
+	}
+	if env == nil {
+		return "", nil
+	}
+	return env.Summary, nil
 }
 
 // zeroBytes overwrites a byte slice with zeros to reduce the window
