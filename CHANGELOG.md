@@ -5,6 +5,25 @@ All notable changes to `sec-agent` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v2.15.0] - 2026-09-29
+
+### Added & Enhanced
+- **Keychain ACL Re-Sealing & Downgrade Attack Prevention (`sec keychain`)**:
+  - **Automatic Re-Sealing on Upgrade**: Detects version transitions during `sec open` or master key unlocks, automatically re-sealing the Keychain item to the active binary under `kSecAccessControlBiometryCurrentSet | kSecAccessControlUserPresence`. This wipes historical binary `CDHash` authorizations from macOS Access Control Lists (ACLs), preventing downgrade attacks where an older vulnerable binary could otherwise prompt for Touch ID without macOS login password verification.
+  - **Dedicated CLI Subcommand Tree (`sec keychain`)**:
+    - `sec keychain prune [--profile <name>] [--all]`: Explicitly re-seals Keychain items to the active binary, purging stale historical version authorizations across a specific profile or all discovered profiles.
+    - `sec keychain status [--profile <name>] [--json]`: Inspects Keychain item presence, biometry binding mode (`BiometryCurrentSet`), creation/modification timestamps, and active version sealing alignment without prompting for Touch ID.
+  - **System Doctor Integration (`sec doctor`)**:
+    - Added Keychain ACL audit to `sec doctor` reporting active binary alignment and warning when version drift is detected.
+  - **Fail-Safe Memory Retention**:
+    - Guaranteed in-memory retention of master keys during synchronous delete-and-add cycles with automatic retry to prevent key loss.
+  - **Shell Autocompletion & Command Registry Parity**:
+    - Registered `keychain` in `CommandRegistry` with full autocompletion across Zsh, Bash, and Fish.
+- **Positional Command Disambiguation in `sec stream`**:
+  - Augmented error handling when reading positional template files in `sec stream`. When a positional argument does not exist on disk, the system inspects `$PATH` via `exec.LookPath`. If it matches an executable binary (e.g. `sec stream python3 ...`), it emits an actionable hint: `"<cmd>" matches an executable on $PATH. Did you mean 'sec run -- <cmd>' or 'sec pipe <key>'?` to prevent confusion with process execution or raw secret streaming.
+
+---
+
 ## [v2.14.4] - 2026-09-28
 
 ### Added & Enhanced

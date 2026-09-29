@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"secure_secrets/internal/daemon"
@@ -101,6 +102,18 @@ func renderStreamTemplate(activeProfile string, templateStr string, wsCfg *Works
 	return rendered, nil
 }
 
+// getStreamFileReadRemediation generates an actionable hint when a positional template argument is not found on disk.
+func getStreamFileReadRemediation(target string, allPositional []string) string {
+	if _, lookErr := exec.LookPath(target); lookErr == nil {
+		cmdStr := strings.Join(allPositional, " ")
+		if cmdStr == "" {
+			cmdStr = target
+		}
+		return fmt.Sprintf("%q matches an executable on $PATH. Did you mean 'sec run -- %s' or 'sec pipe <key>'?", target, cmdStr)
+	}
+	return "To interpolate inline templates without a file, use 'sec stream --template \"{{key}}\"' or pass template via stdin. To output a raw secret, use 'sec pipe <key>'."
+}
+
 func handleStream(profile string, args []string) {
 	filePath := ""
 	templateStr := ""
@@ -145,7 +158,11 @@ func handleStream(profile string, args []string) {
 		// #nosec G304 G703
 		data, err := os.ReadFile(posPath)
 		if err != nil {
-			fail("FILE_READ_ERROR", fmt.Errorf("failed reading template file %q: %w", positional[0], err), "")
+			remediation := ""
+			if os.IsNotExist(err) {
+				remediation = getStreamFileReadRemediation(positional[0], args)
+			}
+			fail("FILE_READ_ERROR", fmt.Errorf("failed reading template file %q: %w", positional[0], err), remediation)
 		}
 		templateStr = string(data)
 	} else {

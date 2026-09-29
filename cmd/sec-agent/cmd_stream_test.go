@@ -173,3 +173,24 @@ func TestStreamTemplateFileInput(t *testing.T) {
 	})
 }
 
+func TestStreamDisambiguation(t *testing.T) {
+	// 1. Binary on PATH (single token)
+	hintSh := getStreamFileReadRemediation("sh", []string{"sh"})
+	if !strings.Contains(hintSh, `"sh" matches an executable on $PATH`) || !strings.Contains(hintSh, "sec run -- sh") || !strings.Contains(hintSh, "sec pipe <key>") {
+		t.Errorf("unexpected hint for 'sh': %q", hintSh)
+	}
+
+	// 2. Binary on PATH with arguments
+	hintArgs := getStreamFileReadRemediation("sh", []string{"sh", "-c", "echo test"})
+	if !strings.Contains(hintArgs, "sec run -- sh -c echo test") {
+		t.Errorf("expected full command in hint for 'sh -c echo test', got: %q", hintArgs)
+	}
+
+	// 3. Non-existent binary / random string
+	bogusName := "nonexistent_binary_xyz_987654"
+	hintBogus := getStreamFileReadRemediation(bogusName, []string{bogusName})
+	if !strings.Contains(hintBogus, "sec stream --template") || !strings.Contains(hintBogus, "sec pipe <key>") {
+		t.Errorf("unexpected fallback hint for bogus name: %q", hintBogus)
+	}
+}
+

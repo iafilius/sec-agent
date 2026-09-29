@@ -1,4 +1,4 @@
-VERSION := v2.14.4
+VERSION := v2.15.0
 BUILD_DATE := $(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
 LDFLAGS := -ldflags "-X main.Version=$(VERSION) -X main.BuildDate=$(BUILD_DATE)"
 SDKROOT ?= $(shell if [ -d /Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk ]; then echo /Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk; elif [ -d /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk ]; then echo /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk; else xcrun --show-sdk-path; fi)
@@ -74,7 +74,7 @@ clean:
 	rm -rf ~/.config/sec/sec.sock ~/.config/sec-agent/sec-agent.sock
 
 test:
-	go test -v ./...
+	go test -v -p 1 ./...
 
 verify-sip: build codesign
 	@echo "Verifying codesign entitlements and flags..."
@@ -103,7 +103,7 @@ sync:
 	cp -r Formula .github go.mod go.sum Makefile LICENSE README.md CHANGELOG.md .gitignore publish/
 	@echo "=== Running Privacy Audit & Sanity Build inside publish/ ==="
 	chmod +x scripts/privacy_audit.sh && ./scripts/privacy_audit.sh publish
-	cd publish && make build codesign && make sec-check && go test -v ./...
+	cd publish && make build codesign && make sec-check && go test -v -p 1 ./...
 
 release-brew: package
 	@echo "=== Updating Homebrew Formula & Tap Repository ==="

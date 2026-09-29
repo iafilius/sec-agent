@@ -740,6 +740,27 @@ func initRegistry() {
 			},
 		},
 		{
+			Name:        "keychain",
+			Category:    "Security & Maintenance",
+			Description: "Manage macOS Keychain biometric binding and prune historical binary authorizations",
+			Usage:       "sec keychain <prune|status> [--profile <name>] [--all] [--json]",
+			Flags:       []string{"--profile", "-p", "--all", "-a", "--json"},
+			Subcommands: []SubcommandSpec{
+				{
+					Name:        "prune",
+					Description: "Re-seal Keychain items to active binary, purging stale historical authorizations",
+					Flags:       []string{"--profile", "--all", "-p", "-a"},
+				},
+				{
+					Name:        "status",
+					Aliases:     []string{"info"},
+					Description: "Inspect Keychain item binding, accessibility, and active binary registration",
+					Flags:       []string{"--profile", "-p", "--json"},
+				},
+			},
+			Handler: handleKeychain,
+		},
+		{
 			Name:        "feedback",
 			Category:    "System",
 			Description: "Display feature feedback guidelines and templates",

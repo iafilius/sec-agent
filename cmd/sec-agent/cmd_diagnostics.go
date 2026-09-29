@@ -145,6 +145,16 @@ func handleDoctor(profile string, args []string) {
 		}
 	}
 
+	// Keychain ACL & Version Sealing Audit
+	lastVer, _ := config.GetLastKnownVersion()
+	curVer := keychain.GetVersion()
+	if lastVer != "" && lastVer != curVer {
+		fmt.Printf("[⚠️] Keychain ACL Version Drift: Last sealed under %s, active binary is %s.\n", lastVer, curVer)
+		fmt.Printf("    Run 'sec keychain prune --all' to re-seal Keychain items and purge historical authorizations.\n")
+	} else if lastVer != "" {
+		fmt.Printf("[✓] Keychain ACL: Sealed to active binary (%s)\n", curVer)
+	}
+
 	if skipKeychain || (!isInteractiveTerminal() && os.Getenv("SEC_TEST_MODE") != "1") {
 		reason := "headless / non-interactive terminal detected"
 		if skipKeychain {

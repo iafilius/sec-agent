@@ -104,3 +104,58 @@ func TestKeychainVersionedPromptsAndAccessPair(t *testing.T) {
 	// Clean up
 	_ = Delete("sec-test-session:profile_work-profile", "master")
 }
+
+func TestResealCurrentSetAndMetadata(t *testing.T) {
+	t.Setenv("SEC_TEST_MODE", "1")
+
+	service := "sec-test-session:profile_reseal-test"
+	account := "master"
+	secret1 := []byte("first-secret-key-material-32byte")
+	secret2 := []byte("resealed-secret-key-material-32b")
+
+	// 1. Initial cleanup
+	_ = Delete(service, account)
+
+	// 2. Metadata on non-existent item
+	meta, err := GetItemMetadata(service, account)
+	if err != nil {
+		t.Fatalf("GetItemMetadata failed on non-existent item: %v", err)
+	}
+	if meta.Exists {
+		t.Errorf("expected item to not exist, got exists=true")
+	}
+
+	// 3. Set initial secret
+	if err := SetCurrentSet(service, account, secret1); err != nil {
+		t.Fatalf("SetCurrentSet failed: %v", err)
+	}
+
+	// 4. Metadata on existing item
+	meta, err = GetItemMetadata(service, account)
+	if err != nil {
+		t.Fatalf("GetItemMetadata failed: %v", err)
+	}
+	if !meta.Exists {
+		t.Errorf("expected item to exist, got exists=false")
+	}
+	if meta.Service != service || meta.Account != account {
+		t.Errorf("unexpected meta service/account: got %s/%s, want %s/%s", meta.Service, meta.Account, service, account)
+	}
+	if meta.AccessControl != "BiometryCurrentSet" {
+		t.Errorf("expected AccessControl 'BiometryCurrentSet', got %q", meta.AccessControl)
+	}
+
+	// 5. Test ResealCurrentSet
+	if err := ResealCurrentSet(service, account, secret2); err != nil {
+		t.Fatalf("ResealCurrentSet failed: %v", err)
+	}
+
+	// 6. Test ResealKeychainForProfile helper
+	if err := ResealKeychainForProfile("reseal-test", secret2); err != nil {
+		t.Fatalf("ResealKeychainForProfile failed: %v", err)
+	}
+
+	// 7. Clean up
+	_ = Delete(service, account)
+}
+

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"secure_secrets/internal/config"
 	"secure_secrets/internal/crypto"
+	"secure_secrets/internal/keychain"
 	"sort"
 	"strings"
 	"time"
@@ -310,12 +311,13 @@ func pruneBackups(backupDir string, maxBackups int) {
 // InitializeMasterKey checks if a master key is present in the keychain.
 // If not, it generates a new one and saves it. Returns the master key.
 func InitializeMasterKey(profile string, keychainGetter func() ([]byte, error), keychainSetter func([]byte) error) ([]byte, error) {
-	if os.Getenv("SEC_TEST_MODE") == "1" {
+	if os.Getenv("SEC_TEST_MODE") == "1" && os.Getenv("SEC_TEST_RESEAL") != "1" {
 		return []byte("01234567890123456789012345678901"), nil
 	}
 
 	key, err := keychainGetter()
 	if err == nil && len(key) > 0 {
+		checkAndAutoReseal(profile, key)
 		return key, nil
 	}
 
@@ -334,6 +336,7 @@ func InitializeMasterKey(profile string, keychainGetter func() ([]byte, error), 
 	if err := keychainSetter(newKey); err != nil {
 		return nil, fmt.Errorf("failed to store generated master key in keychain: %w", err)
 	}
+	_ = config.SetLastKnownVersion(keychain.GetVersion())
 
 	// Create an empty store on disk immediately so it's initialized
 	if err := SaveStore(profile, &EncryptedStore{Secrets: make(map[SecretKey]SecretEntry)}, newKey); err != nil {
@@ -342,6 +345,27 @@ func InitializeMasterKey(profile string, keychainGetter func() ([]byte, error), 
 
 	return newKey, nil
 }
+
+func checkAndAutoReseal(profile string, key []byte) {
+	currentVer := keychain.GetVersion()
+	if currentVer == "" {
+		return
+	}
+	lastVer, err := config.GetLastKnownVersion()
+	if err != nil {
+		return
+	}
+	if lastVer != currentVer {
+		// Version transition or first recording detected
+		if err := keychain.ResealKeychainForProfile(profile, key); err == nil {
+			if lastVer != "" {
+				fmt.Fprintf(os.Stderr, "[i] Version upgrade detected (%s -> %s): re-sealed Keychain ACL to purge historical binary authorizations.\n", lastVer, currentVer)
+			}
+			_ = config.SetLastKnownVersion(currentVer)
+		}
+	}
+}
+
 
 // GetGroup returns a map of all secrets whose paths match the specified prefix.
 // If prefix is empty, it returns all secrets in the store.

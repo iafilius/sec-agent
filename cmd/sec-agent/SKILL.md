@@ -559,6 +559,7 @@ When initializing secret management for a new workspace or migrating an existing
 sec stream --template "export APP_KEY='{{db/password}}' GLOBAL_CA='{{@global-shared:pki/ca_cert}}'" | sh
 ```
 * If the target profile daemon is stopped or locked, `sec stream` halts execution before outputting partial templates and prints actionable diagnostic remediation directing the operator to run `sec -P <target> open`.
+* **Executable Command Disambiguation**: When an operator or agent mistakenly executes `sec stream <command>` (such as `sec stream python3 -m ...`), `sec-agent` inspects `$PATH` via `exec.LookPath`. If the argument matches an executable, it emits a tailored remediation hint: `"<cmd>" matches an executable on $PATH. Did you mean 'sec run -- <cmd>' or 'sec pipe <key>'?`.
 
 ### 5.34. Standard Machine-Readable Exit Codes & Seed Diagnostics (v2.14.4)
 1. **Standard Machine-Readable Exit Status Codes**:
@@ -575,6 +576,20 @@ sec stream --template "export APP_KEY='{{db/password}}' GLOBAL_CA='{{@global-sha
    * Checksum failure (`mnemonic checksum verification failed — mnemonic may be corrupted`).
 3. **Universal Community Feedback Pointers**:
    All root and subcommand `--help` pages, error remediation banners, and `--version` screens provide direct pointers to `sec feedback` and upstream issue trackers.
+
+### 5.37. Keychain Biometric Binding & Downgrade Attack Prevention (`sec-agent keychain`) (v2.15.0)
+1. **The Downgrade Attack Vector**:
+   On macOS, ad-hoc signed binaries (`codesign -s -`) identify authorized applications in the Keychain item's Access Control List (ACL) via their individual `CDHash`. When an operator upgrades `sec-agent` and clicks "Always Allow", macOS adds the new binary's hash to the ACL, but **never purges older versions**. If an attacker replaces the binary with an older, vulnerable version, macOS prompts for Touch ID without requesting the macOS login password.
+2. **Automatic Re-Sealing on Version Upgrade**:
+   `sec-agent` automatically detects version transitions during `sec open` or master key unlocks. It re-seals the Keychain item in memory (synchronous delete and add under `BiometryCurrentSet`), immediately purging all historical binary authorizations.
+3. **Explicit Operator Pruning & Status**:
+   ```bash
+   # Re-seal Keychain item to active binary, purging stale historical authorizations
+   sec-agent keychain prune [--profile <name>] [--all]
+
+   # Inspect Keychain binding mode, presence, and version alignment
+   sec-agent keychain status [--profile <name>] [--json]
+   ```
 
 ---
 
@@ -595,6 +610,8 @@ sec stream --template "export APP_KEY='{{db/password}}' GLOBAL_CA='{{@global-sha
 9. **Process-Isolated Context Switching**: Use `eval $(sec use <alias>)` to switch subshell contexts across multi-environment `.secrc` setups, or pass `-E <alias>` for one-off commands. Inspect environments with `sec env ls --json`.
 10. **Production Mutation Guardrail Awareness**: When modifying secrets in production tiers (`tier: "prod"`), automated scripts and AI tools MUST explicitly pass `--confirm-prod` to avoid non-interactive failure (`PROD_MUTATION_CONFIRMATION_REQUIRED`, exit code 2).
 11. **Machine-Readable Exit Code Handling**: Check exit codes in automated scripts: code 2 indicates missing keys (safe to initialize or skip), code 3 indicates daemon offline/locked (prompt or run `sec open`), code 78 indicates interactive blocker requiring operator terminal intervention.
+12. **Keychain ACL Hygiene & Downgrade Prevention**: On newly upgraded systems, run `sec keychain status` or `sec doctor` to verify that the macOS Keychain Access Control List is strictly sealed to the active binary version. If version drift is reported, run `sec keychain prune --all` to purge historical binary hashes.
+
 
 ---
 

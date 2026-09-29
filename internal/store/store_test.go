@@ -1,7 +1,10 @@
 package store
 
 import (
+	"bytes"
 	"encoding/json"
+	"secure_secrets/internal/config"
+	"secure_secrets/internal/keychain"
 	"testing"
 	"time"
 )
@@ -163,4 +166,51 @@ func TestTwoTierMetadataBackwardCompatibility(t *testing.T) {
 		t.Errorf("unexpected notes: %q", rtEntry.Notes)
 	}
 }
+
+func TestInitializeMasterKeyAutoResealOnVersionUpgrade(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("SEC_CONFIG_DIR", tempDir)
+	t.Setenv("SEC_TEST_MODE", "1")
+	t.Setenv("SEC_TEST_RESEAL", "1")
+
+	// Set initial version in .last_version to an older version
+	if err := config.SetLastKnownVersion("v2.14.0"); err != nil {
+		t.Fatalf("failed to set initial version: %v", err)
+	}
+
+	keychain.SetVersion("v2.14.4")
+
+	profile := "reseal-test-prof"
+	dummyMasterKey := []byte("32-byte-master-key-for-test-ok!!")
+
+	getter := func() ([]byte, error) {
+		return dummyMasterKey, nil
+	}
+	setter := func(k []byte) error {
+		return nil
+	}
+
+	// 1. Calling InitializeMasterKey should detect version mismatch (v2.14.0 vs v2.14.4)
+	// and update .last_version to v2.14.4
+	retrievedKey, err := InitializeMasterKey(profile, getter, setter)
+	if err != nil {
+		t.Fatalf("InitializeMasterKey failed: %v", err)
+	}
+	if !bytes.Equal(retrievedKey, dummyMasterKey) {
+		t.Errorf("expected retrieved key to match dummy master key")
+	}
+
+	// Verify .last_version was updated
+	newVer, err := config.GetLastKnownVersion()
+	if err != nil {
+		t.Fatalf("GetLastKnownVersion failed: %v", err)
+	}
+	if newVer != "v2.14.4" {
+		t.Errorf("expected updated version 'v2.14.4', got %q", newVer)
+	}
+
+	// Clean up any test keychain items
+	_ = keychain.Delete("sec-test-session:profile_"+profile, "master")
+}
+
 

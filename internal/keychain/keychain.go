@@ -6,6 +6,7 @@ package keychain
 #include <CoreFoundation/CoreFoundation.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 // Helper to set a generic password with ad-hoc safe permissions (BiometryAny - legacy/v1.0)
 int set_secret(const char* service, const char* account, const unsigned char* secret, int secret_len) {
@@ -110,6 +111,107 @@ int set_secret_current_set(const char* service, const char* account, const unsig
     return (int)status;
 }
 
+// Helper to re-seal a generic password under BiometryCurrentSet.
+// Deletes any existing item (wiping historical ACL entries) and adds a fresh item
+// bound solely to the calling executable's code identity.
+int reseal_secret_current_set(const char* service, const char* account, const unsigned char* secret, int secret_len) {
+    CFStringRef cfService = CFStringCreateWithCString(kCFAllocatorDefault, service, kCFStringEncodingUTF8);
+    CFStringRef cfAccount = CFStringCreateWithCString(kCFAllocatorDefault, account, kCFStringEncodingUTF8);
+    CFDataRef cfSecret = CFDataCreate(kCFAllocatorDefault, secret, secret_len);
+
+    CFMutableDictionaryRef delQuery = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFDictionarySetValue(delQuery, kSecClass, kSecClassGenericPassword);
+    CFDictionarySetValue(delQuery, kSecAttrService, cfService);
+    CFDictionarySetValue(delQuery, kSecAttrAccount, cfAccount);
+    SecItemDelete(delQuery);
+
+    CFMutableDictionaryRef query = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFDictionarySetValue(query, kSecClass, kSecClassGenericPassword);
+    CFDictionarySetValue(query, kSecAttrService, cfService);
+    CFDictionarySetValue(query, kSecAttrAccount, cfAccount);
+    CFDictionarySetValue(query, kSecValueData, cfSecret);
+
+    CFErrorRef error = NULL;
+    SecAccessControlRef access = SecAccessControlCreateWithFlags(
+        kCFAllocatorDefault,
+        kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+        kSecAccessControlBiometryCurrentSet | kSecAccessControlUserPresence,
+        &error
+    );
+    if (access != NULL) {
+        CFDictionarySetValue(query, kSecAttrAccessControl, access);
+        CFRelease(access);
+    } else {
+        CFDictionarySetValue(query, kSecAttrAccessible, kSecAttrAccessibleWhenUnlockedThisDeviceOnly);
+    }
+
+    OSStatus status = SecItemAdd(query, NULL);
+    int attempts = 0;
+    while (status != errSecSuccess && attempts < 3) {
+        attempts++;
+        usleep(50000); // 50ms
+        if (status == errSecDuplicateItem) {
+            SecItemDelete(delQuery);
+        }
+        status = SecItemAdd(query, NULL);
+    }
+
+    CFRelease(delQuery);
+    CFRelease(cfService);
+    CFRelease(cfAccount);
+    CFRelease(cfSecret);
+    CFRelease(query);
+
+    return (int)status;
+}
+
+// Queries item existence and timestamps without returning secret data (no Touch ID trigger)
+int get_item_metadata(const char* service, const char* account, int* out_exists, double* out_creation, double* out_mod) {
+    *out_exists = 0;
+    *out_creation = 0.0;
+    *out_mod = 0.0;
+
+    CFStringRef cfService = CFStringCreateWithCString(kCFAllocatorDefault, service, kCFStringEncodingUTF8);
+    CFStringRef cfAccount = CFStringCreateWithCString(kCFAllocatorDefault, account, kCFStringEncodingUTF8);
+
+    CFMutableDictionaryRef query = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFDictionarySetValue(query, kSecClass, kSecClassGenericPassword);
+    CFDictionarySetValue(query, kSecAttrService, cfService);
+    CFDictionarySetValue(query, kSecAttrAccount, cfAccount);
+    CFDictionarySetValue(query, kSecReturnAttributes, kCFBooleanTrue);
+    CFDictionarySetValue(query, kSecReturnData, kCFBooleanFalse);
+
+    CFTypeRef result = NULL;
+    OSStatus status = SecItemCopyMatching(query, &result);
+
+    CFRelease(cfService);
+    CFRelease(cfAccount);
+    CFRelease(query);
+
+    if (status == errSecSuccess && result != NULL) {
+        *out_exists = 1;
+        CFDictionaryRef dict = (CFDictionaryRef)result;
+
+        CFDateRef cDate = (CFDateRef)CFDictionaryGetValue(dict, kSecAttrCreationDate);
+        if (cDate != NULL) {
+            *out_creation = (double)(CFDateGetAbsoluteTime(cDate) + kCFAbsoluteTimeIntervalSince1970);
+        }
+
+        CFDateRef mDate = (CFDateRef)CFDictionaryGetValue(dict, kSecAttrModificationDate);
+        if (mDate != NULL) {
+            *out_mod = (double)(CFDateGetAbsoluteTime(mDate) + kCFAbsoluteTimeIntervalSince1970);
+        }
+
+        CFRelease(result);
+        return 0;
+    }
+
+    if (status == errSecItemNotFound) {
+        return 0;
+    }
+
+    return (int)status;
+}
 
 int get_secret(const char* service, const char* account, const char* prompt, unsigned char** out_bytes, int* out_len) {
     CFStringRef cfService = CFStringCreateWithCString(kCFAllocatorDefault, service, kCFStringEncodingUTF8);
@@ -222,6 +324,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 	"unsafe"
 )
 
@@ -273,7 +376,7 @@ func Set(service, account string, secret []byte) error {
 	return nil
 }
 
-var currentVersion = "v2.14.4"
+var currentVersion = "v2.15.0"
 
 // SetVersion sets the active binary version string used in Keychain operation prompts.
 func SetVersion(v string) {
@@ -281,6 +384,12 @@ func SetVersion(v string) {
 		currentVersion = strings.TrimSpace(v)
 	}
 }
+
+// GetVersion returns the active binary version string.
+func GetVersion() string {
+	return currentVersion
+}
+
 
 // GetWithPrompt retrieves a secret, triggering a hardware Touch ID/password validation with a custom operation prompt.
 func GetWithPrompt(service, account, prompt string) ([]byte, error) {
@@ -414,4 +523,90 @@ func GetKeychainAccessPair(profile string) (getter func() ([]byte, error), sette
 	}
 	return getter, setter
 }
+
+// ItemMetadata holds public, non-secret metadata about a Keychain item.
+type ItemMetadata struct {
+	Exists           bool      `json:"exists"`
+	Service          string    `json:"service"`
+	Account          string    `json:"account"`
+	AccessControl    string    `json:"access_control"`
+	CreationDate     time.Time `json:"creation_date"`
+	ModificationDate time.Time `json:"modification_date"`
+}
+
+// ResealCurrentSet purges historical binary authorizations from the item's ACL
+// by deleting the existing Keychain item and recreating it under the active binary.
+func ResealCurrentSet(service, account string, secret []byte) error {
+	service = sanitizeServiceName(service)
+	cService := C.CString(service)
+	cAccount := C.CString(account)
+	defer C.free(unsafe.Pointer(cService))
+	defer C.free(unsafe.Pointer(cAccount))
+
+	var secretPtr *C.uchar
+	if len(secret) > 0 {
+		secretPtr = (*C.uchar)(unsafe.Pointer(&secret[0]))
+	}
+
+	status := C.reseal_secret_current_set(cService, cAccount, secretPtr, C.int(len(secret)))
+	if status != ErrSecSuccess {
+		return fmt.Errorf("keychain ResealCurrentSet failed with OSStatus %d", status)
+	}
+	return nil
+}
+
+// GetItemMetadata queries non-secret attributes of a Keychain item without prompting for biometrics.
+func GetItemMetadata(service, account string) (*ItemMetadata, error) {
+	sanitizedService := sanitizeServiceName(service)
+	cService := C.CString(sanitizedService)
+	cAccount := C.CString(account)
+	defer C.free(unsafe.Pointer(cService))
+	defer C.free(unsafe.Pointer(cAccount))
+
+	var exists C.int
+	var cCreation C.double
+	var cMod C.double
+
+	status := C.get_item_metadata(cService, cAccount, &exists, &cCreation, &cMod)
+	if status != ErrSecSuccess {
+		return nil, fmt.Errorf("keychain get_item_metadata failed with OSStatus %d", status)
+	}
+
+	meta := &ItemMetadata{
+		Exists:        exists != 0,
+		Service:       service,
+		Account:       account,
+		AccessControl: "BiometryCurrentSet",
+	}
+
+	if exists != 0 {
+		if cCreation > 0 {
+			meta.CreationDate = time.Unix(int64(cCreation), 0)
+		}
+		if cMod > 0 {
+			meta.ModificationDate = time.Unix(int64(cMod), 0)
+		}
+	}
+
+	return meta, nil
+}
+
+// ResealKeychainForProfile re-seals a profile's master key under BiometryCurrentSet,
+// purging all historical binary authorizations from the item's ACL.
+func ResealKeychainForProfile(profile string, key []byte) error {
+	svc := "sec-session"
+	if os.Getenv("SEC_TEST_MODE") == "1" {
+		svc = "sec-test-session"
+	}
+	if profile != "" && profile != "default" {
+		if os.Getenv("SEC_TEST_MODE") == "1" {
+			svc = "sec-test-session:profile_" + profile
+		} else {
+			svc = "sec-session:profile_" + profile
+		}
+	}
+	acc := "master"
+	return ResealCurrentSet(svc, acc, key)
+}
+
 

@@ -204,3 +204,33 @@ func ClearSessionToken(profile string) error {
 	PurgeAllSessionTokenFiles()
 	return nil
 }
+
+// GetLastKnownVersion reads ~/.config/sec-agent/.last_version.
+func GetLastKnownVersion() (string, error) {
+	dir, err := GetConfigDir()
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, ".last_version")
+	// #nosec G304
+	data, err := os.ReadFile(filepath.Clean(path))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	return strings.TrimSpace(string(data)), nil
+}
+
+// SetLastKnownVersion writes version string to ~/.config/sec-agent/.last_version.
+func SetLastKnownVersion(version string) error {
+	dir, err := GetConfigDir()
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(dir, ".last_version")
+	// #nosec G304
+	return os.WriteFile(filepath.Clean(path), []byte(strings.TrimSpace(version)+"\n"), 0600)
+}
+

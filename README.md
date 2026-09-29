@@ -390,6 +390,10 @@ sec stream --template "export LOCAL='{{db/password}}' GLOBAL_CA='{{@global-share
 cat app.conf.tmpl | sec stream
 ```
 
+> [!TIP]
+> **Executable Disambiguation**: `sec stream` is strictly for template interpolation. If you inadvertently pass an executable name as a positional argument (e.g. `sec stream python3 ...`), `sec-agent` inspects `$PATH` and provides an immediate remediation hint directing you to `sec run -- <cmd>` (for process execution with secrets) or `sec pipe <key>` (for raw secret streaming).
+
+
 ### 13. Git Pre-Commit Privacy Guard & `.secignore` (`sec githook`)
 Prevent accidental secret leaks before code ever touches Git history. Combines Shannon entropy scanning with exact-match detection against active vault credentials:
 ```bash
@@ -565,6 +569,20 @@ sec session rotate-seed
 If Touch ID biometric credentials are reset by macOS System Settings or hardware updates, recover vault access with your 24-word seed phrase:
 ```bash
 sec session recover --profile router-ax3600-prod
+```
+
+### Keychain ACL Hygiene & Downgrade Attack Prevention (`sec keychain`)
+On macOS, ad-hoc signed binaries (`codesign -s -`) accumulate authorizations in the Keychain Access Control List (ACL) whenever the user authorizes an update with their Mac login password. macOS never prunes previous version hashes from the ACL, which could theoretically allow an older, unpatched binary to be executed and request Touch ID without triggering a password alert.
+
+`sec-agent` neutralizes this vector:
+- **Automatic Re-Sealing**: Upon the first `sec open` after an upgrade, `sec-agent` automatically deletes and recreates the Keychain item in memory, resetting the ACL so that only the active binary's `CDHash` is authorized.
+- **Explicit Operator Pruning**:
+```bash
+# Re-seal Keychain item to active binary, purging stale historical version authorizations
+sec keychain prune [--profile <name>] [--all]
+
+# Inspect Keychain binding mode, presence, and version alignment (zero Touch ID prompt)
+sec keychain status [--profile <name>] [--json]
 ```
 
 ---
