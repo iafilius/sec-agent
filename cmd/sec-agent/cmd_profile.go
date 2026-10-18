@@ -238,10 +238,16 @@ func handleProfile(profile string, args []string) {
 		handleProfileNew(args[1:])
 		return
 	case "ls", "list":
-		handleProfileList()
+		handleProfileList(args[1:])
 		return
 	case "describe", "info":
 		handleProfileDescribe(profile, args[1:])
+		return
+	case "enroll-recovery":
+		handleEnrollRecovery(profile, args[1:])
+		return
+	case "which":
+		handleWhich(profile, args[1:])
 		return
 	case "set-env":
 		if len(args) < 2 {
@@ -270,19 +276,79 @@ func handleProfile(profile string, args []string) {
 		return
 	}
 
-	fmt.Fprintln(os.Stderr, "Usage: sec profile [new <name> [--summary <text>] [--seed <mnemonic>]] [ls] [describe <name> [--summary <text>] [--clear-summary] [--json]] [set-env dev|dta|staging|prod]")
+	fmt.Fprintln(os.Stderr, "Usage: sec profile [new <name> [--summary <text>] [--comment <c>] [--seed <mnemonic>]] [ls [--long] [--json]] [describe <name> [--summary <text>] [--comment <c>] [--clear-summary] [--json]] [enroll-recovery] [which [<path>]] [set-env dev|dta|staging|prod]")
 	os.Exit(1)
 }
 
-func handleProfileList() {
+func handleProfileList(args []string) {
+	longMode := false
+	jsonMode := false
+	for _, a := range args {
+		if a == "--long" || a == "-l" {
+			longMode = true
+		} else if a == "--json" {
+			jsonMode = true
+		} else if a == "--help" || a == "-h" {
+			fmt.Println("Usage: sec profile ls [--long|-l] [--json]")
+			fmt.Println("\nList all discovered vault profiles, formats, and summaries.")
+			return
+		}
+	}
+
 	vaults, err := store.ListVaultFiles()
 	if err != nil {
 		fail("LIST_PROFILES_ERROR", fmt.Errorf("failed to discover profiles: %w", err), "")
 	}
+
+	if jsonMode {
+		type profileJSON struct {
+			Profile  string `json:"profile"`
+			Path     string `json:"path"`
+			IsV2     bool   `json:"is_v2"`
+			HasSlot1 bool   `json:"has_slot1"`
+			Summary  string `json:"summary,omitempty"`
+		}
+		var list []profileJSON
+		for _, v := range vaults {
+			list = append(list, profileJSON{
+				Profile:  v.Profile,
+				Path:     v.Path,
+				IsV2:     v.IsV2,
+				HasSlot1: v.HasSlot1,
+				Summary:  v.Summary,
+			})
+		}
+		data, _ := json.MarshalIndent(list, "", "  ")
+		fmt.Println(string(data))
+		return
+	}
+
 	if len(vaults) == 0 {
 		fmt.Println("No profiles discovered.")
 		return
 	}
+
+	if longMode {
+		fmt.Println("Discovered Profiles (Detailed):")
+		fmt.Printf("  %-20s %-16s %-16s %-30s %s\n", "PROFILE", "SCHEMA", "SLOT 1 RECOVERY", "VAULT FILE", "SUMMARY / DESCRIPTION")
+		for _, v := range vaults {
+			schema := "v1.0 Legacy"
+			recovery := "Missing ⚠️"
+			if v.IsV2 {
+				schema = "v2.0 Dual-Slot"
+				if v.HasSlot1 {
+					recovery = "Enrolled ✓"
+				}
+			}
+			summary := v.Summary
+			if summary == "" {
+				summary = "-"
+			}
+			fmt.Printf("  • %-18s %-16s %-16s %-30s %s\n", v.Profile, schema, recovery, filepath.Base(v.Path), summary)
+		}
+		return
+	}
+
 	fmt.Println("Discovered Profiles:")
 	hasAnySummary := false
 	for _, v := range vaults {
@@ -323,7 +389,7 @@ func handleProfileDescribe(profile string, args []string) {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if a == "--help" || a == "-h" || a == "help" {
-			fmt.Println("Usage: sec profile describe <name> [--summary <text>] [--clear-summary] [--json]")
+			fmt.Println("Usage: sec profile describe <name> [--summary <text>] [--comment <text>] [--description <text>] [--clear-summary] [--json]")
 			fmt.Println("\nInspect or update unencrypted profile metadata and summary without Touch ID biometrics.")
 			return
 		}
@@ -331,12 +397,18 @@ func handleProfileDescribe(profile string, args []string) {
 			jsonOutput = true
 		} else if a == "--clear-summary" {
 			clearSummary = true
-		} else if a == "--summary" && i+1 < len(args) {
+		} else if (a == "--summary" || a == "--comment" || a == "--description") && i+1 < len(args) {
 			summaryText = args[i+1]
 			hasSummary = true
 			i++
 		} else if strings.HasPrefix(a, "--summary=") {
 			summaryText = strings.TrimPrefix(a, "--summary=")
+			hasSummary = true
+		} else if strings.HasPrefix(a, "--comment=") {
+			summaryText = strings.TrimPrefix(a, "--comment=")
+			hasSummary = true
+		} else if strings.HasPrefix(a, "--description=") {
+			summaryText = strings.TrimPrefix(a, "--description=")
 			hasSummary = true
 		} else if a == "--profile" && i+1 < len(args) {
 			name = args[i+1]
@@ -466,15 +538,19 @@ func handleProfileNew(args []string) {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if a == "--help" || a == "-h" || a == "help" {
-			fmt.Println("Usage: sec profile new <name> [--summary <text>] [--seed <mnemonic>] [--reuse-seed|--existing-seed] [--secrc|--no-secrc]")
+			fmt.Println("Usage: sec profile new <name> [--summary <text>] [--comment <text>] [--description <text>] [--seed <mnemonic>] [--reuse-seed|--existing-seed] [--secrc|--no-secrc]")
 			fmt.Println("\nCreate a new named profile with Dual-Slot Touch ID (Slot 0) and BIP39 recovery seed (Slot 1).")
 			return
 		}
-		if a == "--summary" && i+1 < len(args) {
+		if (a == "--summary" || a == "--comment" || a == "--description") && i+1 < len(args) {
 			summaryInput = strings.Trim(args[i+1], `"'`)
 			i++
 		} else if strings.HasPrefix(a, "--summary=") {
 			summaryInput = strings.Trim(strings.TrimPrefix(a, "--summary="), `"'`)
+		} else if strings.HasPrefix(a, "--comment=") {
+			summaryInput = strings.Trim(strings.TrimPrefix(a, "--comment="), `"'`)
+		} else if strings.HasPrefix(a, "--description=") {
+			summaryInput = strings.Trim(strings.TrimPrefix(a, "--description="), `"'`)
 		} else if a == "--seed" && i+1 < len(args) {
 			seedInput = strings.Trim(args[i+1], `"'`)
 			i++
@@ -520,9 +596,9 @@ func handleProfileNew(args []string) {
 	}
 
 	if os.Getenv("SEC_TEST_MODE") != "1" {
-		if !biometrics.Authenticate(biometrics.FormatReason(Version, "create_profile", pName.String())) {
-			fmt.Fprintln(os.Stderr, "❌ Touch ID biometric authorization required for profile creation.")
-			os.Exit(1)
+		res := biometrics.AuthenticateWithTimeout(biometrics.FormatReason(Version, "create_profile", pName.String()), config.DefaultPromptTimeout)
+		if res != biometrics.AuthSuccess {
+			handleBiometricFailure(res, config.DefaultPromptTimeout)
 		}
 	}
 
@@ -839,15 +915,11 @@ type redactWriter struct {
 }
 
 func newRedactWriter(target io.Writer, secrets []string) *redactWriter {
+	validSecrets := expandDerivedSecretList(secrets)
 	max := 0
-	var validSecrets []string
-	for _, s := range secrets {
-		trimmed := strings.TrimSpace(s)
-		if len(trimmed) >= 4 {
-			validSecrets = append(validSecrets, trimmed)
-			if len(trimmed) > max {
-				max = len(trimmed)
-			}
+	for _, s := range validSecrets {
+		if len(s) > max {
+			max = len(s)
 		}
 	}
 	return &redactWriter{
@@ -874,7 +946,7 @@ func (w *redactWriter) Write(p []byte) (n int, err error) {
 	w.buf = append(w.buf, p...)
 	out := string(w.buf)
 	for _, sec := range w.secrets {
-		out = strings.ReplaceAll(out, sec, "[REDACTED_BY_SEC]")
+		out = replaceSecretMatches(out, sec, "[REDACTED_BY_SEC]")
 	}
 
 	L := longestSecretPrefixSuffix(out, w.secrets, w.maxLen)
@@ -899,7 +971,7 @@ func (w *redactWriter) Write(p []byte) (n int, err error) {
 		if len(w.buf) > 0 {
 			toWrite := string(w.buf)
 			for _, sec := range w.secrets {
-				toWrite = strings.ReplaceAll(toWrite, sec, "[REDACTED_BY_SEC]")
+				toWrite = replaceSecretMatches(toWrite, sec, "[REDACTED_BY_SEC]")
 			}
 			w.buf = nil
 			_, _ = w.target.Write([]byte(toWrite))
@@ -923,7 +995,7 @@ func (w *redactWriter) Flush() error {
 	}
 	out := string(w.buf)
 	for _, sec := range w.secrets {
-		out = strings.ReplaceAll(out, sec, "[REDACTED_BY_SEC]")
+		out = replaceSecretMatches(out, sec, "[REDACTED_BY_SEC]")
 	}
 	w.buf = nil
 	_, err := w.target.Write([]byte(out))
@@ -946,25 +1018,7 @@ func longestSecretPrefixSuffix(text string, secrets []string, maxLen int) int {
 	return 0
 }
 
-func setupEphemeralSSHAgent(profile, keyPath, passphraseVaultKey string) (socketPath string, cleanup func(), err error) {
-	// #nosec G304 G703
-	keyBytes, err := os.ReadFile(keyPath)
-	if err != nil {
-		return "", nil, fmt.Errorf("failed to read SSH private key file %s: %w", keyPath, err)
-	}
-
-	passphrase := ""
-	if passphraseVaultKey != "" {
-		resp, err := queryDaemon(profile, daemon.IPCRequest{
-			Action: "get",
-			Path:   passphraseVaultKey,
-		})
-		if err != nil || !resp.Success {
-			return "", nil, fmt.Errorf("failed to retrieve SSH passphrase secret %q from vault: %v", passphraseVaultKey, err)
-		}
-		passphrase = resp.Value
-	}
-
+func setupEphemeralSSHAgentFromBytes(keyBytes []byte, passphrase string) (socketPath string, cleanup func(), err error) {
 	var rawKey interface{}
 	if passphrase != "" {
 		rawKey, err = ssh.ParseRawPrivateKeyWithPassphrase(keyBytes, []byte(passphrase))
@@ -1025,15 +1079,64 @@ func setupEphemeralSSHAgent(profile, keyPath, passphraseVaultKey string) (socket
 	return socketPath, cleanup, nil
 }
 
+func setupEphemeralSSHAgent(profile, keyPath, passphraseVaultKey string) (socketPath string, cleanup func(), err error) {
+	// #nosec G304 G703
+	keyBytes, err := os.ReadFile(keyPath)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to read SSH private key file %s: %w", keyPath, err)
+	}
+
+	passphrase := ""
+	if passphraseVaultKey != "" {
+		resp, err := queryDaemon(profile, daemon.IPCRequest{
+			Action: "get",
+			Path:   passphraseVaultKey,
+		})
+		if err != nil || !resp.Success {
+			return "", nil, fmt.Errorf("failed to retrieve SSH passphrase secret %q from vault: %v", passphraseVaultKey, err)
+		}
+		passphrase = resp.Value
+	}
+
+	return setupEphemeralSSHAgentFromBytes(keyBytes, passphrase)
+}
+
+func setupEphemeralSSHAgentFromVault(profile, keyVaultPath, passphraseVaultKey string) (socketPath string, cleanup func(), err error) {
+	resp, err := queryDaemon(profile, daemon.IPCRequest{
+		Action: "get",
+		Path:   keyVaultPath,
+	})
+	if err != nil || !resp.Success || resp.Value == "" {
+		return "", nil, fmt.Errorf("failed to retrieve SSH private key secret %q from vault: %v", keyVaultPath, err)
+	}
+
+	passphrase := ""
+	if passphraseVaultKey != "" {
+		pResp, err := queryDaemon(profile, daemon.IPCRequest{
+			Action: "get",
+			Path:   passphraseVaultKey,
+		})
+		if err != nil || !pResp.Success {
+			return "", nil, fmt.Errorf("failed to retrieve SSH passphrase secret %q from vault: %v", passphraseVaultKey, err)
+		}
+		passphrase = pResp.Value
+	}
+
+	return setupEphemeralSSHAgentFromBytes([]byte(resp.Value), passphrase)
+}
+
 func handleRun(profile string, args []string) {
 	groupPrefix := ""
 	var allowedKeys []string
 	dryRun := false
 	noRedact := false
+	autoExtend := false
 	sshKeyPath := ""
+	sshKeySecretPath := ""
 	sshPassphraseVaultKey := ""
 	stdinKeyPath := ""
 	stdinRaw := false
+	var tempFileSpecs []string
 
 	cmdIndex := -1
 	for i := 0; i < len(args); i++ {
@@ -1053,6 +1156,11 @@ func handleRun(profile string, args []string) {
 			stdinKeyPath = strings.TrimPrefix(args[i], "--stdin-key=")
 		} else if args[i] == "--stdin-raw" || args[i] == "--stdin-no-newline" {
 			stdinRaw = true
+		} else if (args[i] == "--temp-file") && i+1 < len(args) {
+			tempFileSpecs = append(tempFileSpecs, args[i+1])
+			i++
+		} else if strings.HasPrefix(args[i], "--temp-file=") {
+			tempFileSpecs = append(tempFileSpecs, strings.TrimPrefix(args[i], "--temp-file="))
 		} else if args[i] == "--allow-keys" && i+1 < len(args) {
 			allowedKeys = strings.Split(args[i+1], ",")
 			i++
@@ -1060,10 +1168,19 @@ func handleRun(profile string, args []string) {
 			allowedKeys = strings.Split(strings.TrimPrefix(args[i], "--allow-keys="), ",")
 		} else if args[i] == "--dry-run" {
 			dryRun = true
+		} else if args[i] == "--auto-extend" {
+			autoExtend = true
 		} else if args[i] == "--no-redact" {
 			noRedact = true
 		} else if args[i] == "--redact" {
 			noRedact = false
+		} else if (args[i] == "--ssh-key-secret" || args[i] == "--key-secret") && i+1 < len(args) {
+			sshKeySecretPath = args[i+1]
+			i++
+		} else if strings.HasPrefix(args[i], "--ssh-key-secret=") {
+			sshKeySecretPath = strings.TrimPrefix(args[i], "--ssh-key-secret=")
+		} else if strings.HasPrefix(args[i], "--key-secret=") {
+			sshKeySecretPath = strings.TrimPrefix(args[i], "--key-secret=")
 		} else if args[i] == "--ssh-key" && i+1 < len(args) {
 			sshKeyPath = args[i+1]
 			i++
@@ -1074,17 +1191,25 @@ func handleRun(profile string, args []string) {
 			i++
 		} else if strings.HasPrefix(args[i], "--ssh-passphrase-key=") {
 			sshPassphraseVaultKey = strings.TrimPrefix(args[i], "--ssh-passphrase-key=")
+		} else if args[i] == "--timeout" && i+1 < len(args) {
+			timeoutVal := args[i+1]
+			_ = os.Setenv("SEC_PROMPT_TIMEOUT", timeoutVal)
+			i++
+		} else if strings.HasPrefix(args[i], "--timeout=") {
+			timeoutVal := strings.TrimPrefix(args[i], "--timeout=")
+			_ = os.Setenv("SEC_PROMPT_TIMEOUT", timeoutVal)
 		}
 	}
 
 	if cmdIndex == -1 || cmdIndex >= len(args) {
-		fail("INVALID_ARGUMENTS", fmt.Errorf("no target command specified. Separate subagent flags and target command using '--'"), "Usage: sec run [--group <prefix>] [--stdin-key <key>] [--stdin-raw] [--ssh-key <path>] -- <cmd> [args...]")
+		fail("INVALID_ARGUMENTS", fmt.Errorf("no target command specified. Separate subagent flags and target command using '--'"), "Usage: sec run [--group <prefix>] [--stdin-key <key>] [--stdin-raw] [--temp-file <ENV>=<target>] [--ssh-key <path>] [--auto-extend] -- <cmd> [args...]")
 	}
 
 	targetCmd := args[cmdIndex]
 	targetArgs := args[cmdIndex+1:]
 
 	checkProductionGuard(store.ProfileName(profile), args)
+	checkAndAutoExtendSession(profile, autoExtend)
 
 	var stdinSecretBytes []byte
 	if stdinKeyPath != "" {
@@ -1225,7 +1350,16 @@ func handleRun(profile string, args []string) {
 
 	var agentSocket string
 	var agentCleanup func()
-	if sshKeyPath != "" {
+	if sshKeySecretPath != "" {
+		sock, cleanup, err := setupEphemeralSSHAgentFromVault(profile, sshKeySecretPath, sshPassphraseVaultKey)
+		if err != nil {
+			fail("SSH_AGENT_FAILED", fmt.Errorf("failed to spin up ephemeral SSH agent from vault key %q: %v", sshKeySecretPath, err), "")
+		}
+		agentSocket = sock
+		agentCleanup = cleanup
+		defer agentCleanup()
+		envMap["SSH_AUTH_SOCK"] = agentSocket
+	} else if sshKeyPath != "" {
 		sock, cleanup, err := setupEphemeralSSHAgent(profile, sshKeyPath, sshPassphraseVaultKey)
 		if err != nil {
 			fail("SSH_AGENT_FAILED", fmt.Errorf("failed to spin up ephemeral SSH agent: %v", err), "")
@@ -1236,7 +1370,53 @@ func handleRun(profile string, args []string) {
 		envMap["SSH_AUTH_SOCK"] = agentSocket
 	}
 
+	tempMgr := newTempFileManager()
+	defer tempMgr.Cleanup()
+
+	if len(tempFileSpecs) > 0 {
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+		go func() {
+			<-sigChan
+			tempMgr.Cleanup()
+			os.Exit(1)
+		}()
+
+		wsCfg := loadWorkspaceConfig()
+		for _, spec := range tempFileSpecs {
+			parts := strings.SplitN(spec, "=", 2)
+			if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+				tempMgr.Cleanup()
+				fail("INVALID_ARGUMENTS", fmt.Errorf("invalid --temp-file format %q, expected ENV=KEY_OR_TEMPLATE", spec), "Usage: sec run --temp-file <ENV_VAR>=<key_or_template> -- <cmd> [args...]")
+			}
+			tfEnvKey := strings.TrimSpace(parts[0])
+			tfTarget := strings.TrimSpace(parts[1])
+			if err := config.EnvVarKey(tfEnvKey).Validate(); err != nil {
+				tempMgr.Cleanup()
+				fail("INVALID_ARGUMENTS", fmt.Errorf("invalid environment variable name %q in --temp-file: %v", tfEnvKey, err), "Environment variable names must contain only alphanumeric characters and underscores.")
+			}
+
+			content, rErr := resolveTempFileTarget(profile, tfEnvKey, tfTarget, wsCfg)
+			if rErr != nil {
+				tempMgr.Cleanup()
+				fail("TEMP_FILE_RESOLUTION_FAILED", rErr, "Verify that the secret key exists in the vault or the template file is valid.")
+			}
+
+			tempPath, cErr := tempMgr.CreateTempFile(tfEnvKey, content)
+			if cErr != nil {
+				tempMgr.Cleanup()
+				fail("TEMP_FILE_CREATE_FAILED", cErr, "Verify disk space and permissions in temporary directory.")
+			}
+
+			envMap[tfEnvKey] = tempPath
+			if len(content) > 3 {
+				secretValues = append(secretValues, content)
+			}
+		}
+	}
+
 	if dryRun {
+		tempMgr.Cleanup()
 		fmt.Println("=== Dry-Run: Subprocess Secret Injection Plan ===")
 		fmt.Printf("Target Command:     %s %s\n", targetCmd, strings.Join(targetArgs, " "))
 		tier := getProfileEnvTier(store.ProfileName(profile))
@@ -1355,6 +1535,8 @@ func handleRun(profile string, args []string) {
 	if stderrRedact != nil {
 		_ = stderrRedact.Flush()
 	}
+
+	tempMgr.Cleanup()
 
 	if runErr != nil {
 		if exitErr, ok := runErr.(*exec.ExitError); ok {
@@ -1544,3 +1726,139 @@ use_sec_agent() {
 	fmt.Printf("✅ Added 'use_sec_agent [profile]' helper to %s\n", direnvrcPath)
 	fmt.Println("💡 In any project directory, add 'use sec-agent [profile]' to your .envrc file.")
 }
+
+// handleWhich statelessly resolves workspace configuration for a target path or cwd.
+func handleWhich(profile string, args []string) {
+	jsonMode := false
+	targetPath := ""
+
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--help" || a == "-h" || a == "help" {
+			if spec, ok := findCommandSpec("which"); ok {
+				printCommandHelp(spec)
+			} else {
+				fmt.Println("Usage: sec which [<path>] [--json]")
+				fmt.Println("\nStatelessly resolve and inspect workspace configuration for an arbitrary directory.")
+			}
+			return
+		}
+		if a == "--json" {
+			jsonMode = true
+		} else if !strings.HasPrefix(a, "-") && targetPath == "" {
+			targetPath = a
+		}
+	}
+
+	startDir := targetPath
+	if startDir == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			fail("IO_ERROR", fmt.Errorf("failed to get current working directory: %w", err), "")
+		}
+		startDir = cwd
+	}
+
+	absDir, err := filepath.Abs(startDir)
+	if err != nil {
+		fail("INVALID_PATH", fmt.Errorf("invalid path %q: %w", startDir, err), "")
+	}
+
+	fi, err := os.Stat(absDir)
+	if err != nil {
+		fail("PATH_NOT_FOUND", fmt.Errorf("path does not exist: %s", absDir), "")
+	}
+	if !fi.IsDir() {
+		absDir = filepath.Dir(absDir)
+	}
+
+	var foundCfg *WorkspaceConfig
+	var foundConfigFile string
+	var foundWorkspaceRoot string
+
+	dir := absDir
+	for {
+		for _, name := range []string{".secenv", ".secrc", ".sec.json"} {
+			cfgPath := filepath.Join(dir, name)
+			// #nosec G304 G703
+			if data, err := os.ReadFile(cfgPath); err == nil {
+				var cfg WorkspaceConfig
+				if err := json.Unmarshal(data, &cfg); err == nil {
+					normalizeWorkspaceConfig(&cfg)
+					foundCfg = &cfg
+					foundConfigFile = cfgPath
+					foundWorkspaceRoot = dir
+					break
+				}
+			}
+		}
+		if foundCfg != nil {
+			break
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+
+	resProfile := "default"
+	resEnv := ""
+	resTier := ""
+	if foundCfg != nil {
+		if foundCfg.Profile != "" {
+			resProfile = foundCfg.Profile.String()
+		}
+		if foundCfg.Default != "" {
+			resEnv = foundCfg.Default
+			if envDef, ok := foundCfg.Environments[resEnv]; ok {
+				if envDef.Profile != "" {
+					resProfile = envDef.Profile.String()
+				}
+				if envDef.Tier != "" {
+					resTier = envDef.Tier
+				}
+			}
+		}
+	}
+
+	if jsonMode {
+		type whichJSON struct {
+			TargetDir     string `json:"target_dir"`
+			Profile       string `json:"profile"`
+			ConfigFile    string `json:"config_file,omitempty"`
+			WorkspaceRoot string `json:"workspace_root,omitempty"`
+			Environment   string `json:"environment,omitempty"`
+			Tier          string `json:"tier,omitempty"`
+		}
+		resp := whichJSON{
+			TargetDir:     absDir,
+			Profile:       resProfile,
+			ConfigFile:    foundConfigFile,
+			WorkspaceRoot: foundWorkspaceRoot,
+			Environment:   resEnv,
+			Tier:          resTier,
+		}
+		data, _ := json.MarshalIndent(resp, "", "  ")
+		fmt.Println(string(data))
+		return
+	}
+
+	if foundCfg == nil {
+		fmt.Printf("No workspace configuration detected for %s\n", absDir)
+		fmt.Println("Default profile: default")
+		return
+	}
+
+	fmt.Printf("📌 Resolved Profile: %s\n", resProfile)
+	fmt.Printf("📄 Config File:      %s\n", foundConfigFile)
+	fmt.Printf("📂 Workspace Root:   %s\n", foundWorkspaceRoot)
+	if resEnv != "" {
+		if resTier != "" {
+			fmt.Printf("🏷️  Environment:     %s (Tier: %s)\n", resEnv, strings.ToUpper(resTier))
+		} else {
+			fmt.Printf("🏷️  Environment:     %s\n", resEnv)
+		}
+	}
+}
+

@@ -1,7 +1,10 @@
 package main
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
+	"encoding/pem"
 	"net"
 	"os"
 	"os/exec"
@@ -13,13 +16,23 @@ import (
 	"secure_secrets/internal/config"
 	"secure_secrets/internal/daemon"
 	"secure_secrets/internal/store"
+
+	"golang.org/x/crypto/ssh"
 )
 
 func TestSSHAgentAndStreamInjection(t *testing.T) {
 	tmpDir := t.TempDir()
 	keyPath := filepath.Join(tmpDir, "id_ed25519")
 
-	keyData := []byte("-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\nQyNTUxOQAAACCSl8i3Y4Tj0N5t7V2b9x8yZ2M1P3Q0+g7d4z1a1w2x3QAAAIhA8k+dQPPP\nnQAAAAtzc2gtZWQyNTUxOQAAACCSl8i3Y4Tj0N5t7V2b9x8yZ2M1P3Q0+g7d4z1a1w2x\n3QAAAED3f5j1Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/\nPz8/Pz8/Pz8/\n-----END OPENSSH PRIVATE KEY-----\n")
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate ed25519 test key: %v", err)
+	}
+	pemBlock, err := ssh.MarshalPrivateKey(priv, "")
+	if err != nil {
+		t.Fatalf("failed to marshal ed25519 test key: %v", err)
+	}
+	keyData := pem.EncodeToMemory(pemBlock)
 	_ = os.WriteFile(keyPath, keyData, 0600)
 
 	sockPath, cleanup, err := setupEphemeralSSHAgent("default", keyPath, "")
@@ -237,4 +250,96 @@ func TestCompanionMetadataAndInlineURIExpansion(t *testing.T) {
 		t.Errorf("expected sec:// placeholder to be evaluated to super-db-token-999, got: %s", string(echoOut))
 	}
 }
+
+func TestSSHAgentFromBytesAndVaultKey(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate test key: %v", err)
+	}
+	pemBlock, err := ssh.MarshalPrivateKey(priv, "")
+	if err != nil {
+		t.Fatalf("failed to marshal test key: %v", err)
+	}
+	keyData := pem.EncodeToMemory(pemBlock)
+
+	// 1. Test setupEphemeralSSHAgentFromBytes directly
+	sockPath, cleanup, err := setupEphemeralSSHAgentFromBytes(keyData, "")
+	if err != nil {
+		t.Fatalf("setupEphemeralSSHAgentFromBytes failed: %v", err)
+	}
+	if _, statErr := os.Stat(sockPath); os.IsNotExist(statErr) {
+		t.Errorf("expected socket to exist at %s", sockPath)
+	}
+	cleanup()
+	if _, statErr := os.Stat(sockPath); !os.IsNotExist(statErr) {
+		t.Errorf("expected socket %s to be removed after cleanup", sockPath)
+	}
+
+	// 2. Test setupEphemeralSSHAgentFromVault with test daemon
+	profile := "ssh-vault-profile"
+	masterKey := []byte("01234567890123456789012345678904")
+	d, err := daemon.NewDaemon(profile, 30*time.Second, Version)
+	if err != nil {
+		t.Fatalf("failed to create test daemon: %v", err)
+	}
+	d.SetMasterKeyForTest(masterKey)
+	d.SetSecretsForTest(map[string]store.SecretEntry{
+		"ssh/switch/private_key": {Value: string(keyData)},
+	})
+	token := "ssh-vault-token-123"
+	d.SetSessionTokenForTest(token)
+
+	go func() {
+		_ = d.Start()
+	}()
+	defer d.Stop()
+
+	sock, _ := config.GetSocketPath(profile)
+	for i := 0; i < 50; i++ {
+		if _, err := os.Stat(sock); err == nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	origToken := os.Getenv("SEC_SESSION_TOKEN")
+	_ = os.Setenv("SEC_SESSION_TOKEN", token)
+	defer func() {
+		if origToken != "" {
+			_ = os.Setenv("SEC_SESSION_TOKEN", origToken)
+		} else {
+			_ = os.Unsetenv("SEC_SESSION_TOKEN")
+		}
+	}()
+
+	vSockPath, vCleanup, vErr := setupEphemeralSSHAgentFromVault(profile, "ssh/switch/private_key", "")
+	if vErr != nil {
+		t.Fatalf("setupEphemeralSSHAgentFromVault failed: %v", vErr)
+	}
+	if _, statErr := os.Stat(vSockPath); os.IsNotExist(statErr) {
+		t.Errorf("expected vault-backed socket to exist at %s", vSockPath)
+	}
+	vCleanup()
+	if _, statErr := os.Stat(vSockPath); !os.IsNotExist(statErr) {
+		t.Errorf("expected socket %s to be removed after cleanup", vSockPath)
+	}
+
+	// 3. Test CLI sec run --ssh-key-secret
+	binPath := filepath.Join(t.TempDir(), "sec_ssh_test_bin")
+	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build test binary: %v\nOutput: %s", err, out)
+	}
+
+	runCmd := exec.Command(binPath, "run", "--profile", profile, "--ssh-key-secret", "ssh/switch/private_key", "--no-redact", "--", "printenv")
+	runCmd.Env = append(os.Environ(), "SEC_SESSION_TOKEN="+token, "SEC_PROFILE="+profile, "SEC_TEST_MODE=1")
+	out, err := runCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sec run with --ssh-key-secret failed: %v\nOutput: %s", err, out)
+	}
+	if !strings.Contains(string(out), "SSH_AUTH_SOCK=") {
+		t.Errorf("expected SSH_AUTH_SOCK in child process env output, got: %s", string(out))
+	}
+}
+
 

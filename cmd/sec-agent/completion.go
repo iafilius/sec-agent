@@ -77,7 +77,15 @@ _sec() {
 				var names []string
 				names = append(names, cmd.Name)
 				names = append(names, cmd.Aliases...)
-				zshBuf.WriteString(fmt.Sprintf("                %s)\n                    if [ $CURRENT -eq 2 ]; then\n                        local -a subcmds\n                        subcmds=(\n", strings.Join(names, "|")))
+				if len(cmd.Flags) > 0 {
+					var quotedFlags []string
+					for _, f := range cmd.Flags {
+						quotedFlags = append(quotedFlags, fmt.Sprintf("'%s'", f))
+					}
+					zshBuf.WriteString(fmt.Sprintf("                %s)\n                    if [[ \"$words[CURRENT]\" == -* ]]; then\n                        _values '%s flags' %s\n                    elif [ $CURRENT -eq 2 ]; then\n                        local -a subcmds\n                        subcmds=(\n", strings.Join(names, "|"), cmd.Name, strings.Join(quotedFlags, " ")))
+				} else {
+					zshBuf.WriteString(fmt.Sprintf("                %s)\n                    if [ $CURRENT -eq 2 ]; then\n                        local -a subcmds\n                        subcmds=(\n", strings.Join(names, "|")))
+				}
 				for _, sub := range cmd.Subcommands {
 					zshBuf.WriteString(fmt.Sprintf("                            '%s:%s'\n", sub.Name, sub.Description))
 					for _, alias := range sub.Aliases {
@@ -149,7 +157,11 @@ _sec_completions() {
 				var matchNames []string
 				matchNames = append(matchNames, cmd.Name)
 				matchNames = append(matchNames, cmd.Aliases...)
-				bashBuf.WriteString(fmt.Sprintf("        %s)\n            if [ $COMP_CWORD -eq 2 ]; then\n                COMPREPLY=( $(compgen -W \"%s\" -- ${cur}) )\n            else\n                case \"${COMP_WORDS[2]}\" in\n", strings.Join(matchNames, "|"), strings.Join(subNames, " ")))
+				if len(cmd.Flags) > 0 {
+					bashBuf.WriteString(fmt.Sprintf("        %s)\n            if [[ \"${cur}\" == -* ]]; then\n                COMPREPLY=( $(compgen -W \"%s\" -- ${cur}) )\n            elif [ $COMP_CWORD -eq 2 ]; then\n                COMPREPLY=( $(compgen -W \"%s\" -- ${cur}) )\n            else\n                case \"${COMP_WORDS[2]}\" in\n", strings.Join(matchNames, "|"), strings.Join(cmd.Flags, " "), strings.Join(subNames, " ")))
+				} else {
+					bashBuf.WriteString(fmt.Sprintf("        %s)\n            if [ $COMP_CWORD -eq 2 ]; then\n                COMPREPLY=( $(compgen -W \"%s\" -- ${cur}) )\n            else\n                case \"${COMP_WORDS[2]}\" in\n", strings.Join(matchNames, "|"), strings.Join(subNames, " ")))
+				}
 				for _, sub := range cmd.Subcommands {
 					if len(sub.Flags) > 0 {
 						var subMatch []string

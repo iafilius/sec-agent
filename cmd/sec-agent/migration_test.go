@@ -350,3 +350,58 @@ func TestIncompleteVaultDetectionInMigrateV2(t *testing.T) {
 	}
 }
 
+func TestEnrollRecoveryCommandRegistrationAndDryRun(t *testing.T) {
+	spec, ok := findCommandSpec("enroll-recovery")
+	if !ok {
+		t.Fatalf("enroll-recovery command spec not found in registry")
+	}
+	if spec.Category != "Backup & Migration" {
+		t.Errorf("expected category 'Backup & Migration', got %q", spec.Category)
+	}
+
+	expectedFlags := []string{"--seed", "--force", "--all-profiles", "--dry-run"}
+	for _, ef := range expectedFlags {
+		found := false
+		for _, f := range spec.Flags {
+			if f == ef {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected enroll-recovery flags to contain %q, got: %v", ef, spec.Flags)
+		}
+	}
+
+	tempDir := t.TempDir()
+	incompleteVaultJSON := `{
+  "schema_version": "2.0",
+  "summary": "Incomplete vault test",
+  "payload": "dGVzdHBheWxvYWQ="
+}`
+	vaultPath := filepath.Join(tempDir, "secrets_recovtest.enc")
+	if err := os.WriteFile(vaultPath, []byte(incompleteVaultJSON), 0600); err != nil {
+		t.Fatalf("failed to write vault: %v", err)
+	}
+
+	binPath := filepath.Join(tempDir, "sec_enroll_test_bin")
+	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build binary: %v, output: %s", err, string(out))
+	}
+	defer os.Remove(binPath)
+
+	dryRunCmd := exec.Command(binPath, "enroll-recovery", "--dry-run", "--profile", "recovtest")
+	dryRunCmd.Env = append(os.Environ(), "SEC_CONFIG_DIR="+tempDir)
+	out, err := dryRunCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("enroll-recovery --dry-run failed: %v, output: %s", err, string(out))
+	}
+
+	outStr := string(out)
+	if !strings.Contains(outStr, "incomplete (Slot 1 missing)") && !strings.Contains(outStr, "DRY RUN") {
+		t.Errorf("expected dry-run output to identify incomplete vault, got:\n%s", outStr)
+	}
+}
+
+

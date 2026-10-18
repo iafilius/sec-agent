@@ -21,19 +21,33 @@ import (
 	"golang.org/x/term"
 )
 
+type hostKeyOptions struct {
+	insecure        bool
+	trustOnFirstUse bool
+	updateHostKey   bool
+}
+
 func handleSSH(profile string, args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Println("Usage: sec ssh [init <target>] | [<target> | user@host] [--ssh-key <path>] [--port <p>] [-- <cmd...>]")
-		fmt.Println("\nExecutes remote SSH commands or interactive sessions under vault authentication without requiring sshpass.")
+		fmt.Println("Usage: sec ssh [init <target>] [host-key show <target>] [reset-host-key <target>] | [<target> | user@host] [flags] [-- <cmd...>]")
+		fmt.Println("\nExecutes remote SSH commands or interactive sessions under vault authentication with zero disk exposure.")
 		fmt.Println("\nSubcommands:")
-		fmt.Println("  init <target>          Configure remote SSH target into vault and workspace .secrc")
+		fmt.Println("  init <target>                Configure remote SSH target into vault and workspace .secrc")
+		fmt.Println("  host-key show <target>       Show pinned SSH host key fingerprint from vault")
+		fmt.Println("  reset-host-key <target>      Reset pinned SSH host key fingerprint in vault")
 		fmt.Println("\nFlags & Arguments:")
-		fmt.Println("  <target>               Named target from .secrc or vault (ssh/<target>/...)")
-		fmt.Println("  user@host              Direct SSH user and host destination")
-		fmt.Println("  --ssh-key, -i <path>   Path to encrypted private key file")
-		fmt.Println("  --ssh-passphrase-key   Vault key containing the private key passphrase")
-		fmt.Println("  -p, --port <port>      Remote SSH port (default: 22)")
-		fmt.Println("  -- <cmd...>            Remote command to execute (omit for interactive shell)")
+		fmt.Println("  <target>                     Named target from .secrc or vault (ssh/<target>/...)")
+		fmt.Println("  user@host                    Direct SSH user and host destination")
+		fmt.Println("  --ssh-key-secret, --key-secret Vault secret path containing private key bytes")
+		fmt.Println("  --ssh-key, -i <path>         Path to private key file")
+		fmt.Println("  --ssh-passphrase-key         Vault key containing the private key passphrase")
+		fmt.Println("  --openssh                    Delegate to host OpenSSH binary (/usr/bin/ssh)")
+		fmt.Println("  --no-trace                   Suppress known_hosts writes during delegated OpenSSH")
+		fmt.Println("  --tofu, --trust-first-use    Trust and pin remote host key into vault on first connection")
+		fmt.Println("  --insecure, --no-verify      Disable host key verification")
+		fmt.Println("  --update-host-key            Update pinned host key fingerprint in vault with new remote key")
+		fmt.Println("  -p, --port <port>            Remote SSH port (default: 22)")
+		fmt.Println("  -- <cmd...>                  Remote command to execute (omit for interactive shell)")
 		return
 	}
 
@@ -41,12 +55,26 @@ func handleSSH(profile string, args []string) {
 		handleSSHInit(profile, args[1:])
 		return
 	}
+	if args[0] == "host-key" || args[0] == "hostkey" {
+		handleSSHHostKey(profile, args[1:])
+		return
+	}
+	if args[0] == "reset-host-key" {
+		handleSSHResetHostKey(profile, args[1:])
+		return
+	}
 
 	targetName := ""
 	sshKeyPath := ""
+	sshKeySecret := ""
 	sshPassphraseKey := ""
 	sshPort := 0
 	cmdIndex := -1
+	useOpenSSH := false
+	noTrace := false
+	trustOnFirstUse := false
+	insecureHostKey := false
+	updateHostKey := false
 
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--" {
@@ -58,6 +86,13 @@ func handleSSH(profile string, args []string) {
 			i++
 		} else if strings.HasPrefix(args[i], "--ssh-key=") {
 			sshKeyPath = strings.TrimPrefix(args[i], "--ssh-key=")
+		} else if (args[i] == "--ssh-key-secret" || args[i] == "--key-secret") && i+1 < len(args) {
+			sshKeySecret = args[i+1]
+			i++
+		} else if strings.HasPrefix(args[i], "--ssh-key-secret=") {
+			sshKeySecret = strings.TrimPrefix(args[i], "--ssh-key-secret=")
+		} else if strings.HasPrefix(args[i], "--key-secret=") {
+			sshKeySecret = strings.TrimPrefix(args[i], "--key-secret=")
 		} else if args[i] == "--ssh-passphrase-key" && i+1 < len(args) {
 			sshPassphraseKey = args[i+1]
 			i++
@@ -68,6 +103,16 @@ func handleSSH(profile string, args []string) {
 				sshPort = p
 			}
 			i++
+		} else if args[i] == "--openssh" || args[i] == "--fallback-openssh" {
+			useOpenSSH = true
+		} else if args[i] == "--no-trace" || args[i] == "--ephemeral-known-hosts" {
+			noTrace = true
+		} else if args[i] == "--tofu" || args[i] == "--trust-first-use" {
+			trustOnFirstUse = true
+		} else if args[i] == "--insecure" || args[i] == "--no-verify" {
+			insecureHostKey = true
+		} else if args[i] == "--update-host-key" {
+			updateHostKey = true
 		} else if targetName == "" && !strings.HasPrefix(args[i], "-") {
 			targetName = args[i]
 		}
@@ -87,6 +132,9 @@ func handleSSH(profile string, args []string) {
 			}
 			if tgt.IdentityFile != "" && sshKeyPath == "" {
 				sshKeyPath = tgt.IdentityFile
+			}
+			if tgt.KeySecret != "" && sshKeySecret == "" {
+				sshKeySecret = tgt.KeySecret
 			}
 			if tgt.PassphraseKey != "" && sshPassphraseKey == "" {
 				sshPassphraseKey = tgt.PassphraseKey
@@ -127,9 +175,20 @@ func handleSSH(profile string, args []string) {
 				resolvedPassword = resp.Value
 			}
 		}
-		if sshKeyPath == "" {
-			if resp, err := queryDaemon(profile, daemon.IPCRequest{Action: "get", Path: pfx + "key"}); err == nil && resp.Success && resp.Value != "" {
-				sshKeyPath = resp.Value
+		if sshKeySecret == "" && sshKeyPath == "" {
+			if resp, err := queryDaemon(profile, daemon.IPCRequest{Action: "get", Path: pfx + "private_key"}); err == nil && resp.Success && resp.Value != "" {
+				sshKeySecret = pfx + "private_key"
+			} else if resp, err := queryDaemon(profile, daemon.IPCRequest{Action: "get", Path: pfx + "key"}); err == nil && resp.Success && resp.Value != "" {
+				if strings.HasPrefix(strings.TrimSpace(resp.Value), "-----BEGIN") {
+					sshKeySecret = pfx + "key"
+				} else {
+					sshKeyPath = resp.Value
+				}
+			}
+		}
+		if sshPassphraseKey == "" {
+			if resp, err := queryDaemon(profile, daemon.IPCRequest{Action: "get", Path: pfx + "passphrase"}); err == nil && resp.Success && resp.Value != "" {
+				sshPassphraseKey = pfx + "passphrase"
 			}
 		}
 	}
@@ -172,22 +231,67 @@ func handleSSH(profile string, args []string) {
 		remoteCmdArgs = args[cmdIndex:]
 	}
 
-	// 4. Native Go SSH Connection (avoiding external sshpass)
-	if resolvedPassword != "" {
-		err := runNativeSSH(resolvedHost, resolvedPort, resolvedUser, resolvedPassword, nil, "", remoteCmdArgs)
-		if err != nil {
-			if exitErr, ok := err.(*ssh.ExitError); ok {
-				os.Exit(exitErr.ExitStatus())
-			}
-			fail("SSH_EXEC_FAILED", fmt.Errorf("SSH execution to %s@%s failed: %w", resolvedUser, resolvedHost, err), "")
+	// 4. Resolve key bytes & passphrase
+	var keyBytes []byte
+	if sshKeySecret != "" {
+		if resp, err := queryDaemon(profile, daemon.IPCRequest{Action: "get", Path: sshKeySecret}); err == nil && resp.Success && resp.Value != "" {
+			keyBytes = []byte(resp.Value)
+		} else {
+			fail("SSH_KEY_SECRET_NOT_FOUND", fmt.Errorf("failed to retrieve SSH key secret %q from vault: %v", sshKeySecret, err), "")
 		}
-		return
+	} else if sshKeyPath != "" {
+		// #nosec G304 G703
+		if b, err := os.ReadFile(sshKeyPath); err == nil {
+			keyBytes = b
+		} else {
+			// Vault path fallback
+			if resp, err := queryDaemon(profile, daemon.IPCRequest{Action: "get", Path: sshKeyPath}); err == nil && resp.Success && resp.Value != "" {
+				keyBytes = []byte(resp.Value)
+			} else {
+				fail("SSH_KEY_FILE_NOT_FOUND", fmt.Errorf("failed to read SSH private key file %s: %w", sshKeyPath, err), "")
+			}
+		}
 	}
 
-	// 5. If Key authentication with passphrase or agent
+	passphrase := ""
+	if sshPassphraseKey != "" {
+		if resp, err := queryDaemon(profile, daemon.IPCRequest{Action: "get", Path: sshPassphraseKey}); err == nil && resp.Success {
+			passphrase = resp.Value
+		}
+	}
+
+	hostKeyOpts := hostKeyOptions{
+		insecure:        insecureHostKey,
+		trustOnFirstUse: trustOnFirstUse,
+		updateHostKey:   updateHostKey,
+	}
+
+	// 5. Native Go SSH Connection (default for both password and key auth)
+	if !useOpenSSH {
+		if resolvedPassword != "" || len(keyBytes) > 0 {
+			err := runNativeSSH(profile, targetName, resolvedHost, resolvedPort, resolvedUser, resolvedPassword, keyBytes, passphrase, remoteCmdArgs, hostKeyOpts)
+			if err != nil {
+				if exitErr, ok := err.(*ssh.ExitError); ok {
+					os.Exit(exitErr.ExitStatus())
+				}
+				fail("SSH_EXEC_FAILED", fmt.Errorf("SSH execution to %s@%s failed: %w", resolvedUser, resolvedHost, err), "")
+			}
+			return
+		}
+	}
+
+	// 6. Delegated OpenSSH execution (fallback when --openssh is specified)
 	var agentSocket string
 	var agentCleanup func()
-	if sshKeyPath != "" {
+	if len(keyBytes) > 0 {
+		sock, cleanup, err := setupEphemeralSSHAgentFromBytes(keyBytes, passphrase)
+		if err != nil {
+			fail("SSH_AGENT_FAILED", fmt.Errorf("failed to spin up ephemeral SSH agent: %v", err), "")
+		}
+		agentSocket = sock
+		agentCleanup = cleanup
+		defer agentCleanup()
+	} else if sshKeyPath != "" {
 		sock, cleanup, err := setupEphemeralSSHAgent(profile, sshKeyPath, sshPassphraseKey)
 		if err != nil {
 			fail("SSH_AGENT_FAILED", fmt.Errorf("failed to spin up ephemeral SSH agent for key %s: %v", sshKeyPath, err), "")
@@ -203,10 +307,7 @@ func handleSSH(profile string, args []string) {
 	}
 
 	userHost := fmt.Sprintf("%s@%s", resolvedUser, resolvedHost)
-	execArgs := []string{sshBin, "-p", fmt.Sprintf("%d", resolvedPort), userHost}
-	if len(remoteCmdArgs) > 0 {
-		execArgs = append(execArgs, remoteCmdArgs...)
-	}
+	execArgs := buildOpenSSHArgs(sshBin, resolvedPort, noTrace, userHost, remoteCmdArgs)
 
 	// #nosec G204 G702
 	cmd := exec.Command(execArgs[0], execArgs[1:]...)
@@ -227,7 +328,142 @@ func handleSSH(profile string, args []string) {
 	}
 }
 
-func runNativeSSH(host string, port int, sshUser, password string, keyBytes []byte, passphrase string, remoteCmdArgs []string) error {
+func buildOpenSSHArgs(sshBin string, port int, noTrace bool, userHost string, remoteCmdArgs []string) []string {
+	execArgs := []string{sshBin, "-p", fmt.Sprintf("%d", port)}
+	if noTrace {
+		execArgs = append(execArgs,
+			"-o", "UserKnownHostsFile=/dev/null",
+			"-o", "StrictHostKeyChecking=no",
+			"-o", "LogLevel=ERROR",
+			"-o", "IdentitiesOnly=yes",
+		)
+	}
+	execArgs = append(execArgs, userHost)
+	if len(remoteCmdArgs) > 0 {
+		execArgs = append(execArgs, remoteCmdArgs...)
+	}
+	return execArgs
+}
+
+func vaultHostKeyCallback(profile, target, host string, port int, opts hostKeyOptions) ssh.HostKeyCallback {
+	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		if opts.insecure {
+			return nil
+		}
+
+		fingerprint := ssh.FingerprintSHA256(key)
+		vaultPath := "ssh/" + target + "/host_fingerprint"
+		if target == "" {
+			vaultPath = fmt.Sprintf("ssh/hosts/%s:%d/fingerprint", host, port)
+		}
+
+		resp, err := queryDaemon(profile, daemon.IPCRequest{
+			Action: "get",
+			Path:   vaultPath,
+		})
+
+		hasPinned := (err == nil && resp.Success && resp.Value != "")
+
+		if hasPinned && !opts.updateHostKey {
+			if resp.Value == fingerprint {
+				return nil
+			}
+			return fmt.Errorf("HOST_KEY_MISMATCH: remote host %s (%s) presented host key %s, but vault has pinned %s.\nIf the machine was reinstalled or reprovisioned, run:\n  sec ssh reset-host-key %s\n  or: sec ssh %s --update-host-key",
+				hostname, remote.String(), fingerprint, resp.Value, target, target)
+		}
+
+		actionDesc := "Pin"
+		if opts.updateHostKey && hasPinned {
+			actionDesc = "Update pinned"
+		}
+
+		if opts.trustOnFirstUse || (opts.updateHostKey && !term.IsTerminal(int(os.Stdin.Fd()))) {
+			setResp, sErr := queryDaemon(profile, daemon.IPCRequest{
+				Action: "set",
+				Path:   vaultPath,
+				Value:  fingerprint,
+				Description: fmt.Sprintf("Pinned SSH Host Fingerprint (%s)", key.Type()),
+			})
+			if sErr != nil || !setResp.Success {
+				return fmt.Errorf("failed to pin host key to vault: %v", sErr)
+			}
+			fmt.Fprintf(os.Stderr, "[✓] %s host key for %s into vault: %s\n", actionDesc, hostname, fingerprint)
+			return nil
+		}
+
+		if term.IsTerminal(int(os.Stdin.Fd())) {
+			fmt.Fprintf(os.Stderr, "\n⚠️  New SSH host key presented for %s (%s):\n", hostname, key.Type())
+			fmt.Fprintf(os.Stderr, "   Fingerprint: %s\n", fingerprint)
+			if hasPinned {
+				fmt.Fprintf(os.Stderr, "   Existing pinned fingerprint in vault: %s\n", resp.Value)
+			}
+			fmt.Fprintf(os.Stderr, "%s this host fingerprint into sec-agent vault? [Y/n]: ", actionDesc)
+			reader := bufio.NewReader(os.Stdin)
+			ans, _ := reader.ReadString('\n')
+			ans = strings.TrimSpace(strings.ToLower(ans))
+			if ans == "" || ans == "y" || ans == "yes" {
+				setResp, sErr := queryDaemon(profile, daemon.IPCRequest{
+					Action: "set",
+					Path:   vaultPath,
+					Value:  fingerprint,
+					Description: fmt.Sprintf("Pinned SSH Host Fingerprint (%s)", key.Type()),
+				})
+				if sErr != nil || !setResp.Success {
+					return fmt.Errorf("failed to save host key to vault: %v", sErr)
+				}
+				fmt.Fprintf(os.Stderr, "[✓] Host key fingerprint pinned in vault under %s\n", vaultPath)
+				return nil
+			}
+			return fmt.Errorf("host key rejected by operator")
+		}
+
+		return fmt.Errorf("untrusted host %s (fingerprint %s). Pass --tofu / --trust-first-use in non-interactive sessions, or run interactively to pin the host key", hostname, fingerprint)
+	}
+}
+
+func handleSSHHostKey(profile string, args []string) {
+	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
+		fmt.Println("Usage: sec ssh host-key show <target>")
+		fmt.Println("\nDisplays the currently pinned host key fingerprint for a target.")
+		return
+	}
+	if args[0] == "show" && len(args) > 1 {
+		target := args[1]
+		vaultPath := "ssh/" + target + "/host_fingerprint"
+		resp, err := queryDaemon(profile, daemon.IPCRequest{
+			Action: "get",
+			Path:   vaultPath,
+		})
+		if err != nil || !resp.Success || resp.Value == "" {
+			fmt.Printf("No pinned host key fingerprint found for target %q in profile %q.\n", target, profile)
+			return
+		}
+		fmt.Printf("Pinned SSH host key for target %q:\n", target)
+		fmt.Printf("  Fingerprint: %s\n", resp.Value)
+		return
+	}
+	fmt.Println("Usage: sec ssh host-key show <target>")
+}
+
+func handleSSHResetHostKey(profile string, args []string) {
+	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
+		fmt.Println("Usage: sec ssh reset-host-key <target>")
+		fmt.Println("\nRemoves the pinned SSH host key fingerprint from the vault for a target.")
+		return
+	}
+	target := args[0]
+	vaultPath := "ssh/" + target + "/host_fingerprint"
+	resp, err := queryDaemon(profile, daemon.IPCRequest{
+		Action: "delete",
+		Path:   vaultPath,
+	})
+	if err != nil || !resp.Success {
+		fail("SSH_RESET_FAILED", fmt.Errorf("failed to reset host key for target %q: %v", target, err), "")
+	}
+	fmt.Printf("[✓] Pinned SSH host key fingerprint for target %q was removed from vault.\n", target)
+}
+
+func runNativeSSH(profile, target, host string, port int, sshUser, password string, keyBytes []byte, passphrase string, remoteCmdArgs []string, opts hostKeyOptions) error {
 	var authMethods []ssh.AuthMethod
 	if password != "" {
 		authMethods = append(authMethods, ssh.Password(password))
@@ -240,15 +476,16 @@ func runNativeSSH(host string, port int, sshUser, password string, keyBytes []by
 		} else {
 			signer, err = ssh.ParsePrivateKey(keyBytes)
 		}
-		if err == nil {
-			authMethods = append(authMethods, ssh.PublicKeys(signer))
+		if err != nil {
+			return fmt.Errorf("failed to parse SSH private key: %w", err)
 		}
+		authMethods = append(authMethods, ssh.PublicKeys(signer))
 	}
 
 	sshConfig := &ssh.ClientConfig{
 		User:            sshUser,
 		Auth:            authMethods,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // #nosec G106
+		HostKeyCallback: vaultHostKeyCallback(profile, target, host, port, opts),
 		Timeout:         15 * time.Second,
 	}
 

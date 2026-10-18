@@ -849,6 +849,79 @@ func TestDaemonNotRunningErrorDiagnostics(t *testing.T) {
 	}
 }
 
+func TestDaemonNotRunningAgentRemediation(t *testing.T) {
+	t.Setenv("AI_AGENT", "1")
+
+	// 1. Default profile in agent environment
+	_, remDef := daemonNotRunningError("default")
+	if !strings.Contains(remDef, "[!] SEC-AGENT VAULT LOCKED (Exit 3)") {
+		t.Errorf("expected imperative banner, got: %s", remDef)
+	}
+	if !strings.Contains(remDef, "DIRECTIVE FOR AI AGENTS & SUBPROCESS RUNNERS:") {
+		t.Errorf("expected directive header, got: %s", remDef)
+	}
+	if !strings.Contains(remDef, "DO NOT ask the human operator to type this in their terminal.") {
+		t.Errorf("expected DO NOT ask instruction, got: %s", remDef)
+	}
+	if !strings.Contains(remDef, "sec open") {
+		t.Errorf("expected direct execution of 'sec open', got: %s", remDef)
+	}
+
+	// 2. Named profile in agent environment
+	_, remNamed := daemonNotRunningError("prod-eu")
+	if !strings.Contains(remNamed, "[!] SEC-AGENT VAULT LOCKED (Exit 3)") {
+		t.Errorf("expected imperative banner for named profile, got: %s", remNamed)
+	}
+	if !strings.Contains(remNamed, "sec --profile prod-eu open") {
+		t.Errorf("expected direct execution of 'sec --profile prod-eu open', got: %s", remNamed)
+	}
+}
+
+func TestJSONErrorRemediationStructure(t *testing.T) {
+	activeProfile = "staging"
+	defer func() { activeProfile = "" }()
+
+	jErr := JSONError{
+		Code:        "DAEMON_NOT_RUNNING",
+		ExitCode:    3,
+		Message:     "Daemon not running",
+		Remediation: "Remediation",
+	}
+	if jErr.Code == "DAEMON_NOT_RUNNING" {
+		jErr.CanAgentExecute = true
+		jErr.RemediationCmd = fmt.Sprintf("sec --profile %s open", activeProfile)
+		jErr.Action = "EXECUTE_IMMEDIATELY"
+	}
+
+	if !jErr.CanAgentExecute {
+		t.Errorf("expected CanAgentExecute to be true")
+	}
+	if jErr.RemediationCmd != "sec --profile staging open" {
+		t.Errorf("expected remediation cmd to be 'sec --profile staging open', got: %q", jErr.RemediationCmd)
+	}
+	if jErr.Action != "EXECUTE_IMMEDIATELY" {
+		t.Errorf("expected action to be 'EXECUTE_IMMEDIATELY', got: %q", jErr.Action)
+	}
+	if jErr.ExitCode != 3 {
+		t.Errorf("expected exit code 3, got: %d", jErr.ExitCode)
+	}
+
+	data, err := json.Marshal(jErr)
+	if err != nil {
+		t.Fatalf("failed to marshal JSONError: %v", err)
+	}
+	jsonStr := string(data)
+	if !strings.Contains(jsonStr, `"can_agent_execute":true`) {
+		t.Errorf("expected can_agent_execute in JSON, got: %s", jsonStr)
+	}
+	if !strings.Contains(jsonStr, `"remediation_cmd":"sec --profile staging open"`) {
+		t.Errorf("expected remediation_cmd in JSON, got: %s", jsonStr)
+	}
+	if !strings.Contains(jsonStr, `"action":"EXECUTE_IMMEDIATELY"`) {
+		t.Errorf("expected action in JSON, got: %s", jsonStr)
+	}
+}
+
 func TestStatusDaemonVersionDriftOutput(t *testing.T) {
 	oldVer := Version
 	defer func() { Version = oldVer }()
@@ -1284,3 +1357,253 @@ func TestSecrcDurationFallbackAndExtendCommand(t *testing.T) {
 		t.Errorf("expected ACCESS DENIED error, got:\n%s", string(badOut))
 	}
 }
+
+func TestBiometricTimeoutAndGranularExitCodes(t *testing.T) {
+	tempDir, err := os.MkdirTemp("/tmp", "bt-")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	binPath := filepath.Join(tempDir, "sec_test_bin")
+	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build sec binary: %v\n%s", err, string(out))
+	}
+
+	cfgDir := filepath.Join(tempDir, ".config", "sec-agent")
+	_ = os.MkdirAll(cfgDir, 0700)
+
+	baseEnv := []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + tempDir,
+		"SEC_CONFIG_DIR=" + cfgDir,
+		"SEC_NO_SOUND=1",
+	}
+
+	cases := []struct {
+		name         string
+		testResEnv   string
+		extraArgs    []string
+		secrcTimeout string
+		expectedExit int
+		expectOut    string
+	}{
+		{
+			name:         "biometric timeout exit code 4 default 120s",
+			testResEnv:   "timeout",
+			extraArgs:    nil,
+			expectedExit: 4,
+			expectOut:    "Biometric prompt timed out after 2m0s",
+		},
+		{
+			name:         "biometric timeout exit code 4 custom flag",
+			testResEnv:   "timeout",
+			extraArgs:    []string{"--timeout", "30s"},
+			expectedExit: 4,
+			expectOut:    "Biometric prompt timed out after 30s",
+		},
+		{
+			name:         "biometric timeout exit code 4 from .secrc",
+			testResEnv:   "timeout",
+			extraArgs:    nil,
+			secrcTimeout: "45s",
+			expectedExit: 4,
+			expectOut:    "Biometric prompt timed out after 45s",
+		},
+		{
+			name:         "biometric user canceled exit code 1",
+			testResEnv:   "cancel",
+			extraArgs:    nil,
+			expectedExit: 1,
+			expectOut:    "Authentication canceled: User dismissed Touch ID dialog.",
+		},
+		{
+			name:         "biometric lockout exit code 5",
+			testResEnv:   "lockout",
+			extraArgs:    nil,
+			expectedExit: 5,
+			expectOut:    "Authentication locked out: macOS requires password unlock",
+		},
+		{
+			name:         "biometric failed unrecognized fingerprint exit code 6",
+			testResEnv:   "failed",
+			extraArgs:    nil,
+			expectedExit: 6,
+			expectOut:    "Authentication failed: Biometric verification failed (unrecognized fingerprint).",
+		},
+		{
+			name:         "invalid timeout flag exit code 2",
+			testResEnv:   "",
+			extraArgs:    []string{"--timeout", "invalid-duration"},
+			expectedExit: 2,
+			expectOut:    "Error: invalid prompt timeout",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			wsDir := t.TempDir()
+			if tc.secrcTimeout != "" {
+				secrcContent := fmt.Sprintf(`{"profile":"default","prompt_timeout":%q}`, tc.secrcTimeout)
+				_ = os.WriteFile(filepath.Join(wsDir, ".secrc"), []byte(secrcContent), 0600)
+			}
+
+			cmdArgs := []string{"open"}
+			cmdArgs = append(cmdArgs, tc.extraArgs...)
+			cmd := exec.Command(binPath, cmdArgs...)
+			cmd.Dir = wsDir
+			env := append([]string{}, baseEnv...)
+			if tc.testResEnv != "" {
+				env = append(env, "SEC_TEST_BIOMETRICS_RESULT="+tc.testResEnv)
+			}
+			cmd.Env = env
+
+			out, err := cmd.CombinedOutput()
+			outStr := string(out)
+
+			actualExit := 0
+			if err != nil {
+				if exitErr, ok := err.(*exec.ExitError); ok {
+					actualExit = exitErr.ExitCode()
+				} else {
+					t.Fatalf("unexpected non-exit error running command: %v", err)
+				}
+			}
+
+			if actualExit != tc.expectedExit {
+				t.Errorf("expected exit code %d, got %d\nOutput: %s", tc.expectedExit, actualExit, outStr)
+			}
+			if tc.expectOut != "" && !strings.Contains(outStr, tc.expectOut) {
+				t.Errorf("expected output to contain %q, got:\n%s", tc.expectOut, outStr)
+			}
+		})
+	}
+}
+
+func TestSecrcV2EnvironmentAutoOpenInheritance(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("failed to chdir to tmpDir: %v", err)
+	}
+	defer func() { _ = os.Chdir(origWd) }()
+
+	secrcContent := `{
+		"version": 2,
+		"default": "dev",
+		"environments": {
+			"dev": {
+				"profile": "test-dev",
+				"tier": "dev",
+				"auto_open": true,
+				"prompt_timeout": "45s"
+			},
+			"prod": {
+				"profile": "test-prod",
+				"tier": "prod",
+				"auto_open": false
+			}
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(tmpDir, ".secrc"), []byte(secrcContent), 0600); err != nil {
+		t.Fatalf("failed to write .secrc: %v", err)
+	}
+
+	wsCfg := loadWorkspaceConfig()
+	if wsCfg == nil {
+		t.Fatalf("failed to load workspace config")
+	}
+
+	// 1. Resolve default environment ("dev")
+	ctxDev, err := ResolveWorkspaceEnvironment("", "", wsCfg)
+	if err != nil {
+		t.Fatalf("failed to resolve dev: %v", err)
+	}
+	if !ctxDev.AutoOpen {
+		t.Errorf("expected ctxDev.AutoOpen to be true from v2 dev environment")
+	}
+	if ctxDev.PromptTimeout != "45s" {
+		t.Errorf("expected prompt_timeout '45s', got: %s", ctxDev.PromptTimeout)
+	}
+
+	// 2. Resolve "prod" environment explicitly
+	ctxProd, err := ResolveWorkspaceEnvironment("", "prod", wsCfg)
+	if err != nil {
+		t.Fatalf("failed to resolve prod: %v", err)
+	}
+	if ctxProd.AutoOpen {
+		t.Errorf("expected ctxProd.AutoOpen to be false from v2 prod environment")
+	}
+
+	// 3. Test root workspace level auto_open inheritance
+	secrcRootAutoOpen := `{
+		"version": 2,
+		"auto_open": true,
+		"default": "prod",
+		"environments": {
+			"prod": {
+				"profile": "test-prod",
+				"tier": "prod"
+			}
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(tmpDir, ".secrc"), []byte(secrcRootAutoOpen), 0600); err != nil {
+		t.Fatalf("failed to write root auto-open .secrc: %v", err)
+	}
+	wsCfgRoot := loadWorkspaceConfig()
+	ctxRootInherited, err := ResolveWorkspaceEnvironment("", "prod", wsCfgRoot)
+	if err != nil {
+		t.Fatalf("failed to resolve root inherited: %v", err)
+	}
+	if !ctxRootInherited.AutoOpen {
+		t.Errorf("expected ctxRootInherited.AutoOpen to inherit true from root workspace config")
+	}
+}
+
+func TestNonTTYReadCommandsWithAutoOpen(t *testing.T) {
+	cfgDir := filepath.Join("/tmp", fmt.Sprintf("sec_ao_%d", time.Now().UnixNano()%100000))
+	_ = os.MkdirAll(cfgDir, 0700)
+	defer os.RemoveAll(cfgDir)
+
+	t.Setenv("SEC_CONFIG_DIR", cfgDir)
+	t.Setenv("SEC_TEST_MODE", "1")
+	t.Setenv("SEC_AUTO_OPEN", "1")
+
+	prof := "t-ao-read"
+	masterKey := []byte("01234567890123456789012345678901")
+
+	testStore := &store.EncryptedStore{Secrets: make(map[store.SecretKey]store.SecretEntry)}
+	testStore.Secrets[store.SecretKey("api/token")] = store.SecretEntry{
+		Value:        "tok_live_123456",
+		Created:      time.Now(),
+		LastModified: time.Now(),
+	}
+	if err := store.SaveStore(prof, testStore, masterKey); err != nil {
+		t.Fatalf("failed saving test store: %v", err)
+	}
+
+	d, err := daemon.NewDaemon(prof, 30*time.Second, Version)
+	if err != nil {
+		t.Fatalf("failed creating daemon: %v", err)
+	}
+	go func() {
+		_ = d.Start()
+	}()
+	defer d.Stop()
+
+	time.Sleep(100 * time.Millisecond)
+
+	// In non-interactive mode with SEC_AUTO_OPEN=1, queryDaemon should trigger handleOpenGUI and resolve cleanly
+	resp, err := queryDaemon(prof, daemon.IPCRequest{Action: "get", Path: "api/token"})
+	if err != nil {
+		t.Fatalf("queryDaemon failed: %v", err)
+	}
+	if resp == nil || !resp.Success {
+		t.Fatalf("expected queryDaemon to succeed via handleOpenGUI, got: %v", resp)
+	}
+	if resp.Value != "tok_live_123456" {
+		t.Errorf("expected tok_live_123456, got: %s", resp.Value)
+	}
+}
+

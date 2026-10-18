@@ -5,6 +5,62 @@ All notable changes to `sec-agent` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v2.17.0] - 2026-10-18
+
+### Added & Enhanced
+- **Vault-Stored SSH Private Keys & Zero-Trace Host Execution (`sec ssh`, `sec run --ssh-key-secret`)**:
+  - **Direct Vault Key Storage & In-Memory Parsing**: Added first-class support for storing SSH private keys (ED25519, RSA, ECDSA) directly in the encrypted vault (`ssh/<target>/key` or `ssh/<target>/private_key`). Supports `--ssh-key-secret` (alias `--key-secret`) across `sec ssh` and `sec run` without temporary file writes or filesystem leakage.
+  - **Native Pure Go SSH Engine as Default**: Wired `runNativeSSH` (`golang.org/x/crypto/ssh`) as default execution engine for both password and private key authentication, connecting directly in-process without invoking `/usr/bin/ssh` or `sshpass`.
+  - **Zero-Trace OpenSSH Delegation (`--no-trace`)**: When delegating to system OpenSSH via `--openssh`, `--no-trace` suppresses saving host keys to disk by injecting `-o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR -o IdentitiesOnly=yes`, leaving zero host traces in `~/.ssh/known_hosts`.
+  - **Vault-Backed TOFU & Host Key Pinning Lifecycle**: Remote host public keys are verified against SHA-256 fingerprints stored in the active vault under `ssh/<target>/host_fingerprint`. Includes automated auto-pinning (`--tofu` / `--trust-first-use`), MitM abort protection (`HOST_KEY_MISMATCH`), insecure bypass (`--insecure` / `--no-verify`), in-flight key rotation (`--update-host-key`), and lifecycle commands (`sec ssh host-key show <target>`, `sec ssh reset-host-key <target>`).
+  - **Ephemeral SSH Agent for Child Processes (`sec run --ssh-key-secret`)**: In-process ephemeral SSH agent spun up from vault bytes in RAM, exposing `SSH_AUTH_SOCK` to child processes and cleanly shredded upon process exit.
+
+## [v2.16.0] - 2026-10-07
+
+### Added & Enhanced
+- **Autonomous AI Agent Self-Unlock Protocol & Anti-Stall Remediation**:
+  - **Exit 3 Imperative Stderr Banner**: When `sec-agent` encounters a locked vault (`ERR_VAULT_LOCKED`, exit 3), it now prints an unmistakable, high-priority imperative directive directly to `stderr`:
+    ```
+    [!] SEC-AGENT VAULT LOCKED (Exit 3)
+    [!] MANDATORY AGENT DIRECTIVE: DO NOT STALL OR GIVE UP.
+    [!] Run: sec open --ttl 24h
+    [!] Ask user for Touch ID confirmation if needed, then resume.
+    ```
+    This banner is emitted across standard commands (`sec run`, `sec stream`, `sec pipe`, `sec get`, `sec env`) to immediately trigger agentic self-recovery workflows.
+  - **Machine-Readable JSON Error Remediation DTO**: Extended `JSONError` structure across all JSON error paths with `can_agent_execute: true`, `remediation_cmd: "sec open --ttl 24h"`, and `action: "EXECUTE_IMMEDIATELY"`, enabling programmatic recovery for LLM tool-calling engines without text parsing.
+  - **Universal Multi-Agent Rule Auto-Installation (`sec install-rules` / `sec skill install-rules`)**:
+    - Added dedicated CLI command `sec skill install-rules` (with top-level alias `sec install-rules`) supporting `--global` (`-g`) and `--workspace` (`-w`) target directories.
+    - Automatically detects and installs authoritative multi-agent rules into Google Antigravity (`~/.gemini/config/rules/sec-agent.md`), Cursor (`~/.cursor/rules/sec-agent.mdc`), Windsurf (`~/.windsurf/rules/sec-agent.md`), and Cline/Roo-Code (`~/.clinerules/sec-agent.md`).
+    - Rule templates are embedded directly in the compiled binary, requiring zero network access or external file dependencies.
+  - **`.secrc` v2 Environment `auto_open` & Timeout Inheritance**:
+    - Environment profiles in `.secrc` v2 now support `"auto_open": true` to attempt biometric vault unlocking automatically when commands require active credentials.
+- **Accidental Command & Shell Prompt Detection Guardrail (`sec set --stdin`)**:
+  - Implemented heuristic analysis in `handleSet` to catch accidental command lines (`sec set `, `sec-agent `, `export `, `echo `, `eval `) and prompt patterns (`user@host:~$ `, `bash-.*[$#] `, `% `, `\$ `) passed into `sec set --stdin` or `sec set <path> -`.
+  - Aborts execution cleanly with **exit code 2** (`INVALID_ARGUMENT`) before modifying vault data.
+  - Added `--allow-command-string` and `--force` flags to allow deliberate storage of shell commands or prompt strings when intended.
+- **Secret Lifecycle Hygiene Scanner (`sec list --incomplete`)**:
+  - Added `--incomplete` (with aliases `--hygiene` and `--audit-hygiene`) to `sec list` to audit vault secrets against lifecycle hygiene rules.
+  - Identifies secrets lacking expiration timestamps (`Expires`), descriptions (`Description` or legacy `Comment`), or operational renewal notes (`Notes`).
+  - Emits aligned, human-readable terminal tables with missing field tags and actionable remediation guidance for interactive users.
+  - Emits structured JSON arrays when invoked with `--json` for automated script and autonomous AI agent consumption.
+- **Biometric Timeout, Attention Audio Chimes & Graceful Task Deferral**:
+  - Integrated native macOS Cocoa `NSSound` Pop chime trigger on Touch ID biometric authorization prompts via Cgo.
+  - Added `--timeout <duration>` flag and `.secrc` configuration (`biometrics.timeout_sec`, default 120s) for biometric authentication prompts.
+  - Introduced dedicated **exit code 4 (`ERR_BIOMETRIC_TIMEOUT`)** differentiating biometric timeouts from operator cancellations (exit code 3 `ERR_BIOMETRIC_CANCELLED`), enabling autonomous AI agents to defer vault-dependent steps while completing vault-free tasks unblocked.
+- **Interactive Metadata Ingestion Flow**:
+  - Added optional interactive prompts in `sec set` when executed in a physical terminal without metadata flags to prompt the operator for an optional description and expiration duration after accepting the secret.
+  - Cleanly bypassed in automated environments, non-interactive sessions, test mode (`SEC_TEST_MODE=1`), piped stdin, or when `--quick` / `-q` is provided.
+- **AI Skill Enrichment Protocol & Parameter Guidance**:
+  - Updated canonical `SKILL.md` (embedded and external integration skills) with Section 5.8: "Secret Lifecycle Metadata & Proactive Enrichment Protocol" providing standardized markdown renewal runbook templates.
+  - Added Section 5.9: "Secret Hygiene Scanning & Remediation (`sec list --incomplete`)".
+  - Updated `docs/operations_and_parameter_guide.md` with complete documentation for `sec set`, `sec relabel`, and `sec ls` parameters.
+- **Ephemeral POSIX 0600 Temp File Handling**:
+  - Added secure memory/temp file helper in `cmd/sec-agent/cmd_temp_file.go` with strict POSIX 0600 permissions and automated zero-fill shredding.
+- **Homebrew Formula Modernization**:
+  - Updated Homebrew tap formula DSL to use `post_install_steps` over deprecated `post_install`.
+
+---
+
 ## [v2.15.0] - 2026-09-29
 
 ### Added & Enhanced

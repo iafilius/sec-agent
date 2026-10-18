@@ -593,12 +593,153 @@ func discoverWorkspaceSkills(cwd string) []InstalledSkillEntry {
 	return res
 }
 
+const antiStallRuleContent = `# sec-agent Autonomous Operation Rules
+
+When sec-agent or a secret-consuming command exits with code 3 (Vault Locked / Daemon Inactive):
+1. DO NOT ask the human user to open a terminal or run sec open.
+2. EXECUTE DIRECTLY via your shell/command runner tool:
+   ` + "`sec open`" + ` (or ` + "`sec --profile <name> open`" + `)
+3. The native macOS Touch ID prompt will appear on the operator's physical display. Once touched, your command runner receives exit code 0 and unblocks your workflow.
+`
+
+const antiStallCursorRuleContent = `---
+description: sec-agent autonomous unlock and anti-stall rules
+globs: *
+alwaysApply: true
+---
+
+# sec-agent Autonomous Operation Rules
+
+When sec-agent or a secret-consuming command exits with code 3 (Vault Locked / Daemon Inactive):
+1. DO NOT ask the human user to open a terminal or run sec open.
+2. EXECUTE DIRECTLY via your shell/command runner tool:
+   ` + "`sec open`" + ` (or ` + "`sec --profile <name> open`" + `)
+3. The native macOS Touch ID prompt will appear on the operator's physical display. Once touched, your command runner receives exit code 0 and unblocks your workflow.
+`
+
+func writeRuleFile(path string, content []byte) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	// #nosec G304 G703
+	return os.WriteFile(path, content, 0600)
+}
+
+func appendOrWriteCopilotRule(path string, content []byte) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	// #nosec G304 G703
+	existing, err := os.ReadFile(path)
+	if err != nil {
+		// #nosec G304 G703
+		return os.WriteFile(path, content, 0600)
+	}
+	if strings.Contains(string(existing), "sec-agent Autonomous Operation Rules") || strings.Contains(string(existing), "Vault Locked / Daemon Inactive") {
+		return nil
+	}
+	var combined []byte
+	combined = append(combined, existing...)
+	if !bytes.HasSuffix(combined, []byte("\n\n")) {
+		if bytes.HasSuffix(combined, []byte("\n")) {
+			combined = append(combined, []byte("\n")...)
+		} else {
+			combined = append(combined, []byte("\n\n")...)
+		}
+	}
+	combined = append(combined, content...)
+	// #nosec G304 G703
+	return os.WriteFile(path, combined, 0600)
+}
+
+func handleInstallRules(args []string) {
+	installGlobal := false
+	installWorkspace := false
+
+	for _, arg := range args {
+		switch arg {
+		case "--global", "-g":
+			installGlobal = true
+		case "--workspace", "-w":
+			installWorkspace = true
+		}
+	}
+
+	if !installGlobal && !installWorkspace {
+		installWorkspace = true
+	}
+
+	homeDir, _ := os.UserHomeDir()
+	cwd, _ := os.Getwd()
+
+	installedCount := 0
+
+	if installGlobal {
+		if homeDir == "" {
+			fmt.Fprintln(os.Stderr, "Error: cannot determine user home directory for global rules installation")
+		} else {
+			geminiRulePath := filepath.Join(homeDir, ".gemini", "config", "rules", "sec-agent.md")
+			if err := writeRuleFile(geminiRulePath, []byte(antiStallRuleContent)); err == nil {
+				fmt.Printf("[✓] Installed global Antigravity rule: %s\n", geminiRulePath)
+				installedCount++
+			} else {
+				fmt.Fprintf(os.Stderr, "[!] Failed to write %s: %v\n", geminiRulePath, err)
+			}
+
+			cursorRulePath := filepath.Join(homeDir, ".cursor", "rules", "sec-agent.mdc")
+			if err := writeRuleFile(cursorRulePath, []byte(antiStallCursorRuleContent)); err == nil {
+				fmt.Printf("[✓] Installed global Cursor rule: %s\n", cursorRulePath)
+				installedCount++
+			} else {
+				fmt.Fprintf(os.Stderr, "[!] Failed to write %s: %v\n", cursorRulePath, err)
+			}
+		}
+	}
+
+	if installWorkspace {
+		if cwd == "" {
+			fmt.Fprintln(os.Stderr, "Error: cannot determine current working directory for workspace rules installation")
+		} else {
+			agentsRulePath := filepath.Join(cwd, ".agents", "rules", "sec-agent.md")
+			if err := writeRuleFile(agentsRulePath, []byte(antiStallRuleContent)); err == nil {
+				fmt.Printf("[✓] Installed workspace Antigravity rule: %s\n", agentsRulePath)
+				installedCount++
+			} else {
+				fmt.Fprintf(os.Stderr, "[!] Failed to write %s: %v\n", agentsRulePath, err)
+			}
+
+			cursorWsRulePath := filepath.Join(cwd, ".cursor", "rules", "sec-agent.mdc")
+			if err := writeRuleFile(cursorWsRulePath, []byte(antiStallCursorRuleContent)); err == nil {
+				fmt.Printf("[✓] Installed workspace Cursor rule: %s\n", cursorWsRulePath)
+				installedCount++
+			} else {
+				fmt.Fprintf(os.Stderr, "[!] Failed to write %s: %v\n", cursorWsRulePath, err)
+			}
+
+			copilotPath := filepath.Join(cwd, ".github", "copilot-instructions.md")
+			if err := appendOrWriteCopilotRule(copilotPath, []byte(antiStallRuleContent)); err == nil {
+				fmt.Printf("[✓] Installed workspace Copilot instructions: %s\n", copilotPath)
+				installedCount++
+			} else {
+				fmt.Fprintf(os.Stderr, "[!] Failed to write %s: %v\n", copilotPath, err)
+			}
+		}
+	}
+
+	if installedCount > 0 {
+		fmt.Printf("\nSuccessfully installed %d anti-stall rule file(s).\nAI assistants in these environments will now autonomously execute 'sec open' on Exit 3.\n", installedCount)
+	}
+}
+
 func handleSkill(profile string, args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
-		fmt.Println("Usage: sec-agent skill <install|show|status|update> [args]")
+		fmt.Println("Usage: sec-agent skill <install|install-rules|show|status|update> [args]")
 		fmt.Println("\nManage AI assistant integration skills, view docs, and inspect sync state.")
 		fmt.Println("\nSubcommands:")
 		fmt.Println("  install [--target <t>] [--scope <global|workspace>]  Install skills into IDE or workspace")
+		fmt.Println("  install-rules [--global] [--workspace]               Install Turn-1 anti-stall rule files")
 		fmt.Println("  show [--target <copilot|full>]                         Print integration manual to stdout")
 		fmt.Println("  status                                                 List installed skills, scopes, and health")
 		fmt.Println("  update                                                 Refresh installed skills to current CLI version")
@@ -607,6 +748,8 @@ func handleSkill(profile string, args []string) {
 
 	sub := args[0]
 	switch sub {
+	case "install-rules", "rules":
+		handleInstallRules(args[1:])
 	case "install":
 		target := ""
 		scope := "workspace"

@@ -37,10 +37,11 @@ var (
 	Verbose         bool
 	activeEnvAlias  string
 	activeEnvTier   config.EnvironmentTier = config.TierUnset
+	activeProfile   string
 	confirmProdFlag bool
 )
 var (
-	Version   = "v2.15.0"
+	Version   = "v2.17.0"
 	BuildDate = "unknown"
 )
 
@@ -50,9 +51,13 @@ type JSONErrorResponse struct {
 }
 
 type JSONError struct {
-	Code        string `json:"code"`
-	Message     string `json:"message"`
-	Remediation string `json:"remediation,omitempty"`
+	Code            string `json:"code"`
+	ExitCode        int    `json:"exit_code,omitempty"`
+	Message         string `json:"message"`
+	Remediation     string `json:"remediation,omitempty"`
+	CanAgentExecute bool   `json:"can_agent_execute,omitempty"`
+	RemediationCmd  string `json:"remediation_cmd,omitempty"`
+	Action          string `json:"action,omitempty"`
 }
 
 func mapDaemonError(errStr string) (code string, remediation string) {
@@ -60,7 +65,14 @@ func mapDaemonError(errStr string) (code string, remediation string) {
 		return "INVALID_TOKEN", "Run 'eval $(sec-agent open)' to authorize your shell session."
 	}
 	if strings.Contains(errStr, "locked or expired") || strings.Contains(errStr, "locked") {
-		return "SESSION_LOCKED", "Run 'eval $(sec-agent open)' to unlock and authorize your shell session."
+		directCmd := "sec open"
+		if activeProfile != "" && activeProfile != "default" {
+			directCmd = fmt.Sprintf("sec --profile %s open", activeProfile)
+		}
+		if isHeadlessOrAgentEnvironment() {
+			return "SESSION_LOCKED", fmt.Sprintf("\n[!] SEC-AGENT VAULT LOCKED (Exit 3)\nDIRECTIVE FOR AI AGENTS & SUBPROCESS RUNNERS:\n  DO NOT ask the human operator to type this in their terminal.\n  EXECUTE DIRECTLY via your command runner tool:\n      %s\n  REASON: Running this command directly displays the native macOS Touch ID dialog\n  on the operator's physical display. Once the operator touches the sensor,\n  the command exits 0 and unblocks your session.\n\nRun 'sec open' (or 'eval $(sec-agent open)') to unlock and authorize your shell session. Tip: For long-running AI agent tasks, pass '--ttl <duration>' (e.g. 'sec open --ttl 24h') or use '--auto-extend'.", directCmd)
+		}
+		return "SESSION_LOCKED", "Run 'sec open' (or 'eval $(sec-agent open)') to unlock and authorize your shell session. Tip: For long-running AI agent tasks, pass '--ttl <duration>' (e.g. 'sec open --ttl 24h') or use '--auto-extend'."
 	}
 	if strings.Contains(errStr, "expired") {
 		return "SECRET_EXPIRED", "Pass the '--show-expired' flag to retrieve this secret."
@@ -78,14 +90,41 @@ func fail(code string, err error, remediation string) {
 	if Verbose {
 		fmt.Fprintf(os.Stderr, "[VERBOSE] Failure details: code=%s error=%v remediation=%s\n", code, err, remediation)
 	}
+
+	exitCode := 1
+	if errors.Is(err, store.ErrSecretNotFound) || code == "SECRET_NOT_FOUND" || code == "INVALID_ARGUMENTS" || code == "INVALID_ARGUMENT" || code == "MISSING_ARGUMENT" {
+		exitCode = 2
+	} else if code == "DAEMON_NOT_RUNNING" || code == "SESSION_LOCKED" {
+		exitCode = 3
+	} else if code == "BIOMETRIC_TIMEOUT" {
+		exitCode = 4
+	} else if code == "BIOMETRIC_LOCKOUT" {
+		exitCode = 5
+	} else if code == "BIOMETRIC_FAILED" {
+		exitCode = 6
+	} else if code == "INTERACTIVE_BLOCKER" {
+		exitCode = 78
+	}
+
 	if jsonErrors {
+		jErr := JSONError{
+			Code:        code,
+			ExitCode:    exitCode,
+			Message:     err.Error(),
+			Remediation: remediation,
+		}
+		if code == "DAEMON_NOT_RUNNING" || code == "SESSION_LOCKED" {
+			jErr.CanAgentExecute = true
+			if activeProfile != "" && activeProfile != "default" {
+				jErr.RemediationCmd = fmt.Sprintf("sec --profile %s open", activeProfile)
+			} else {
+				jErr.RemediationCmd = "sec open"
+			}
+			jErr.Action = "EXECUTE_IMMEDIATELY"
+		}
 		resp := JSONErrorResponse{
 			Success: false,
-			Error: JSONError{
-				Code:        code,
-				Message:     err.Error(),
-				Remediation: remediation,
-			},
+			Error:   jErr,
 		}
 		jsonBytes, _ := json.Marshal(resp)
 		fmt.Fprintln(os.Stderr, string(jsonBytes))
@@ -98,15 +137,42 @@ func fail(code string, err error, remediation string) {
 		fmt.Fprintln(os.Stderr, "Need help or found an edge case? Run 'sec feedback'")
 	}
 
-	exitCode := 1
-	if errors.Is(err, store.ErrSecretNotFound) || code == "SECRET_NOT_FOUND" {
-		exitCode = 2
-	} else if code == "DAEMON_NOT_RUNNING" {
-		exitCode = 3
-	} else if code == "INTERACTIVE_BLOCKER" {
-		exitCode = 78
-	}
 	os.Exit(exitCode)
+}
+
+func handleBiometricFailure(res biometrics.AuthResult, timeout time.Duration) {
+	switch res {
+	case biometrics.ErrTimeout:
+		biometrics.PlayAlertSound()
+		biometrics.ShowDesktopNotification("sec-agent: Biometric Prompt Timed Out", "Touch ID authorization timed out. Run 'sec open' or tap Touch ID to resume.")
+		fmt.Fprintf(os.Stderr, "Authentication timed out: Biometric prompt timed out after %v (operator away).\n", timeout)
+		fmt.Fprintln(os.Stderr, "Resume anytime by running: sec open")
+		os.Exit(res.ExitCode()) // 4
+	case biometrics.ErrUserCanceled:
+		fmt.Fprintln(os.Stderr, "Authentication canceled: User dismissed Touch ID dialog.")
+		os.Exit(res.ExitCode()) // 1
+	case biometrics.ErrLockout:
+		fmt.Fprintln(os.Stderr, "Authentication locked out: macOS requires password unlock before Touch ID can be used.")
+		os.Exit(res.ExitCode()) // 5
+	case biometrics.ErrAuthFailed:
+		fmt.Fprintln(os.Stderr, "Authentication failed: Biometric verification failed (unrecognized fingerprint).")
+		os.Exit(res.ExitCode()) // 6
+	case biometrics.ErrUnavailable:
+		fmt.Fprintln(os.Stderr, "Authentication unavailable: Biometric hardware is not available or enrolled.")
+		os.Exit(res.ExitCode()) // 2
+	default:
+		fmt.Fprintf(os.Stderr, "Authentication failed: %v\n", res)
+		os.Exit(1)
+	}
+}
+
+func isHeadlessOrAgentEnvironment() bool {
+	return !isInteractiveTerminal() ||
+		os.Getenv("AI_AGENT") != "" ||
+		os.Getenv("COPILOT_AGENT") != "" ||
+		os.Getenv("VSCODE_AGENT_ENABLED") != "" ||
+		os.Getenv("ANTIGRAVITY_AGENT") != "" ||
+		os.Getenv("GEMINI_CLI") != ""
 }
 
 func daemonNotRunningError(profile string) (error, string) {
@@ -122,7 +188,12 @@ func daemonNotRunningError(profile string) (error, string) {
 		err = fmt.Errorf("Daemon for profile 'default' is not running. Please run 'sec open' to unlock the session.")
 	}
 
-	rem := fmt.Sprintf("\n  • Interactive Shell: Run '%s' to start/unlock and export session variables.\n  • AI Assistant / IDE: Execute '%s' directly in terminal — macOS Secure Enclave will prompt the console operator for Touch ID on their display.", openCmd, directCmd)
+	var rem string
+	if isHeadlessOrAgentEnvironment() {
+		rem = fmt.Sprintf("\n[!] SEC-AGENT VAULT LOCKED (Exit 3)\nDIRECTIVE FOR AI AGENTS & SUBPROCESS RUNNERS:\n  DO NOT ask the human operator to type this in their terminal.\n  EXECUTE DIRECTLY via your command runner tool:\n      %s\n  REASON: Running this command directly displays the native macOS Touch ID dialog\n  on the operator's physical display. Once the operator touches the sensor,\n  the command exits 0 and unblocks your session.\n\n  • Interactive Shell: Run '%s' to start/unlock and export session variables.\n  • AI Assistant / IDE: Execute '%s' directly in terminal — macOS Secure Enclave will prompt the console operator for Touch ID on their display.", directCmd, openCmd, directCmd)
+	} else {
+		rem = fmt.Sprintf("\n  • Interactive Shell: Run '%s' to start/unlock and export session variables.\n  • AI Assistant / IDE: Execute '%s' directly in terminal — macOS Secure Enclave will prompt the console operator for Touch ID on their display.", openCmd, directCmd)
+	}
 
 	return err, rem
 }
@@ -141,17 +212,21 @@ type SSHTarget struct {
 	User          string `json:"user,omitempty"`
 	Port          int    `json:"port,omitempty"`
 	IdentityFile  string `json:"identity_file,omitempty"`
+	KeySecret     string `json:"key_secret,omitempty"`
 	PassphraseKey string `json:"passphrase_key,omitempty"`
 	PasswordKey   string `json:"password_key,omitempty"`
 }
 
 // WorkspaceEnvironment represents an environment configuration within a v2 .secrc workspace file.
 type WorkspaceEnvironment struct {
-	Profile     store.ProfileName `json:"profile"`
-	Tier        string            `json:"tier,omitempty"` // "dev", "dta", "staging", "prod"
-	Description string            `json:"description,omitempty"`
-	TTL         string            `json:"ttl,omitempty"`
-	Grace       string            `json:"grace,omitempty"`
+	Profile       store.ProfileName `json:"profile"`
+	Tier          string            `json:"tier,omitempty"` // "dev", "dta", "staging", "prod"
+	Description   string            `json:"description,omitempty"`
+	TTL           string            `json:"ttl,omitempty"`
+	Grace         string            `json:"grace,omitempty"`
+	AutoExtend    bool              `json:"auto_extend,omitempty"`
+	PromptTimeout string            `json:"prompt_timeout,omitempty"`
+	AutoOpen      bool              `json:"auto_open,omitempty"`
 }
 
 // ParsedTier returns the normalized config.EnvironmentTier.
@@ -161,19 +236,68 @@ func (e WorkspaceEnvironment) ParsedTier() config.EnvironmentTier {
 
 type WorkspaceConfig struct {
 	// V1 legacy fields
-	Profile     store.ProfileName    `json:"profile,omitempty"`
-	Prefix      string               `json:"prefix,omitempty"`
-	AutoOpen    bool                 `json:"auto_open,omitempty"`
-	Extends     string               `json:"extends,omitempty"`
-	FlagAliases map[string]string    `json:"flag_aliases,omitempty"`
-	SSHTargets  map[string]SSHTarget `json:"ssh_targets,omitempty"`
-	TTL         string               `json:"ttl,omitempty"`
-	Grace       string               `json:"grace,omitempty"`
+	Profile       store.ProfileName    `json:"profile,omitempty"`
+	Prefix        string               `json:"prefix,omitempty"`
+	AutoOpen      bool                 `json:"auto_open,omitempty"`
+	Extends       string               `json:"extends,omitempty"`
+	FlagAliases   map[string]string    `json:"flag_aliases,omitempty"`
+	SSHTargets    map[string]SSHTarget `json:"ssh_targets,omitempty"`
+	TTL           string               `json:"ttl,omitempty"`
+	Grace         string               `json:"grace,omitempty"`
+	AutoExtend    bool                 `json:"auto_extend,omitempty"`
+	PromptTimeout string               `json:"prompt_timeout,omitempty"`
 
 	// V2 multi-environment fields
 	Version      int                             `json:"version,omitempty"`
 	Default      string                          `json:"default,omitempty"`
 	Environments map[string]WorkspaceEnvironment `json:"environments,omitempty"`
+}
+
+func checkAndAutoExtendSession(profile string, autoExtendFlag bool) {
+	wsCfg := loadWorkspaceConfig()
+	shouldExtend := autoExtendFlag
+	if !shouldExtend && wsCfg != nil {
+		if wsCfg.AutoExtend {
+			shouldExtend = true
+		} else if wsCfg.Environments != nil {
+			for _, env := range wsCfg.Environments {
+				if string(env.Profile) == profile && env.AutoExtend {
+					shouldExtend = true
+					break
+				}
+			}
+		}
+	}
+	if !shouldExtend {
+		return
+	}
+	stResp, err := queryDaemon(profile, daemon.IPCRequest{Action: "status"})
+	if err != nil || stResp == nil || !stResp.Success || stResp.StatusInfo == nil || !stResp.StatusInfo.IsUnlocked {
+		return
+	}
+	if stResp.StatusInfo.RemainingSeconds > 0 && stResp.StatusInfo.RemainingSeconds < 900 {
+		extTTL := "8h"
+		if wsCfg != nil {
+			if wsCfg.TTL != "" {
+				extTTL = wsCfg.TTL
+			}
+			if wsCfg.Environments != nil {
+				for _, env := range wsCfg.Environments {
+					if string(env.Profile) == profile && env.TTL != "" {
+						extTTL = env.TTL
+						break
+					}
+				}
+			}
+		}
+		extResp, extErr := queryDaemon(profile, daemon.IPCRequest{
+			Action: "extend",
+			TTL:    extTTL,
+		})
+		if extErr == nil && extResp.Success {
+			fmt.Fprintf(os.Stderr, "ℹ️  Auto-extended session for profile %q (TTL extended by %s)\n", profile, extTTL)
+		}
+	}
 }
 
 func normalizeWorkspaceConfig(cfg *WorkspaceConfig) {
@@ -183,15 +307,15 @@ func normalizeWorkspaceConfig(cfg *WorkspaceConfig) {
 	if cfg.Environments == nil {
 		cfg.Environments = make(map[string]WorkspaceEnvironment)
 	}
-
-	// Backward compatibility: If v1 Profile is provided but Environments is empty, synthesize a default environment
 	if cfg.Profile != "" && len(cfg.Environments) == 0 {
 		envName := "dev"
 		cfg.Environments[envName] = WorkspaceEnvironment{
-			Profile: cfg.Profile,
-			Tier:    string(config.TierDev),
-			TTL:     cfg.TTL,
-			Grace:   cfg.Grace,
+			Profile:       cfg.Profile,
+			Tier:          string(config.TierDev),
+			TTL:           cfg.TTL,
+			Grace:         cfg.Grace,
+			PromptTimeout: cfg.PromptTimeout,
+			AutoOpen:      cfg.AutoOpen,
 		}
 		if cfg.Default == "" {
 			cfg.Default = envName
@@ -218,17 +342,44 @@ func normalizeWorkspaceConfig(cfg *WorkspaceConfig) {
 		}
 		if env, ok := cfg.Environments[defName]; ok {
 			cfg.Profile = env.Profile
+			if cfg.PromptTimeout == "" {
+				cfg.PromptTimeout = env.PromptTimeout
+			}
 		}
 	}
 }
 
 // ResolvedContext holds the resolution details for an environment and target profile.
 type ResolvedContext struct {
-	Profile     store.ProfileName
-	EnvAlias    string
-	Tier        config.EnvironmentTier
-	Description string
-	Source      string
+	Profile       store.ProfileName
+	EnvAlias      string
+	Tier          config.EnvironmentTier
+	Description   string
+	Source        string
+	AutoOpen      bool
+	PromptTimeout string
+}
+
+func enrichResolvedContext(ctx *ResolvedContext, wsCfg *WorkspaceConfig) {
+	if wsCfg == nil {
+		return
+	}
+	if wsCfg.AutoOpen {
+		ctx.AutoOpen = true
+	}
+	if ctx.PromptTimeout == "" {
+		ctx.PromptTimeout = wsCfg.PromptTimeout
+	}
+	if wsCfg.Environments != nil && ctx.EnvAlias != "" {
+		if env, ok := wsCfg.Environments[ctx.EnvAlias]; ok {
+			if env.AutoOpen {
+				ctx.AutoOpen = true
+			}
+			if env.PromptTimeout != "" {
+				ctx.PromptTimeout = env.PromptTimeout
+			}
+		}
+	}
 }
 
 // ResolveWorkspaceEnvironment resolves the target vault profile across CLI flags,
@@ -264,6 +415,7 @@ func ResolveWorkspaceEnvironment(cliProfile string, cliEnv string, wsCfg *Worksp
 				}
 			}
 		}
+		enrichResolvedContext(&ctx, wsCfg)
 		return ctx, nil
 	}
 
@@ -284,13 +436,15 @@ func ResolveWorkspaceEnvironment(cliProfile string, cliEnv string, wsCfg *Worksp
 		if env.Profile == "" {
 			return ResolvedContext{}, fmt.Errorf("environment alias %q has no profile configured in .secrc", cliEnv)
 		}
-		return ResolvedContext{
+		ctx := ResolvedContext{
 			Profile:     env.Profile,
 			EnvAlias:    cliEnv,
 			Tier:        env.ParsedTier(),
 			Description: env.Description,
 			Source:      "cli_env",
-		}, nil
+		}
+		enrichResolvedContext(&ctx, wsCfg)
+		return ctx, nil
 	}
 
 	// Rule 3: Shell environment variable SEC_ENV (resolved against .secrc) or SEC_PROFILE
@@ -298,13 +452,15 @@ func ResolveWorkspaceEnvironment(cliProfile string, cliEnv string, wsCfg *Worksp
 	if secEnv != "" {
 		if wsCfg != nil && wsCfg.Environments != nil {
 			if env, ok := wsCfg.Environments[secEnv]; ok && env.Profile != "" {
-				return ResolvedContext{
+				ctx := ResolvedContext{
 					Profile:     env.Profile,
 					EnvAlias:    secEnv,
 					Tier:        env.ParsedTier(),
 					Description: env.Description,
 					Source:      "sec_env",
-				}, nil
+				}
+				enrichResolvedContext(&ctx, wsCfg)
+				return ctx, nil
 			}
 		}
 		// If SEC_ENV is set but not in .secrc environments, check SEC_PROFILE fallback
@@ -312,23 +468,27 @@ func ResolveWorkspaceEnvironment(cliProfile string, cliEnv string, wsCfg *Worksp
 		if secProfile != "" {
 			pn, err := store.NewProfileName(secProfile)
 			if err == nil {
-				return ResolvedContext{
+				ctx := ResolvedContext{
 					Profile:  pn,
 					EnvAlias: secEnv,
 					Tier:     config.TierUnset,
 					Source:   "sec_profile",
-				}, nil
+				}
+				enrichResolvedContext(&ctx, wsCfg)
+				return ctx, nil
 			}
 		}
 		// If neither matched .secrc, allow SEC_ENV as direct profile if valid
 		pn, err := store.NewProfileName(secEnv)
 		if err == nil {
-			return ResolvedContext{
+			ctx := ResolvedContext{
 				Profile:  pn,
 				EnvAlias: secEnv,
 				Tier:     config.TierUnset,
 				Source:   "sec_env_direct",
-			}, nil
+			}
+			enrichResolvedContext(&ctx, wsCfg)
+			return ctx, nil
 		}
 	}
 
@@ -353,6 +513,7 @@ func ResolveWorkspaceEnvironment(cliProfile string, cliEnv string, wsCfg *Worksp
 				}
 			}
 		}
+		enrichResolvedContext(&ctx, wsCfg)
 		return ctx, nil
 	}
 
@@ -360,33 +521,39 @@ func ResolveWorkspaceEnvironment(cliProfile string, cliEnv string, wsCfg *Worksp
 	if wsCfg != nil {
 		if wsCfg.Default != "" && wsCfg.Environments != nil {
 			if env, ok := wsCfg.Environments[wsCfg.Default]; ok && env.Profile != "" {
-				return ResolvedContext{
+				ctx := ResolvedContext{
 					Profile:     env.Profile,
 					EnvAlias:    wsCfg.Default,
 					Tier:        env.ParsedTier(),
 					Description: env.Description,
 					Source:      "secrc_default",
-				}, nil
+				}
+				enrichResolvedContext(&ctx, wsCfg)
+				return ctx, nil
 			}
 		}
 		if wsCfg.Profile != "" {
-			return ResolvedContext{
-				Profile:     wsCfg.Profile,
-				EnvAlias:    "dev",
-				Tier:        config.TierDev,
-				Source:      "secrc_legacy",
-			}, nil
+			ctx := ResolvedContext{
+				Profile:  wsCfg.Profile,
+				EnvAlias: "dev",
+				Tier:     config.TierDev,
+				Source:   "secrc_legacy",
+			}
+			enrichResolvedContext(&ctx, wsCfg)
+			return ctx, nil
 		}
 	}
 
 	// Rule 5: Global fallback "default"
 	defaultPN, _ := store.NewProfileName("default")
-	return ResolvedContext{
+	ctx := ResolvedContext{
 		Profile:  defaultPN,
 		EnvAlias: "default",
 		Tier:     config.TierDev,
 		Source:   "global_default",
-	}, nil
+	}
+	enrichResolvedContext(&ctx, wsCfg)
+	return ctx, nil
 }
 
 func findWorkspaceConfigFile() string {
@@ -529,8 +696,12 @@ func extractGlobalFlags() (string, []string) {
 	if err != nil {
 		fail("ENVIRONMENT_RESOLUTION_ERROR", err, "Verify environment configuration in .secrc or check profile name.")
 	}
+	activeProfile = resolved.Profile.String()
 	activeEnvAlias = resolved.EnvAlias
 	activeEnvTier = resolved.Tier
+	if resolved.AutoOpen {
+		_ = os.Setenv("SEC_AUTO_OPEN", "1")
+	}
 
 	return resolved.Profile.String(), cleanArgs
 }
@@ -556,13 +727,24 @@ func queryDaemon(profile string, req daemon.IPCRequest) (*daemon.IPCResponse, er
 }
 
 func handleOpenGUI(profile string) bool {
+	wsCfg := loadWorkspaceConfig()
+	secrcTimeout := ""
+	if wsCfg != nil {
+		secrcTimeout = wsCfg.PromptTimeout
+	}
+	promptTimeout, _ := config.ResolvePromptTimeout("", secrcTimeout)
+
 	if os.Getenv("SEC_TEST_MODE") != "1" {
-		if !biometrics.Authenticate(biometrics.FormatReason(Version, "gui", profile)) {
+		res := biometrics.AuthenticateWithTimeout(biometrics.FormatReason(Version, "gui", profile), promptTimeout)
+		if res != biometrics.AuthSuccess {
+			if res == biometrics.ErrTimeout {
+				biometrics.PlayAlertSound()
+				biometrics.ShowDesktopNotification("sec-agent: Biometric Prompt Timed Out", "Touch ID authorization timed out. Run 'sec open' or tap Touch ID to resume.")
+			}
 			return false
 		}
 	}
 
-	wsCfg := loadWorkspaceConfig()
 	openProfiles := []string{profile}
 	if profile == "default" && wsCfg != nil && wsCfg.Profile != "" && wsCfg.Profile != "default" {
 		openProfiles = append(openProfiles, wsCfg.Profile.String())
@@ -866,18 +1048,33 @@ func ensureDaemonRunning(profile string) error {
 
 	// #nosec G204 G702
 	cmd := exec.Command(bin, "--profile", profile, "daemon")
-	cmd.Env = append(os.Environ(), fmt.Sprintf("SEC_PROFILE=%s", profile))
+	cmd.Env = os.Environ()
+	if customCfg := os.Getenv("SEC_CONFIG_DIR"); customCfg != "" {
+		cmd.Env = append(cmd.Env, fmt.Sprintf("SEC_CONFIG_DIR=%s", customCfg))
+	}
+	if testMode := os.Getenv("SEC_TEST_MODE"); testMode != "" {
+		cmd.Env = append(cmd.Env, fmt.Sprintf("SEC_TEST_MODE=%s", testMode))
+	}
+	if noSound := os.Getenv("SEC_NO_SOUND"); noSound != "" {
+		cmd.Env = append(cmd.Env, fmt.Sprintf("SEC_NO_SOUND=%s", noSound))
+	}
+	cmd.Env = append(cmd.Env, fmt.Sprintf("SEC_PROFILE=%s", profile))
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setsid: true,
 	}
 
-	// #nosec G302 G304
-	devNull, devNullErr := os.OpenFile(os.DevNull, os.O_RDWR, 0)
-	if devNullErr == nil {
-		defer devNull.Close()
-		cmd.Stdin = devNull
-		cmd.Stdout = devNull
-		cmd.Stderr = devNull
+	if os.Getenv("SEC_VERBOSE_DAEMON") == "1" || Verbose {
+		cmd.Stdout = os.Stderr
+		cmd.Stderr = os.Stderr
+	} else {
+		// #nosec G302 G304
+		devNull, devNullErr := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+		if devNullErr == nil {
+			defer devNull.Close()
+			cmd.Stdin = devNull
+			cmd.Stdout = devNull
+			cmd.Stderr = devNull
+		}
 	}
 
 	if err := cmd.Start(); err != nil {
@@ -902,6 +1099,7 @@ func ensureDaemonRunning(profile string) error {
 func handleOpen(profile string, args []string) {
 	ttlStr := ""
 	graceStr := ""
+	timeoutStr := ""
 
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--ttl" || args[i] == "-t" {
@@ -920,6 +1118,16 @@ func handleOpen(profile string, args []string) {
 				fmt.Fprintln(os.Stderr, "Error: --grace requires a duration value (e.g. 30m, 1h)")
 				os.Exit(1)
 			}
+		} else if args[i] == "--timeout" {
+			if i+1 < len(args) {
+				timeoutStr = args[i+1]
+				i++
+			} else {
+				fmt.Fprintln(os.Stderr, "Error: --timeout requires a duration value (e.g. 120s, 2m)")
+				os.Exit(2)
+			}
+		} else if strings.HasPrefix(args[i], "--timeout=") {
+			timeoutStr = strings.TrimPrefix(args[i], "--timeout=")
 		}
 	}
 
@@ -935,6 +1143,16 @@ func handleOpen(profile string, args []string) {
 	}
 	if graceStr == "" {
 		graceStr = "30m"
+	}
+
+	secrcTimeout := ""
+	if wsCfg != nil {
+		secrcTimeout = wsCfg.PromptTimeout
+	}
+	promptTimeout, err := config.ResolvePromptTimeout(timeoutStr, secrcTimeout)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: invalid prompt timeout %q: %v\n", timeoutStr, err)
+		os.Exit(2)
 	}
 
 	if ttlStr != "" {
@@ -971,9 +1189,9 @@ func handleOpen(profile string, args []string) {
 	fmt.Fprintln(os.Stderr, "Authorizing session via Touch ID...")
 
 	if os.Getenv("SEC_TEST_MODE") != "1" {
-		if !biometrics.Authenticate(biometrics.FormatReason(Version, "open", profile)) {
-			fmt.Fprintln(os.Stderr, "Authentication failed: Biometric verification failed.")
-			os.Exit(1)
+		res := biometrics.AuthenticateWithTimeout(biometrics.FormatReason(Version, "open", profile), promptTimeout)
+		if res != biometrics.AuthSuccess {
+			handleBiometricFailure(res, promptTimeout)
 		}
 	}
 
@@ -1014,6 +1232,15 @@ func handleOpen(profile string, args []string) {
 		succeededProfiles = append(succeededProfiles, p)
 		if lastToken == "" {
 			lastToken = resp.Token
+		}
+
+		vaultPath := store.GetStorePathForProfile(p)
+		if env, err := store.ReadVaultEnvelope(vaultPath); err == nil && env != nil {
+			if !env.HasSlot1() {
+				fmt.Fprintf(os.Stderr, "\n⚠️  WARNING: Profile %q has NO Slot 1 (BIP39) recovery key enrolled!\n", p)
+				fmt.Fprintf(os.Stderr, "   Touch ID invalidation or OS updates will cause permanent data loss.\n")
+				fmt.Fprintf(os.Stderr, "   ▶ Protect your vault now: Run 'sec enroll-recovery --profile %s'\n\n", p)
+			}
 		}
 	}
 

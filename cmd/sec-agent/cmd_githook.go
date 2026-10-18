@@ -131,9 +131,9 @@ func handleGitHookCheck(profile string, args []string) {
 					continue
 				}
 
-				// 1. Check active vault value exact matches
+				// 1. Check active vault value exact matches (with hex boundary collision protection)
 				for vName, vVal := range vaultValues {
-					if strings.Contains(addedContent, vVal) {
+					if containsSecretValue(addedContent, vVal) {
 						fmt.Fprintf(os.Stderr, "❌ [sec Privacy Guard] Hardcoded Vault Secret Detected in staged file!\n")
 						fmt.Fprintf(os.Stderr, "  • File: %s\n", file)
 						fmt.Fprintf(os.Stderr, "  • Secret Name: %s\n", vName)

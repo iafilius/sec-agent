@@ -171,6 +171,9 @@ type DaemonStatusInfo struct {
 	LastUsed            string `json:"last_used"`
 	SessionTTL          string `json:"session_ttl"`
 	GraceTTL            string `json:"grace_ttl"`
+	RemainingTTL        string `json:"remaining_ttl,omitempty"`
+	RemainingSeconds    int64  `json:"remaining_seconds"`
+	ExpiresAt           string `json:"expires_at,omitempty"`
 }
 
 // IPCResponse defines the format for replies from the daemon.
@@ -402,6 +405,21 @@ func (d *Daemon) processRequest(c net.Conn, req IPCRequest, peerPID int) {
 		return
 	}
 
+	var lastExpTime time.Time
+	if !d.sessionStart.IsZero() && d.sessionTTL > 0 {
+		if d.graceTTL > 0 && !d.lastUsed.IsZero() {
+			hardExp := d.sessionStart.Add(d.sessionTTL)
+			graceExp := d.lastUsed.Add(d.graceTTL)
+			if graceExp.After(hardExp) {
+				lastExpTime = graceExp
+			} else {
+				lastExpTime = hardExp
+			}
+		} else {
+			lastExpTime = d.sessionStart.Add(d.sessionTTL)
+		}
+	}
+
 	if d.isExpired() {
 		d.wipeMemory()
 	}
@@ -413,7 +431,12 @@ func (d *Daemon) processRequest(c net.Conn, req IPCRequest, peerPID int) {
 				action = AuditEventGetGroup
 			}
 			d.logAudit(action, req.Path, peerPID, false, "session_locked")
-			d.sendResponse(c, IPCResponse{Success: false, Error: "Session locked or expired. Please run 'sec open' to authorize."})
+			errMsg := "Session locked or expired. Please run 'sec open' to authorize."
+			if !lastExpTime.IsZero() && time.Now().After(lastExpTime) {
+				elapsed := time.Since(lastExpTime).Round(time.Second)
+				errMsg = fmt.Sprintf("Session locked or expired (%s ago). Please run 'sec open' to authorize.", elapsed)
+			}
+			d.sendResponse(c, IPCResponse{Success: false, Error: errMsg})
 			return
 		}
 		if req.Token != "" && req.Token != d.sessionToken {
@@ -425,6 +448,11 @@ func (d *Daemon) processRequest(c net.Conn, req IPCRequest, peerPID int) {
 			d.sendResponse(c, IPCResponse{Success: false, Error: "ACCESS DENIED: Invalid session token"})
 			return
 		}
+	}
+
+	// Slide hard TTL forward if authenticated request arrives during the inactivity grace window
+	if req.Action != IPCActionOpen && req.Action != IPCActionPing {
+		d.maybeRefreshSlidingTTLLocked()
 	}
 
 	switch req.Action {
@@ -1167,6 +1195,27 @@ func (d *Daemon) processRequest(c net.Conn, req IPCRequest, peerPID int) {
 			fileSize = fi.Size()
 		}
 
+		var remainingTTLStr string
+		var remainingSecs int64
+		var expiresAtStr string
+		if d.masterKey != nil && !d.sessionStart.IsZero() && !d.isExpired() {
+			hardExpiry := d.sessionStart.Add(d.sessionTTL)
+			if time.Now().Before(hardExpiry) {
+				rem := time.Until(hardExpiry)
+				remainingSecs = int64(rem.Seconds())
+				remainingTTLStr = rem.Round(time.Second).String()
+				expiresAtStr = hardExpiry.Format(time.RFC3339)
+			} else if !d.lastUsed.IsZero() {
+				graceExpiry := d.lastUsed.Add(d.graceTTL)
+				if time.Now().Before(graceExpiry) {
+					rem := time.Until(graceExpiry)
+					remainingSecs = int64(rem.Seconds())
+					remainingTTLStr = rem.Round(time.Second).String()
+					expiresAtStr = graceExpiry.Format(time.RFC3339)
+				}
+			}
+		}
+
 		info := &DaemonStatusInfo{
 			Profile:             d.profile,
 			Version:             d.version,
@@ -1181,6 +1230,9 @@ func (d *Daemon) processRequest(c net.Conn, req IPCRequest, peerPID int) {
 			LastUsed:            d.lastUsed.Format(time.RFC3339),
 			SessionTTL:          d.sessionTTL.String(),
 			GraceTTL:            d.graceTTL.String(),
+			RemainingTTL:        remainingTTLStr,
+			RemainingSeconds:    remainingSecs,
+			ExpiresAt:           expiresAtStr,
 		}
 		d.sendResponse(c, IPCResponse{
 			Success:             true,

@@ -14,22 +14,46 @@ All CLI operations are invoked via the `sec` or `sec-agent` binary. Below is the
 Initializes the background session daemon and prompts for Touch ID physical presence.
 *   `--ttl <duration>` / `-t <duration>`: Hard session expiration limit (e.g. `8h`, `12h`, `24h`). Default: `8h`.
 *   `--grace <duration>` / `-g <duration>`: Sliding inactivity grace period. Secret queries within this window extend active session reachability. Default: `30m`.
-*   **Usage**: `eval $(sec open -t 10h -g 45m)`
+*   `--timeout <duration>`: Active prompt timeout before automatic dismissal (e.g. `120s`, `2m`). Configurable in `.secrc` (`"prompt_timeout"`) or `SEC_PROMPT_TIMEOUT`. Default: `120s`.
+*   **Biometric Exit Code Contract**:
+    * `0`: Success (Vault unlocked)
+    * `1`: User Canceled (Prompt dismissed with Escape or Cancel button)
+    * `2`: Invalid CLI syntax or biometrics unavailable
+    * `3`: Vault locked / daemon not running
+    * `4`: `ERR_BIOMETRIC_TIMEOUT` (120s timeout expired, operator AFK — triggers agent task deferral)
+    * `5`: `ERR_BIOMETRIC_LOCKOUT` (macOS requires password unlock before Touch ID can re-arm)
+    * `6`: `ERR_BIOMETRIC_FAILED` (Sensor rejected presented fingerprint)
+*   **Operator AFK Signaling**: Upon timeout, an audio alert plays and a macOS desktop notification is posted alerting the returning operator to resume via `sec open`.
+*   **Usage**: `eval $(sec open -t 10h -g 45m --timeout 120s)`
 
 #### `sec lock`
 Immediately purges all decrypted session keys from background daemon RAM and invalidates the active `SEC_SESSION_TOKEN`.
 *   **Usage**: `sec lock`
 
+
 ---
 
 ### 1.2. Secret Ingestion & Storage
 
-#### `sec set <path> <value>`
+#### `sec set <path> [<value>]`
 Encrypts and saves a secret key-value record to disk.
-*   `--comment <text>`: Adds descriptive administrative notes.
+*   `--stdin`: Reads value from standard input (fail-safe protected against copied command lines and shell prompts).
+*   `--allow-command-string`: Explicitly allows storing text that starts with a shell command or terminal prompt via stdin.
+*   `--desc <text>`: Adds a concise, 1-line description of what the secret is used for.
+*   `--notes <text>`: Attaches multiline operational runbooks, renewal URLs, and rotation steps.
+*   `--comment <text>`: Adds administrative comment note.
 *   `--meta <key=value>`: Attaches custom key-value metadata tags (can be repeated multiple times).
 *   `--expires <duration|ISO8601>`: Sets relative duration (e.g., `30d`, `12h`) or absolute UTC timestamp (e.g., `2026-12-31T23:59:59Z`).
-*   **Usage**: `sec set database/prod/password "pass123" --comment "Prod DB" --meta owner=devops --expires 30d`
+*   `--env-alias <alias>`: Maps secret to a specific environment variable name during `sec run` or `sec export`.
+*   **Usage**: `sec set database/prod/password "pass123" --desc "Production DB" --meta owner=devops --expires 30d`
+
+#### `sec relabel <path>` / `sec edit-meta`
+Updates metadata (description, operational notes, expiry, tags, alias) without altering the secret value or re-entering plaintext.
+*   `--desc <text>`: Updates 1-line description.
+*   `--notes <text>`: Updates multiline operational runbook.
+*   `--expires <ttl>`: Updates expiration timestamp (or `clear` to remove).
+*   `--meta <key=value>`: Sets or updates custom metadata tags.
+*   **Usage**: `sec relabel api/stripe --expires 90d --desc "Stripe Live Key" --notes "Rotate quarterly"`
 
 #### `sec gen <path>`
 Generates a cryptographically strong random password (`crypto/rand`) and saves it directly to the vault.
@@ -65,11 +89,51 @@ Spawns a child process with vault credentials injected directly into process RAM
 *   `--profile <name>`: Selects profile vault.
 *   `--group <prefix>`: Filters injected secrets by prefix subtree.
 *   `--allow-keys <key1,key2>`: Enforces least-privilege scoping (only allowed keys are exposed; all other keys are suppressed).
+*   `--ssh-key-secret <vault-key>` / `--key-secret <vault-key>`: Spawns ephemeral in-memory SSH agent directly populated from vault private key bytes (zero disk files), exporting `SSH_AUTH_SOCK` to the child command.
+*   `--ssh-key <file>` / `-i <file>`: Spawns ephemeral in-memory SSH agent loaded from a local filesystem private key.
+*   `--ssh-passphrase-key <vault-key>`: Resolves passphrase from vault to unlock encrypted private keys in memory.
+*   `--stdin-key <vault-key>`: Streams vault secret directly into child process stdin.
+*   `--temp-file <ENV=vault/key>`: Ephemerally materializes vault secret as a mode-0600 temp file shredded with zeroes upon child termination.
+*   `--redact`: Automatically redacts injected vault secrets and derived encodings from child stdout/stderr.
 *   **Usage**: `sec run --profile dev --allow-keys VCO_URL,VCO_ID -- npm test`
+*   **Usage (Zero-Disk SSH)**: `sec run --ssh-key-secret ssh/switch/key -- git fetch origin`
 
 ---
 
-### 1.4. Refactoring & Maintenance
+### 1.4. Remote SSH Execution & Target Lifecycle (`sec ssh`)
+
+#### `sec ssh [target | user@host] [-- <command>]`
+Connects to remote hosts using credentials stored in the active vault. Defaults to native pure Go SSH execution (`golang.org/x/crypto/ssh`), ensuring zero host disk exposure and eliminating external tools like `sshpass`.
+
+*   `--ssh-key-secret <vault-key>` / `--key-secret <vault-key>`: Vault path to private key (PEM / OpenSSH format). If omitted, `sec-agent` auto-resolves `ssh/<target>/key` or `ssh/<target>/private_key` from the active profile.
+*   `--ssh-key <path>` / `-i <path>` / `--identity <path>`: Local filesystem identity file path.
+*   `--ssh-passphrase-key <vault-key>`: Vault path containing passphrase for encrypted private keys.
+*   `--password <pass>`: Explicit password override for target connection.
+*   `--port <port>` / `-p <port>`: Overrides SSH destination port.
+*   `--openssh` / `--fallback-openssh`: Delegates execution to system `/usr/bin/ssh` binary via an ephemeral in-memory `ssh-agent`.
+*   `--no-trace`: Used with `--openssh` to suppress saving host keys to disk by injecting `-o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR -o IdentitiesOnly=yes`.
+*   `--tofu` / `--trust-first-use`: Headless auto-pinning; automatically saves presented host key fingerprint to vault on initial connection without interactive prompt.
+*   `--insecure` / `--no-verify`: Connects without verifying or mutating vault host key fingerprints (skips TOFU and mismatch checks).
+*   `--update-host-key`: Replaces existing vault-pinned fingerprint with the newly presented host key fingerprint.
+
+#### `sec ssh host-key show <target>`
+Displays the pinned SHA-256 host public key fingerprint stored in the active vault under `ssh/<target>/host_fingerprint`.
+
+#### `sec ssh reset-host-key <target>`
+Removes the pinned host key fingerprint secret from the vault to reset TOFU trust after remote host re-installation.
+
+#### `sec ssh init <target> --host <host> --user <user> [--port <port>] [--password <pass> | --key <path> | --key-secret <vault-key>]`
+Interactively configures a named SSH target and persists configuration to `.secrc` and vault storage.
+
+*   **Usage (Interactive)**: `sec ssh router`
+*   **Usage (Remote Command)**: `sec ssh ax3600 -- uci show wireless`
+*   **Usage (Headless TOFU)**: `sec ssh root@192.168.31.1 --tofu -- "uptime"`
+*   **Usage (Zero-Trace OpenSSH)**: `sec ssh ax3600 --openssh --no-trace -- "uname -a"`
+*   **Usage (Host Key Management)**: `sec ssh host-key show ax3600` and `sec ssh reset-host-key ax3600`
+
+---
+
+### 1.5. Refactoring & Maintenance
 
 #### `sec mv <src> <dst>` / `sec rename`
 Renames a secret or entire prefix subtree while preserving metadata and creation timestamps.
@@ -87,9 +151,14 @@ Deletes a secret or batch prefix subtree.
 *   **Usage**: `sec rm temp/ --prefix`
 
 #### `sec ls [<prefix>]` / `sec list`
-Lists stored secret paths without exposing raw values to terminal logs.
-*   `--json`: Outputs JSON array of key paths.
-*   **Usage**: `sec ls project/`
+Lists stored secret paths, hygiene audits, or expiring keys without exposing raw values.
+*   `--incomplete` / `--hygiene`: Scans vault secrets for missing lifecycle metadata (expiration date, description, operational notes).
+*   `--expiring [N]`: Lists secrets expiring within N days (default: 7).
+*   `--stale [N]`: Lists secrets unaccessed for N days (default: 30).
+*   `--long`, `-l`: Displays detailed metadata table with versions and timestamps.
+*   `--trash`: Lists soft-deleted secrets in the trash bin.
+*   `--json`: Outputs JSON format.
+*   **Usage**: `sec ls --incomplete` or `sec ls project/ --long`
 
 ---
 

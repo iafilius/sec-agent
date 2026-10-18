@@ -37,11 +37,14 @@ func detectDaemonAnomaly(profile string, pids []int) (bool, string, string) {
 func handleDoctor(profile string, args []string) {
 	skipKeychain := false
 	repairMode := false
+	probeKeychain := false
 	for _, a := range args {
 		if a == "--skip-keychain" {
 			skipKeychain = true
 		} else if a == "--repair" {
 			repairMode = true
+		} else if a == "--probe-keychain" {
+			probeKeychain = true
 		}
 	}
 
@@ -142,6 +145,11 @@ func handleDoctor(profile string, args []string) {
 			if v.NestingDepth > 1 {
 				fmt.Printf("[⚠️] Profile %-20s Vault: Nested Envelope Detected (Depth: %d) — Run 'sec doctor --repair' to auto-heal\n", v.Profile, v.NestingDepth)
 			}
+			if !v.HasSlot1 {
+				fmt.Printf("[🔴] Profile %-20s Vault: NO Slot 1 Recovery Key Enrolled (CRITICAL RISK) — Run 'sec enroll-recovery --profile %s' to protect\n", v.Profile, v.Profile)
+			} else {
+				fmt.Printf("[✓] Profile %-20s Vault: Slot 1 (BIP39) Recovery Key Enrolled\n", v.Profile)
+			}
 		}
 	}
 
@@ -155,13 +163,13 @@ func handleDoctor(profile string, args []string) {
 		fmt.Printf("[✓] Keychain ACL: Sealed to active binary (%s)\n", curVer)
 	}
 
-	if skipKeychain || (!isInteractiveTerminal() && os.Getenv("SEC_TEST_MODE") != "1") {
+	if (skipKeychain || (!isInteractiveTerminal() && os.Getenv("SEC_TEST_MODE") != "1")) && !probeKeychain {
 		reason := "headless / non-interactive terminal detected"
 		if skipKeychain {
 			reason = "--skip-keychain flag supplied"
 		}
 		fmt.Printf("[ℹ] Skipped live Touch ID Keychain probe (%s).\n", reason)
-		fmt.Println("    (Run 'sec doctor' in an interactive terminal to verify Touch ID hardware keys)")
+		fmt.Println("    (Run 'sec doctor' in an interactive terminal or pass '--probe-keychain' to verify Touch ID hardware keys)")
 	} else if vErr == nil {
 		fmt.Println("[ℹ] Auditing enrolled profile keys in macOS Keychain (Touch ID prompt may appear)...")
 		for _, v := range vaults {
@@ -270,6 +278,13 @@ func handleStatusQuick(profile string) {
 		}
 	}
 
+	var statusInfo *daemon.DaemonStatusInfo
+	if pingResp != nil && pingResp.Success {
+		if stResp, err := queryDaemonRaw(profile, daemon.IPCRequest{Action: daemon.IPCActionStatus}); err == nil && stResp.Success && stResp.StatusInfo != nil {
+			statusInfo = stResp.StatusInfo
+		}
+	}
+
 	if jsonErrors {
 		resMap := map[string]interface{}{
 			"success":      true,
@@ -280,6 +295,11 @@ func handleStatusQuick(profile string) {
 		}
 		if statusField != "ACTIVE" && pingResp != nil {
 			resMap["status_detail"] = pingResp.Error
+		}
+		if statusInfo != nil && statusInfo.RemainingTTL != "" {
+			resMap["remaining_ttl"] = statusInfo.RemainingTTL
+			resMap["remaining_seconds"] = statusInfo.RemainingSeconds
+			resMap["expires_at"] = statusInfo.ExpiresAt
 		}
 		if activeSkillPath != "" {
 			resMap["skill_path"] = activeSkillPath
@@ -300,6 +320,9 @@ func handleStatusQuick(profile string) {
 	fmt.Printf("[✓] Socket Path:    %s\n", socketPath)
 	fmt.Printf("[✓] File Perms:     %04o (Strict)\n", perms)
 	fmt.Printf("[✓] Socket Status:  %s\n", socketStatus)
+	if statusInfo != nil && statusInfo.RemainingTTL != "" {
+		fmt.Printf("[✓] Remaining TTL:  %s (Expires: %s)\n", statusInfo.RemainingTTL, statusInfo.ExpiresAt)
+	}
 	if daemonVer != "" {
 		if !daemonSynced {
 			fmt.Printf("[✓] Daemon Version: %s (⚠️ Outdated: CLI is %s — run 'sec restart --hot-reload')\n", daemonVer, Version)
@@ -550,6 +573,19 @@ func handleStatus(profile string, args []string) {
 	}
 	fmt.Printf("Daemon Version:       %s\n", daemonVerStr)
 	fmt.Printf("Vault Schema:         %s\n", schemaStatus)
+	hasSlot1 := false
+	if !isLegacy {
+		if env, err := store.ReadVaultEnvelope(dbPath); err == nil && env != nil {
+			hasSlot1 = env.HasSlot1()
+		}
+	}
+	if hasSlot1 {
+		fmt.Println("Recovery Key:         Slot 1 (BIP39 Mnemonic Enrolled)")
+	} else if isLegacy {
+		fmt.Printf("Recovery Key:         MISSING (⚠️ Legacy v1.0 — run 'sec enroll-recovery --profile %s')\n", profile)
+	} else {
+		fmt.Printf("Recovery Key:         MISSING (⚠️ Run 'sec enroll-recovery --profile %s' to protect)\n", profile)
+	}
 	fmt.Println("Biometric Policy:     kSecAccessControlBiometryCurrentSet (Admin Defense Active)")
 	if info.IsUnlocked {
 		fmt.Println("Session Status:       UNLOCKED (Authorized via Touch ID)")
@@ -559,6 +595,13 @@ func handleStatus(profile string, args []string) {
 	fmt.Printf("Stored Secrets:       %d total (%d expired)\n", info.TotalSecrets, info.ExpiredSecrets)
 	fmt.Printf("Hard TTL Limit:       %s\n", info.SessionTTL)
 	fmt.Printf("Inactivity Grace:     %s\n", info.GraceTTL)
+	if info.RemainingTTL != "" {
+		fmt.Printf("Remaining TTL:        %s (Expires: %s)\n", info.RemainingTTL, info.ExpiresAt)
+	} else if info.IsUnlocked {
+		fmt.Println("Remaining TTL:        Active")
+	} else {
+		fmt.Println("Remaining TTL:        Expired / Locked")
+	}
 	fmt.Printf("Socket Path:          %s\n", info.SocketPath)
 	fmt.Printf("Database Path:        %s\n", info.StorePath)
 	fmt.Printf("Database Size:        %d bytes\n", info.StoreSizeBytes)
@@ -588,9 +631,14 @@ func handleStatus(profile string, args []string) {
 		fmt.Println("\n\033[33m⚠️  SECURITY WARNING — LEGACY VAULT SCHEMA (v1.0 DETECTED):\033[0m")
 		fmt.Println("   • Your vault file is using legacy v1.0 single-slot encryption.")
 		fmt.Println("   • It does NOT protect against corporate device admins or rogue fingerprint additions.")
-		fmt.Println("   • Run 'sec migrate-v2' to upgrade to Dual-Slot Admin Defense instantly.")
+		fmt.Println("   • Run 'sec enroll-recovery' (or 'sec migrate-v2') to upgrade to Dual-Slot protection.")
 		fmt.Println("   • 💡 REMINDER: Always store your 24-word recovery seed in a safe offline location")
 		fmt.Println("     (e.g., paper vault or password manager) before updating biometrics!")
+	} else if !hasSlot1 {
+		fmt.Println("\n\033[33m⚠️  RECOVERY WARNING — NO SLOT 1 RECOVERY KEY ENROLLED:\033[0m")
+		fmt.Println("   • This profile vault has no BIP39 recovery mnemonic.")
+		fmt.Println("   • If Touch ID biometrics change or macOS resets Keychain, data cannot be recovered.")
+		fmt.Printf("   ▶ Remediation: Run 'sec enroll-recovery --profile %s' to protect your secrets!\n", profile)
 	}
 
 	bkResp, err := queryDaemonRaw(profile, daemon.IPCRequest{Action: "backup"})

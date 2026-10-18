@@ -98,3 +98,115 @@ func TestRedactWriterEmptySecrets(t *testing.T) {
 		t.Errorf("expected %q, got %q", input, out.String())
 	}
 }
+
+func TestHexCollisionDetectionAndProtection(t *testing.T) {
+	hexSecret := "a1b2c3d4"
+	if !isPureHex(hexSecret) {
+		t.Fatalf("expected %q to be pure hex", hexSecret)
+	}
+
+	// 1. 40-character Git commit hash containing hexSecret as a substring
+	gitCommitSHA := "commit 7f8" + hexSecret + "e9045612347890abcdef1234567890ab is clean"
+	if containsSecretValue(gitCommitSHA, hexSecret) {
+		t.Errorf("expected git commit SHA to NOT trigger secret collision, but containsSecretValue returned true")
+	}
+
+	// replaceSecretMatches should preserve the commit SHA intact
+	redactedLine := replaceSecretMatches(gitCommitSHA, hexSecret, "[REDACTED]")
+	if redactedLine != gitCommitSHA {
+		t.Errorf("expected git commit SHA to remain unchanged, got: %s", redactedLine)
+	}
+
+	// 2. 64-character SHA-256 digest in lockfile containing hexSecret as prefix
+	sha256Digest := "sha256:" + hexSecret + "9876543210abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	if containsSecretValue(sha256Digest, hexSecret) {
+		t.Errorf("expected sha256 digest prefix to NOT trigger collision, got true")
+	}
+
+	// 3. Standalone hex secret should match and be redacted
+	standaloneLine := "export TOKEN=\"a1b2c3d4\""
+	if !containsSecretValue(standaloneLine, hexSecret) {
+		t.Errorf("expected standalone hex secret to match, got false")
+	}
+	standaloneRedacted := replaceSecretMatches(standaloneLine, hexSecret, "[REDACTED]")
+	expectedStandalone := "export TOKEN=\"[REDACTED]\""
+	if standaloneRedacted != expectedStandalone {
+		t.Errorf("expected %q, got %q", expectedStandalone, standaloneRedacted)
+	}
+
+	// 4. Line containing both a commit hash collision AND a standalone secret
+	mixedLine := "checkout 7f8" + hexSecret + "e9045612347890abcdef1234567890ab; token=a1b2c3d4"
+	if !containsSecretValue(mixedLine, hexSecret) {
+		t.Errorf("expected mixed line to match due to standalone secret token, got false")
+	}
+	mixedRedacted := replaceSecretMatches(mixedLine, hexSecret, "[REDACTED]")
+	expectedMixed := "checkout 7f8" + hexSecret + "e9045612347890abcdef1234567890ab; token=[REDACTED]"
+	if mixedRedacted != expectedMixed {
+		t.Errorf("expected %q, got %q", expectedMixed, mixedRedacted)
+	}
+}
+
+func TestDerivedEncodingRedactionBase64AndURLEscaped(t *testing.T) {
+	rawMap := map[string]string{
+		"auth/token": "p@ss/word+123=",
+	}
+	expanded := expandDerivedSecrets(rawMap)
+
+	// Check raw
+	if _, ok := expanded["p@ss/word+123="]; !ok {
+		t.Errorf("raw secret missing from expanded map")
+	}
+
+	// Check base64
+	b64Expected := "cEBzcy93b3JkKzEyMz0="
+	if name, ok := expanded[b64Expected]; !ok || !strings.Contains(name, "(base64)") {
+		t.Errorf("base64 encoding missing or unlabelled in expanded map: got %v", name)
+	}
+
+	// Check url-encoded (query or path escape)
+	urlExpected := "p%40ss%2Fword%2B123%3D"
+	if name, ok := expanded[urlExpected]; !ok || !strings.Contains(name, "(url-encoded)") {
+		t.Errorf("url-encoded form missing or unlabelled in expanded map: got %v", name)
+	}
+}
+
+func TestRedactWriterWithDerivedEncodingsAndHexCollisions(t *testing.T) {
+	var out bytes.Buffer
+	secrets := []string{"p@ss/word+123=", "a1b2c3d4"}
+	w := newRedactWriter(&out, secrets)
+
+	input := "Header Authorization: Basic cEBzcy93b3JkKzEyMz0=\n" +
+		"URL query: https://api.internal/v1?token=p%40ss%2Fword%2B123%3D\n" +
+		"Git commit: f81" + "a1b2c3d4" + "99887766554433221100aabbccddeeff\n" +
+		"Standalone hex token: a1b2c3d4\n"
+
+	_, err := w.Write([]byte(input))
+	if err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+	if err := w.Flush(); err != nil {
+		t.Fatalf("Flush failed: %v", err)
+	}
+
+	result := out.String()
+	// Base64 and URL-encoded forms should be redacted
+	if strings.Contains(result, "cEBzcy93b3JkKzEyMz0=") {
+		t.Errorf("Base64 token was not redacted in output: %s", result)
+	}
+	if strings.Contains(result, "p%40ss%2Fword%2B123%3D") {
+		t.Errorf("URL-encoded token was not redacted in output: %s", result)
+	}
+	// Git commit hash should remain intact
+	expectedGitHash := "f81" + "a1b2c3d4" + "99887766554433221100aabbccddeeff"
+	if !strings.Contains(result, expectedGitHash) {
+		t.Errorf("Git commit SHA was improperly corrupted: %s", result)
+	}
+	// Standalone hex token should be redacted
+	if strings.Contains(result, "Standalone hex token: a1b2c3d4") {
+		t.Errorf("Standalone hex token was not redacted: %s", result)
+	}
+	if !strings.Contains(result, "Standalone hex token: [REDACTED_BY_SEC]") {
+		t.Errorf("Expected [REDACTED_BY_SEC] placeholder for standalone hex token: %s", result)
+	}
+}
+

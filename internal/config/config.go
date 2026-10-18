@@ -4,12 +4,21 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 	"unicode"
 )
 
 // IsConfigDirInitialized returns true if ~/.config/sec-agent/ or legacy ~/.config/sec/ exists.
 func IsConfigDirInitialized() bool {
+	if custom := os.Getenv("SEC_CONFIG_DIR"); custom != "" {
+		cleaned := filepath.Clean(custom)
+		// #nosec G703 G304
+		if _, err := os.Stat(cleaned); err == nil {
+			return true
+		}
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return false
@@ -233,4 +242,45 @@ func SetLastKnownVersion(version string) error {
 	// #nosec G304
 	return os.WriteFile(filepath.Clean(path), []byte(strings.TrimSpace(version)+"\n"), 0600)
 }
+
+// DefaultPromptTimeout is the standard timeout duration for biometric prompts (120 seconds).
+const DefaultPromptTimeout = 120 * time.Second
+
+// ParsePromptTimeout parses a duration string (e.g. "30s", "2m", "120") and validates it is positive.
+// If the string contains only digits, it is treated as seconds.
+func ParsePromptTimeout(raw string) (time.Duration, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return 0, fmt.Errorf("timeout string cannot be empty")
+	}
+	if secs, err := strconv.Atoi(s); err == nil {
+		if secs <= 0 {
+			return 0, fmt.Errorf("prompt timeout must be positive, got %d", secs)
+		}
+		return time.Duration(secs) * time.Second, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("invalid duration format %q: %w", raw, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("prompt timeout must be positive, got %v", d)
+	}
+	return d, nil
+}
+
+// ResolvePromptTimeout resolves prompt timeout across CLI flag, .secrc, SEC_PROMPT_TIMEOUT env, and fallback default.
+func ResolvePromptTimeout(flagVal, secrcVal string) (time.Duration, error) {
+	if strings.TrimSpace(flagVal) != "" {
+		return ParsePromptTimeout(flagVal)
+	}
+	if strings.TrimSpace(secrcVal) != "" {
+		return ParsePromptTimeout(secrcVal)
+	}
+	if envVal := strings.TrimSpace(os.Getenv("SEC_PROMPT_TIMEOUT")); envVal != "" {
+		return ParsePromptTimeout(envVal)
+	}
+	return DefaultPromptTimeout, nil
+}
+
 

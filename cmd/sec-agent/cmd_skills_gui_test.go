@@ -1171,3 +1171,79 @@ func TestSkillStatusScopesAndWorkspaceDiscovery(t *testing.T) {
 		t.Errorf("expected discovered copilot skill to be reported as Up to date, got:\n%s", out)
 	}
 }
+
+func TestInstallRulesGlobalAndWorkspace(t *testing.T) {
+	tmpHome := t.TempDir()
+	tmpWd := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	origWd, _ := os.Getwd()
+	if err := os.Chdir(tmpWd); err != nil {
+		t.Fatalf("failed to chdir to tmpWd: %v", err)
+	}
+	defer func() { _ = os.Chdir(origWd) }()
+
+	// 1. Test workspace rules installation
+	handleInstallRules([]string{"--workspace"})
+
+	agentsRulePath := filepath.Join(tmpWd, ".agents", "rules", "sec-agent.md")
+	cursorWsRulePath := filepath.Join(tmpWd, ".cursor", "rules", "sec-agent.mdc")
+	copilotPath := filepath.Join(tmpWd, ".github", "copilot-instructions.md")
+
+	for _, p := range []string{agentsRulePath, cursorWsRulePath, copilotPath} {
+		fi, err := os.Stat(p)
+		if err != nil {
+			t.Fatalf("expected workspace rule file %s to exist: %v", p, err)
+		}
+		if fi.Mode().Perm() != 0600 {
+			t.Errorf("expected 0600 permissions on %s, got: %o", p, fi.Mode().Perm())
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatalf("failed to read %s: %v", p, err)
+		}
+		if !strings.Contains(string(data), "sec-agent Autonomous Operation Rules") {
+			t.Errorf("expected rule header in %s, got: %s", p, string(data))
+		}
+		if !strings.Contains(string(data), "DO NOT ask the human user to open a terminal") {
+			t.Errorf("expected directive in %s, got: %s", p, string(data))
+		}
+	}
+
+	// Verify Cursor rule frontmatter
+	cursorData, _ := os.ReadFile(cursorWsRulePath)
+	if !strings.Contains(string(cursorData), "alwaysApply: true") {
+		t.Errorf("expected Cursor rule to include alwaysApply: true, got:\n%s", string(cursorData))
+	}
+
+	// 2. Test idempotency of Copilot append
+	copilotDataBefore, _ := os.ReadFile(copilotPath)
+	handleInstallRules([]string{"--workspace"})
+	copilotDataAfter, _ := os.ReadFile(copilotPath)
+	if string(copilotDataBefore) != string(copilotDataAfter) {
+		t.Errorf("expected copilot instructions to be unchanged on duplicate run, but it changed")
+	}
+
+	// 3. Test global rules installation
+	handleInstallRules([]string{"--global"})
+
+	geminiRulePath := filepath.Join(tmpHome, ".gemini", "config", "rules", "sec-agent.md")
+	cursorGlobalRulePath := filepath.Join(tmpHome, ".cursor", "rules", "sec-agent.mdc")
+
+	for _, p := range []string{geminiRulePath, cursorGlobalRulePath} {
+		fi, err := os.Stat(p)
+		if err != nil {
+			t.Fatalf("expected global rule file %s to exist: %v", p, err)
+		}
+		if fi.Mode().Perm() != 0600 {
+			t.Errorf("expected 0600 permissions on %s, got: %o", p, fi.Mode().Perm())
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatalf("failed to read %s: %v", p, err)
+		}
+		if !strings.Contains(string(data), "sec-agent Autonomous Operation Rules") {
+			t.Errorf("expected rule header in %s, got: %s", p, string(data))
+		}
+	}
+}

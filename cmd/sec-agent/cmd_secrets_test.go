@@ -1148,6 +1148,257 @@ func TestDescribeAndEditNotesCommand(t *testing.T) {
 	}
 }
 
+func TestStdinAccidentalCommandAndPromptDetection(t *testing.T) {
+	profile := "stdin-guardrail-test"
+	sockPath, _ := config.GetSocketPath(profile)
+	dbPath, _ := store.GetStorePath(profile)
+	os.Remove(sockPath)
+	os.Remove(dbPath)
+	defer os.Remove(sockPath)
+	defer os.Remove(dbPath)
+
+	tmpDir := t.TempDir()
+	binPath := filepath.Join(tmpDir, "sec_stdin_guard_bin")
+	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build test binary: %v\nOutput: %s", err, out)
+	}
+
+	d, err := daemon.NewDaemon(profile, 30*time.Second, Version)
+	if err != nil {
+		t.Fatalf("failed to create test daemon: %v", err)
+	}
+	token := "stdin-guard-token"
+	d.SetSessionTokenForTest(token)
+	d.SetMasterKeyForTest([]byte("01234567890123456789012345678901"))
+	go d.Start()
+	defer d.Stop()
+
+	sock, _ := config.GetSocketPath(profile)
+	for i := 0; i < 50; i++ {
+		if _, err := os.Stat(sock); err == nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	testCases := []struct {
+		name          string
+		key           string
+		stdin         string
+		extraArgs     []string
+		expectedExit  int
+		expectedError string
+	}{
+		{
+			name:          "accidental sec set command in stdin",
+			key:           "test/cmd-input",
+			stdin:         "sec set other/key mysecretvalue\n",
+			extraArgs:     nil,
+			expectedExit:  2,
+			expectedError: "stdin value appears to contain a shell command or terminal prompt",
+		},
+		{
+			name:          "accidental export command in stdin",
+			key:           "test/export-input",
+			stdin:         "export API_TOKEN=sk_live_123456\n",
+			extraArgs:     nil,
+			expectedExit:  2,
+			expectedError: "starts with command \"export",
+		},
+		{
+			name:          "accidental terminal prompt in stdin",
+			key:           "test/prompt-input",
+			stdin:         "arjan@MacBook:~$ sec set other/key mysecretvalue\n",
+			extraArgs:     nil,
+			expectedExit:  2,
+			expectedError: "starts with terminal prompt prefix",
+		},
+		{
+			name:          "accidental dollar sigil prompt in stdin",
+			key:           "test/dollar-input",
+			stdin:         "$ echo secret-token\n",
+			extraArgs:     nil,
+			expectedExit:  2,
+			expectedError: "starts with terminal prompt prefix",
+		},
+		{
+			name:          "override with --allow-command-string succeeds",
+			key:           "test/allowed-cmd",
+			stdin:         "sec set other/key mysecretvalue\n",
+			extraArgs:     []string{"--allow-command-string"},
+			expectedExit:  0,
+			expectedError: "",
+		},
+		{
+			name:          "override with --force succeeds",
+			key:           "test/allowed-force",
+			stdin:         "export DB_PASSWORD=pass\n",
+			extraArgs:     []string{"--force"},
+			expectedExit:  0,
+			expectedError: "",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			args := []string{"set", tc.key, "--stdin", "--profile", profile}
+			args = append(args, tc.extraArgs...)
+			cmd := exec.Command(binPath, args...)
+			cmd.Stdin = strings.NewReader(tc.stdin)
+			cmd.Env = append(os.Environ(), "SEC_SESSION_TOKEN="+token, "SEC_TEST_MODE=1")
+			out, err := cmd.CombinedOutput()
+
+			actualExit := 0
+			if err != nil {
+				if exitErr, ok := err.(*exec.ExitError); ok {
+					actualExit = exitErr.ExitCode()
+				} else {
+					t.Fatalf("unexpected execution error: %v", err)
+				}
+			}
+
+			if actualExit != tc.expectedExit {
+				t.Errorf("expected exit code %d, got %d. Output:\n%s", tc.expectedExit, actualExit, out)
+			}
+			if tc.expectedError != "" && !strings.Contains(string(out), tc.expectedError) {
+				t.Errorf("expected output to contain %q, got:\n%s", tc.expectedError, out)
+			}
+		})
+	}
+}
+
+func TestSecretLifecycleHygieneScanner(t *testing.T) {
+	profile := "hygiene-scanner-test"
+	sockPath, _ := config.GetSocketPath(profile)
+	dbPath, _ := store.GetStorePath(profile)
+	os.Remove(sockPath)
+	os.Remove(dbPath)
+	defer os.Remove(sockPath)
+	defer os.Remove(dbPath)
+
+	tmpDir := t.TempDir()
+	binPath := filepath.Join(tmpDir, "sec_hygiene_bin")
+	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build test binary: %v\nOutput: %s", err, out)
+	}
+
+	d, err := daemon.NewDaemon(profile, 30*time.Second, Version)
+	if err != nil {
+		t.Fatalf("failed to create test daemon: %v", err)
+	}
+	token := "hygiene-test-token"
+	d.SetSessionTokenForTest(token)
+	d.SetMasterKeyForTest([]byte("01234567890123456789012345678901"))
+	go d.Start()
+	defer d.Stop()
+
+	sock, _ := config.GetSocketPath(profile)
+	for i := 0; i < 50; i++ {
+		if _, err := os.Stat(sock); err == nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	baseEnv := append(os.Environ(), "SEC_SESSION_TOKEN="+token, "SEC_TEST_MODE=1")
+
+	// 1. Ingest bare secret (no expiry, no desc, no notes)
+	cmd1 := exec.Command(binPath, "set", "app/bare", "secret1", "--quick", "--profile", profile)
+	cmd1.Env = baseEnv
+	if out, err := cmd1.CombinedOutput(); err != nil {
+		t.Fatalf("failed to ingest bare secret: %v, output: %s", err, out)
+	}
+
+	// 2. Ingest partially complete secret (has desc, notes, but no expiry)
+	cmd2 := exec.Command(binPath, "set", "app/no_expiry", "secret2", "--desc", "Test description", "--notes", "Test notes", "--quick", "--profile", profile)
+	cmd2.Env = baseEnv
+	if out, err := cmd2.CombinedOutput(); err != nil {
+		t.Fatalf("failed to ingest partial secret: %v, output: %s", err, out)
+	}
+
+	// 3. Ingest fully complete secret (has desc, notes, and expires)
+	cmd3 := exec.Command(binPath, "set", "app/complete", "secret3", "--desc", "Full secret", "--notes", "Renewal runbook", "--expires", "90d", "--quick", "--profile", profile)
+	cmd3.Env = baseEnv
+	if out, err := cmd3.CombinedOutput(); err != nil {
+		t.Fatalf("failed to ingest complete secret: %v, output: %s", err, out)
+	}
+
+	// 4. Test terminal columnar report with --incomplete
+	lsCmd := exec.Command(binPath, "ls", "--incomplete", "--profile", profile)
+	lsCmd.Env = baseEnv
+	lsOut, err := lsCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sec ls --incomplete failed: %v, output: %s", err, lsOut)
+	}
+	lsStr := string(lsOut)
+
+	if !strings.Contains(lsStr, "Secret Lifecycle Hygiene Report") {
+		t.Errorf("expected header 'Secret Lifecycle Hygiene Report', got:\n%s", lsStr)
+	}
+	if !strings.Contains(lsStr, "app/bare") || !strings.Contains(lsStr, "🔴 Bare") {
+		t.Errorf("expected app/bare to be listed as 🔴 Bare, got:\n%s", lsStr)
+	}
+	if !strings.Contains(lsStr, "app/no_expiry") || !strings.Contains(lsStr, "🟡 Incomplete") {
+		t.Errorf("expected app/no_expiry to be listed as 🟡 Incomplete, got:\n%s", lsStr)
+	}
+	if strings.Contains(lsStr, "app/complete") {
+		t.Errorf("expected app/complete NOT to be in incomplete list, got:\n%s", lsStr)
+	}
+
+	// 5. Test JSON format with --incomplete --json
+	jsonCmd := exec.Command(binPath, "ls", "--incomplete", "--json", "--profile", profile)
+	jsonCmd.Env = baseEnv
+	jsonOut, err := jsonCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sec ls --incomplete --json failed: %v, output: %s", err, jsonOut)
+	}
+
+	var jsonItems []struct {
+		Key           string   `json:"key"`
+		MissingFields []string `json:"missing_fields"`
+		Status        string   `json:"status"`
+	}
+	if err := json.Unmarshal(jsonOut, &jsonItems); err != nil {
+		t.Fatalf("failed to parse JSON hygiene output: %v\nOutput: %s", err, jsonOut)
+	}
+	if len(jsonItems) != 2 {
+		t.Fatalf("expected 2 incomplete items in JSON, got %d", len(jsonItems))
+	}
+	if jsonItems[0].Key != "app/bare" || jsonItems[0].Status != "bare" || len(jsonItems[0].MissingFields) != 3 {
+		t.Errorf("unexpected jsonItem[0]: %+v", jsonItems[0])
+	}
+	if jsonItems[1].Key != "app/no_expiry" || jsonItems[1].Status != "incomplete" {
+		t.Errorf("unexpected jsonItem[1]: %+v", jsonItems[1])
+	}
+
+	// 6. Enrich remaining secrets using relabel
+	relabel1 := exec.Command(binPath, "relabel", "app/bare", "--desc", "Now has desc", "--notes", "Now has notes", "--expires", "30d", "--profile", profile)
+	relabel1.Env = baseEnv
+	if out, err := relabel1.CombinedOutput(); err != nil {
+		t.Fatalf("failed to relabel app/bare: %v, output: %s", err, out)
+	}
+
+	relabel2 := exec.Command(binPath, "relabel", "app/no_expiry", "--expires", "30d", "--profile", profile)
+	relabel2.Env = baseEnv
+	if out, err := relabel2.CombinedOutput(); err != nil {
+		t.Fatalf("failed to relabel app/no_expiry: %v, output: %s", err, out)
+	}
+
+	// 7. Verify all clean with alias --hygiene
+	cleanCmd := exec.Command(binPath, "ls", "--hygiene", "--profile", profile)
+	cleanCmd.Env = baseEnv
+	cleanOut, err := cleanCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sec ls --hygiene failed: %v, output: %s", err, cleanOut)
+	}
+	if !strings.Contains(string(cleanOut), "complete lifecycle metadata") {
+		t.Errorf("expected clean completion message, got:\n%s", cleanOut)
+	}
+}
+
+
 
 
 

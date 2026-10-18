@@ -341,3 +341,39 @@ sec-agent run -- ./custom-tool
 		t.Errorf("expected 0 findings for safe script, got %d: %v", len(safeFindings), safeFindings)
 	}
 }
+
+func TestGithookVaultDetectionWithHexCollisionProtection(t *testing.T) {
+	vaultSecrets := map[string]string{
+		"token/hex": "c0ffee",
+		"token/raw": "mySecretPassword123",
+	}
+
+	// 1. Commit hash containing hex secret as substring should NOT trigger violation
+	stagedCommitDiff := "+const commit = \"7f8c0ffee9045612347890abcdef1234567890ab\";"
+	for _, val := range vaultSecrets {
+		if containsSecretValue(stagedCommitDiff, val) {
+			t.Errorf("expected commit SHA not to trigger secret detection for %q", val)
+		}
+	}
+
+	// 2. Lockfile SHA256 containing hex secret should NOT trigger violation
+	stagedLockfileDiff := "+ \"resolved\": \"https://registry.npmjs.org/pkg/-/pkg-1.0.0.tgz#sha256:123c0ffee4567890abcdef1234567890abcdef1234567890abcdef1234567890\""
+	for _, val := range vaultSecrets {
+		if containsSecretValue(stagedLockfileDiff, val) {
+			t.Errorf("expected lockfile SHA256 not to trigger secret detection for %q", val)
+		}
+	}
+
+	// 3. Standalone hex secret in staged diff MUST trigger violation
+	stagedStandaloneDiff := "+const API_KEY = \"c0ffee\";"
+	if !containsSecretValue(stagedStandaloneDiff, vaultSecrets["token/hex"]) {
+		t.Errorf("expected standalone hex secret to trigger violation, but it was skipped")
+	}
+
+	// 4. Raw non-hex secret MUST trigger violation
+	stagedRawDiff := "+const DB_PASS = \"mySecretPassword123\";"
+	if !containsSecretValue(stagedRawDiff, vaultSecrets["token/raw"]) {
+		t.Errorf("expected raw secret to trigger violation")
+	}
+}
+

@@ -378,6 +378,21 @@ func readMnemonicFromTTY() string {
 	return mnemonic
 }
 
+// handleEnrollRecovery enrolls or re-wraps Slot 1 (BIP39 recovery key) for one or all profiles.
+func handleEnrollRecovery(profile string, args []string) {
+	for _, a := range args {
+		if a == "--help" || a == "-h" || a == "help" {
+			if spec, ok := findCommandSpec("enroll-recovery"); ok {
+				printCommandHelp(spec)
+			} else {
+				fmt.Println("Usage: sec enroll-recovery [--profile <name>] [--seed <mnemonic>] [--force] [--all-profiles]")
+			}
+			return
+		}
+	}
+	handleMigrateV2(profile, args)
+}
+
 func handleMigrateV2(profile string, args []string) {
 	dryRun := false
 	forceReroll := false
@@ -479,9 +494,9 @@ func handleMigrateV2(profile string, args []string) {
 	mnemonic := seedInput
 	if mnemonic == "" {
 		if os.Getenv("SEC_TEST_MODE") != "1" {
-			if !biometrics.Authenticate(biometrics.FormatReason(Version, "migrate_v2", "")) {
-				fmt.Fprintln(os.Stderr, "❌ Touch ID biometric authorization required for vault migration.")
-				os.Exit(1)
+			res := biometrics.AuthenticateWithTimeout(biometrics.FormatReason(Version, "migrate_v2", ""), config.DefaultPromptTimeout)
+			if res != biometrics.AuthSuccess {
+				handleBiometricFailure(res, config.DefaultPromptTimeout)
 			}
 		}
 		m, err := crypto.GenerateMnemonic()

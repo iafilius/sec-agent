@@ -116,6 +116,16 @@ func (d *Daemon) isExpired() bool {
 	return true
 }
 
+// maybeRefreshSlidingTTLLocked slides the session hard TTL forward if an authenticated
+// request arrives while the session has exceeded hard TTL but remains within the inactivity grace window.
+func (d *Daemon) maybeRefreshSlidingTTLLocked() {
+	if d.masterKey != nil && !d.sessionStart.IsZero() {
+		if time.Since(d.sessionStart) > d.sessionTTL && !d.lastUsed.IsZero() && time.Since(d.lastUsed) <= d.graceTTL {
+			d.sessionStart = time.Now()
+		}
+	}
+}
+
 func (d *Daemon) checkMemoryGuardrail() bool {
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)

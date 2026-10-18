@@ -1188,6 +1188,248 @@ func TestHasProjectRootMarkersExtended(t *testing.T) {
 	}
 }
 
+func TestWhichStatelessResolution(t *testing.T) {
+	tmpDir := t.TempDir()
+	binPath := filepath.Join(tmpDir, "sec_which_test_bin")
+	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build test binary: %v, output: %s", err, string(out))
+	}
+	defer os.Remove(binPath)
+
+	wsDir := filepath.Join(tmpDir, "my-project")
+	subDir := filepath.Join(wsDir, "src", "backend")
+	if err := os.MkdirAll(subDir, 0755); err != nil {
+		t.Fatalf("failed to create test dirs: %v", err)
+	}
+
+	secrcContent := `{
+  "version": 2,
+  "default": "staging",
+  "environments": {
+    "staging": {
+      "profile": "project-staging",
+      "tier": "staging",
+      "description": "Project staging environment"
+    }
+  }
+}`
+	if err := os.WriteFile(filepath.Join(wsDir, ".secrc"), []byte(secrcContent), 0644); err != nil {
+		t.Fatalf("failed to write .secrc: %v", err)
+	}
+
+	// 1. Run sec which <subDir> (text mode)
+	cmdText := exec.Command(binPath, "which", subDir)
+	cmdText.Env = append(os.Environ(), "SEC_CONFIG_DIR="+tmpDir)
+	outText, errText := cmdText.CombinedOutput()
+	if errText != nil {
+		t.Fatalf("sec which failed: %v, output:\n%s", errText, string(outText))
+	}
+	strText := string(outText)
+	if !strings.Contains(strText, "Resolved Profile: project-staging") {
+		t.Errorf("expected text output to contain 'Resolved Profile: project-staging', got:\n%s", strText)
+	}
+	if !strings.Contains(strText, "Environment:     staging (Tier: STAGING)") {
+		t.Errorf("expected text output to contain 'Environment:     staging (Tier: STAGING)', got:\n%s", strText)
+	}
+
+	// 2. Run sec which <subDir> --json
+	cmdJSON := exec.Command(binPath, "which", subDir, "--json")
+	cmdJSON.Env = append(os.Environ(), "SEC_CONFIG_DIR="+tmpDir)
+	outJSON, errJSON := cmdJSON.CombinedOutput()
+	if errJSON != nil {
+		t.Fatalf("sec which --json failed: %v, output:\n%s", errJSON, string(outJSON))
+	}
+	var res map[string]interface{}
+	if err := json.Unmarshal(outJSON, &res); err != nil {
+		t.Fatalf("failed to parse JSON from sec which --json: %v, output:\n%s", err, string(outJSON))
+	}
+	if res["profile"] != "project-staging" {
+		t.Errorf("expected json profile 'project-staging', got: %v", res["profile"])
+	}
+	if res["environment"] != "staging" {
+		t.Errorf("expected json environment 'staging', got: %v", res["environment"])
+	}
+	if res["tier"] != "staging" {
+		t.Errorf("expected json tier 'staging', got: %v", res["tier"])
+	}
+
+	// 3. Run sec profile which alias
+	cmdAlias := exec.Command(binPath, "profile", "which", subDir, "--json")
+	cmdAlias.Env = append(os.Environ(), "SEC_CONFIG_DIR="+tmpDir)
+	outAlias, errAlias := cmdAlias.CombinedOutput()
+	if errAlias != nil {
+		t.Fatalf("sec profile which failed: %v, output:\n%s", errAlias, string(outAlias))
+	}
+	var resAlias map[string]interface{}
+	if err := json.Unmarshal(outAlias, &resAlias); err != nil {
+		t.Fatalf("failed to parse JSON from sec profile which: %v", err)
+	}
+	if resAlias["profile"] != "project-staging" {
+		t.Errorf("expected alias json profile 'project-staging', got: %v", resAlias["profile"])
+	}
+}
+
+func TestProfileLsLongAndJSON(t *testing.T) {
+	tmpDir := t.TempDir()
+	binPath := filepath.Join(tmpDir, "sec_ls_test_bin")
+	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build test binary: %v, output: %s", err, string(out))
+	}
+	defer os.Remove(binPath)
+
+	// Create test vault with summary
+	vaultFile := filepath.Join(tmpDir, "secrets_demo.enc")
+	dummyEnvelope := `{
+  "schema_version": "2.0",
+  "slot1": {
+    "argon2_salt": "dGVzdHNhbHQxMjM0NTY3OA==",
+    "wrapped_key": "dGVzdHdyYXBwZWRrZXkxMjM0NTY3ODkwMTI="
+  },
+  "summary": "Demo microservice production credentials",
+  "payload": "dGVzdHBheWxvYWQ="
+}`
+	if err := os.WriteFile(vaultFile, []byte(dummyEnvelope), 0600); err != nil {
+		t.Fatalf("failed to write dummy vault: %v", err)
+	}
+
+	// 1. Run sec profile ls --long
+	cmdLong := exec.Command(binPath, "profile", "ls", "--long")
+	cmdLong.Env = append(os.Environ(), "SEC_CONFIG_DIR="+tmpDir)
+	outLong, errLong := cmdLong.CombinedOutput()
+	if errLong != nil {
+		t.Fatalf("profile ls --long failed: %v, output:\n%s", errLong, string(outLong))
+	}
+	strLong := string(outLong)
+	if !strings.Contains(strLong, "demo") || !strings.Contains(strLong, "Dual-Slot") || !strings.Contains(strLong, "Demo microservice") {
+		t.Errorf("expected long profile listing to contain profile, Dual-Slot, and summary, got:\n%s", strLong)
+	}
+
+	// 2. Run sec profile ls --json
+	cmdJSON := exec.Command(binPath, "profile", "ls", "--json")
+	cmdJSON.Env = append(os.Environ(), "SEC_CONFIG_DIR="+tmpDir)
+	outJSON, errJSON := cmdJSON.CombinedOutput()
+	if errJSON != nil {
+		t.Fatalf("profile ls --json failed: %v, output:\n%s", errJSON, string(outJSON))
+	}
+	var listResp []map[string]interface{}
+	if err := json.Unmarshal(outJSON, &listResp); err != nil {
+		t.Fatalf("failed to parse JSON from profile ls --json: %v, output:\n%s", err, string(outJSON))
+	}
+	if len(listResp) == 0 {
+		t.Fatalf("expected at least 1 profile in JSON output")
+	}
+	found := false
+	for _, p := range listResp {
+		if p["profile"] == "demo" {
+			found = true
+			if p["summary"] != "Demo microservice production credentials" {
+				t.Errorf("expected summary in json, got: %v", p["summary"])
+			}
+			if p["has_slot1"] != true {
+				t.Errorf("expected has_slot1 true in json, got: %v", p["has_slot1"])
+			}
+		}
+	}
+	if !found {
+		t.Errorf("profile 'demo' not found in json output")
+	}
+}
+
+func TestProfileCommentAndDescriptionAliases(t *testing.T) {
+	tmpDir := t.TempDir()
+	binPath := filepath.Join(tmpDir, "sec_comment_test_bin")
+	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build test binary: %v, output: %s", err, string(out))
+	}
+	defer os.Remove(binPath)
+
+	vaultFile := filepath.Join(tmpDir, "secrets_alias_test.enc")
+	dummyEnvelope := `{
+  "schema_version": "2.0",
+  "slot1": {
+    "argon2_salt": "dGVzdHNhbHQxMjM0NTY3OA==",
+    "wrapped_key": "dGVzdHdyYXBwZWRrZXkxMjM0NTY3ODkwMTI="
+  },
+  "summary": "Initial summary",
+  "payload": "dGVzdHBheWxvYWQ="
+}`
+	if err := os.WriteFile(vaultFile, []byte(dummyEnvelope), 0600); err != nil {
+		t.Fatalf("failed to write dummy vault: %v", err)
+	}
+
+	// 1. Update summary using --comment
+	cmdComment := exec.Command(binPath, "profile", "describe", "alias_test", "--comment", "Updated via comment alias")
+	cmdComment.Env = append(os.Environ(), "SEC_CONFIG_DIR="+tmpDir)
+	outComment, errComment := cmdComment.CombinedOutput()
+	if errComment != nil {
+		t.Fatalf("profile describe --comment failed: %v, output:\n%s", errComment, string(outComment))
+	}
+	if !strings.Contains(string(outComment), "Updated via comment alias") {
+		t.Errorf("expected updated comment in output, got:\n%s", string(outComment))
+	}
+
+	// 2. Update summary using --description
+	cmdDesc := exec.Command(binPath, "profile", "describe", "alias_test", "--description", "Updated via description alias")
+	cmdDesc.Env = append(os.Environ(), "SEC_CONFIG_DIR="+tmpDir)
+	outDesc, errDesc := cmdDesc.CombinedOutput()
+	if errDesc != nil {
+		t.Fatalf("profile describe --description failed: %v, output:\n%s", errDesc, string(outDesc))
+	}
+	if !strings.Contains(string(outDesc), "Updated via description alias") {
+		t.Errorf("expected updated description in output, got:\n%s", string(outDesc))
+	}
+}
+
+func TestDoctorSlot1StaticAuditAndProbeKeychain(t *testing.T) {
+	tmpDir := t.TempDir()
+	binPath := filepath.Join(tmpDir, "sec_doc_probe_bin")
+	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build test binary: %v, output: %s", err, string(out))
+	}
+	defer os.Remove(binPath)
+
+	// Create a recovery-less vault (no slot1)
+	vaultFile := filepath.Join(tmpDir, "secrets_unprotected.enc")
+	dummyEnvelope := `{
+  "schema_version": "2.0",
+  "summary": "Unprotected vault",
+  "payload": "dGVzdHBheWxvYWQ="
+}`
+	if err := os.WriteFile(vaultFile, []byte(dummyEnvelope), 0600); err != nil {
+		t.Fatalf("failed to write dummy vault: %v", err)
+	}
+
+	// 1. Run doctor in headless mode (default non-interactive)
+	cmdDoc := exec.Command(binPath, "doctor")
+	cmdDoc.Env = append(os.Environ(), "SEC_CONFIG_DIR="+tmpDir)
+	outDoc, _ := cmdDoc.CombinedOutput()
+	strDoc := string(outDoc)
+
+	if !strings.Contains(strDoc, "NO Slot 1 Recovery Key Enrolled (CRITICAL RISK)") {
+		t.Errorf("expected doctor to warn about missing Slot 1 recovery key, got:\n%s", strDoc)
+	}
+	if !strings.Contains(strDoc, "Run 'sec enroll-recovery --profile unprotected'") {
+		t.Errorf("expected doctor to recommend sec enroll-recovery, got:\n%s", strDoc)
+	}
+
+	// 2. Run doctor with --probe-keychain
+	cmdProbe := exec.Command(binPath, "doctor", "--probe-keychain")
+	cmdProbe.Env = append(os.Environ(), "SEC_CONFIG_DIR="+tmpDir)
+	outProbe, _ := cmdProbe.CombinedOutput()
+	strProbe := string(outProbe)
+
+	// In non-interactive mode without --probe-keychain, it says "non-interactive: skipping live Touch ID Keychain probe"
+	// With --probe-keychain, that skip message should NOT appear
+	if strings.Contains(strProbe, "non-interactive: skipping live Touch ID Keychain probe") {
+		t.Errorf("expected --probe-keychain to prevent skipping live probe, got:\n%s", strProbe)
+	}
+}
+
+
 
 
 

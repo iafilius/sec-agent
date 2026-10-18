@@ -35,8 +35,8 @@ func initRegistry() {
 			Name:        "open",
 			Category:    "Session & Setup",
 			Description: "Initialize/unlock the secrets session using Touch ID",
-			Usage:       "sec open [--ttl <duration>] [--grace <duration>]",
-			Flags:       []string{"--ttl", "--grace"},
+			Usage:       "sec open [--ttl <duration>] [--grace <duration>] [--timeout <duration>]",
+			Flags:       []string{"--ttl", "--grace", "--timeout"},
 			Handler:     handleOpen,
 		},
 		{
@@ -77,12 +77,12 @@ func initRegistry() {
 			Name:        "get",
 			Category:    "Core Secrets",
 			Description: "Retrieve a secret or group of secrets",
-			Usage:       "sec get <path> [--prefix] [--record] [--copy] [--raw] [--show-expired] [--json | --comment | --meta <key>]",
+			Usage:       "sec get <path> [--prefix] [--record] [--copy] [--raw] [--show-expired] [--auto-extend] [--json | --comment | --meta <key>]",
 			ExpectsKeys: true,
-			Flags:       []string{"--copy", "-C", "--raw", "-r", "--show", "--prefix", "--record", "--show-expired", "--json", "--comment", "-c", "--meta", "-m"},
+			Flags:       []string{"--copy", "-C", "--raw", "-r", "--show", "--prefix", "--record", "--show-expired", "--auto-extend", "--json", "--comment", "-c", "--meta", "-m"},
 			Handler: func(profile string, args []string) {
 				if len(args) < 1 {
-					fmt.Fprintln(os.Stderr, "Usage: sec get <path> [--prefix] [--record] [--copy] [--raw] [--show-expired] [--json | --comment | --meta <key>]")
+					fmt.Fprintln(os.Stderr, "Usage: sec get <path> [--prefix] [--record] [--copy] [--raw] [--show-expired] [--auto-extend] [--json | --comment | --meta <key>]")
 					os.Exit(1)
 				}
 				handleGet(profile, args[0], args[1:])
@@ -129,11 +129,11 @@ func initRegistry() {
 			Name:        "set",
 			Category:    "Core Secrets",
 			Description: "Store a secret with optional description, notes, comment, and env alias",
-			Usage:       "sec set <path> [<value>] [--stdin] [--no-trim] [--desc <desc>] [--notes <notes>] [--comment <comment>] [--env-alias <alias>] [--expires <ttl>] [--rotate-cmd <cmd>] [--rotate-ttl <ttl>] [--meta key=value ...]",
-			Flags:       []string{"--desc", "--description", "--notes", "--comment", "-c", "--meta", "-m", "--stdin", "--no-trim", "--env-alias", "-a", "--expires", "-e", "--rotate-cmd", "--rotate-ttl"},
+			Usage:       "sec set <path> [<value>] [--stdin] [--no-trim] [--allow-command-string] [--quick] [--desc <desc>] [--notes <notes>] [--comment <comment>] [--env-alias <alias>] [--expires <ttl>] [--rotate-cmd <cmd>] [--rotate-ttl <ttl>] [--meta key=value ...]",
+			Flags:       []string{"--desc", "--description", "--notes", "--comment", "-c", "--meta", "-m", "--stdin", "--no-trim", "--allow-command-string", "--force", "--quick", "-q", "--env-alias", "-a", "--expires", "-e", "--rotate-cmd", "--rotate-ttl"},
 			Handler: func(profile string, args []string) {
 				if len(args) < 1 {
-					fmt.Fprintln(os.Stderr, "Usage: sec set <path> [<value>] [--stdin] [--no-trim] [--desc <desc>] [--notes <notes>] [--comment <comment>] [--env-alias <alias>] [--expires <ttl>] [--rotate-cmd <cmd>] [--rotate-ttl <ttl>] [--meta key=value ...]")
+					fmt.Fprintln(os.Stderr, "Usage: sec set <path> [<value>] [--stdin] [--no-trim] [--allow-command-string] [--quick] [--desc <desc>] [--notes <notes>] [--comment <comment>] [--env-alias <alias>] [--expires <ttl>] [--rotate-cmd <cmd>] [--rotate-ttl <ttl>] [--meta key=value ...]")
 					os.Exit(1)
 				}
 				path := args[0]
@@ -229,9 +229,9 @@ func initRegistry() {
 			Name:        "ls",
 			Aliases:     []string{"list"},
 			Category:    "Core Secrets",
-			Description: "List secret paths, trash bin, or expiring keys",
-			Usage:       "sec ls [<prefix>] [--long] [--stale [N]] [--expiring [N]] [--trash] [--json]",
-			Flags:       []string{"--long", "-l", "--stale", "--expiring", "--trash", "--json"},
+			Description: "List secret paths, hygiene audit, trash bin, or expiring keys",
+			Usage:       "sec ls [<prefix>] [--long] [--stale [N]] [--expiring [N]] [--incomplete] [--hygiene] [--trash] [--json]",
+			Flags:       []string{"--long", "-l", "--stale", "--expiring", "--incomplete", "--hygiene", "--audit-hygiene", "--trash", "--json"},
 			Handler:     handleList,
 		},
 		{
@@ -290,24 +290,35 @@ func initRegistry() {
 			Name:        "profile",
 			Category:    "Profiles & Scope",
 			Description: "Inspect or configure secret profiles & environment tier",
-			Usage:       "sec profile [new <name> [--summary <text>] [--seed <mnemonic>] [--reuse-seed | --existing-seed] [--secrc | --no-secrc]] [ls] [describe <name> [--summary <text>] [--clear-summary] [--json]] [set-env dev|dta|staging|prod]",
-			Flags:       []string{"--summary", "--seed", "--reuse-seed", "--existing-seed", "--secrc", "--no-secrc", "--clear-summary", "--json"},
+			Usage:       "sec profile [new <name> [--summary <text>] [--comment <c>] [--description <d>] [--seed <mnemonic>] [--reuse-seed | --existing-seed] [--secrc | --no-secrc]] [ls [--long] [-l] [--json]] [describe <name> [--summary <text>] [--comment <c>] [--description <d>] [--clear-summary] [--json]] [enroll-recovery [--seed <mnemonic>] [--force] [--dry-run]] [which [<path>]] [set-env dev|dta|staging|prod]",
+			Flags:       []string{"--summary", "--comment", "--description", "--seed", "--reuse-seed", "--existing-seed", "--secrc", "--no-secrc", "--clear-summary", "--long", "-l", "--json", "--force", "--dry-run"},
 			Subcommands: []SubcommandSpec{
 				{
 					Name:        "new",
 					Description: "Create a new named profile with Dual-Slot Touch ID and BIP39 recovery seed",
-					Flags:       []string{"--summary", "--seed", "--reuse-seed", "--existing-seed", "--secrc", "--no-secrc"},
+					Flags:       []string{"--summary", "--comment", "--description", "--seed", "--reuse-seed", "--existing-seed", "--secrc", "--no-secrc"},
 				},
 				{
 					Name:        "ls",
 					Aliases:     []string{"list"},
 					Description: "List all discovered profiles on disk",
+					Flags:       []string{"--long", "-l", "--json"},
 				},
 				{
 					Name:        "describe",
 					Aliases:     []string{"info"},
 					Description: "Inspect or update unencrypted profile metadata and summary without Touch ID",
-					Flags:       []string{"--summary", "--clear-summary", "--json"},
+					Flags:       []string{"--summary", "--comment", "--description", "--clear-summary", "--json"},
+				},
+				{
+					Name:        "enroll-recovery",
+					Description: "Enroll or re-wrap Slot 1 (BIP39) recovery seed on profile vault",
+					Flags:       []string{"--seed", "--force", "--dry-run"},
+				},
+				{
+					Name:        "which",
+					Description: "Statelessly inspect and resolve workspace configuration for a directory",
+					Flags:       []string{"--json"},
 				},
 				{
 					Name:        "set-env",
@@ -316,6 +327,14 @@ func initRegistry() {
 				},
 			},
 			Handler: handleProfile,
+		},
+		{
+			Name:        "which",
+			Category:    "Profiles & Scope",
+			Description: "Statelessly inspect and resolve workspace configuration for a directory",
+			Usage:       "sec which [<path>] [--json]",
+			Flags:       []string{"--json"},
+			Handler:     handleWhich,
 		},
 		{
 			Name:        "use",
@@ -349,21 +368,30 @@ func initRegistry() {
 			Name:        "run",
 			Category:    "Profiles & Scope",
 			Description: "Execute process with scoped secrets injected",
-			Usage:       "sec run [--redact] [--no-redact] [--dry-run] [--confirm-prod] [--group <p>] [--allow-keys k1,k2] [--stdin-key <k>] [--stdin-raw] [--ssh-key <path>] [--ssh-passphrase-key <key>] -- <cmd>",
-			Flags:       []string{"--redact", "--group", "--allow-keys", "--stdin-key", "--stdin-raw", "--stdin-no-newline", "--ssh-key", "--ssh-passphrase-key", "--dry-run", "--no-redact", "--confirm-prod"},
+			Usage:       "sec run [--redact] [--no-redact] [--dry-run] [--confirm-prod] [--auto-extend] [--timeout <d>] [--group <p>] [--allow-keys k1,k2] [--temp-file <ENV>=<target>] [--stdin-key <k>] [--stdin-raw] [--ssh-key <path>] [--ssh-key-secret <key>] [--ssh-passphrase-key <key>] -- <cmd>",
+			Flags:       []string{"--redact", "--group", "--allow-keys", "--temp-file", "--stdin-key", "--stdin-raw", "--stdin-no-newline", "--ssh-key", "--ssh-key-secret", "--key-secret", "--ssh-passphrase-key", "--dry-run", "--no-redact", "--confirm-prod", "--auto-extend", "--timeout"},
 			Handler:     handleRun,
 		},
 		{
 			Name:        "ssh",
 			Category:    "Profiles & Scope",
-			Description: "Execute remote SSH commands or interactive sessions under vault authentication",
-			Usage:       "sec ssh [init <target>] | [<target> | user@host] [--ssh-key <path>] [--ssh-passphrase-key <k>] [--port <p>] [--host <h>] [--user <u>] [--password <p>] [--key <k>] [--secrc | --no-secrc] [-- <cmd...>]",
-			Flags:       []string{"--ssh-key", "--ssh-passphrase-key", "--port", "--host", "--user", "--password", "--key", "--secrc", "--no-secrc"},
+			Description: "Execute remote SSH commands or interactive sessions under vault authentication with zero disk exposure",
+			Usage:       "sec ssh [init <target> [--host <h>] [--user <u>] [--port <p>] [--password <p>] [--key <path>] [--secrc | --no-secrc]] [host-key show <target>] [reset-host-key <target>] | [<target> | user@host] [--ssh-key <path>] [--ssh-key-secret <key>] [--ssh-passphrase-key <key>] [--port <p>] [--openssh] [--no-trace] [--tofu] [--insecure] [--update-host-key] [-- <cmd...>]",
+			Flags:       []string{"--ssh-key", "-i", "--ssh-key-secret", "--key-secret", "--ssh-passphrase-key", "--port", "-p", "--openssh", "--no-trace", "--tofu", "--trust-first-use", "--insecure", "--no-verify", "--update-host-key", "--host", "--user", "--password", "--key", "--secrc", "--no-secrc"},
 			Subcommands: []SubcommandSpec{
 				{
 					Name:        "init",
 					Description: "Configure remote SSH credentials for target node into vault and .secrc",
 					Flags:       []string{"--host", "--user", "--port", "--password", "--key", "--secrc", "--no-secrc"},
+				},
+				{
+					Name:        "host-key",
+					Description: "Inspect or manage pinned SSH host key fingerprints in vault",
+					Flags:       []string{"show"},
+				},
+				{
+					Name:        "reset-host-key",
+					Description: "Remove pinned SSH host key fingerprint from vault",
 				},
 			},
 			Handler: handleSSH,
@@ -417,8 +445,8 @@ func initRegistry() {
 			Name:        "doctor",
 			Category:    "Security & Maintenance",
 			Description: "Run workstation system & security diagnostic checks and repair nested vault envelopes",
-			Usage:       "sec doctor [--skip-keychain] [--repair]",
-			Flags:       []string{"--skip-keychain", "--repair"},
+			Usage:       "sec doctor [--skip-keychain] [--probe-keychain] [--repair]",
+			Flags:       []string{"--skip-keychain", "--probe-keychain", "--repair"},
 			Handler: func(profile string, args []string) {
 				handleDoctor(profile, args)
 			},
@@ -610,6 +638,14 @@ func initRegistry() {
 			Handler:     handleMigrateV2,
 		},
 		{
+			Name:        "enroll-recovery",
+			Category:    "Backup & Migration",
+			Description: "Enroll or re-wrap Slot 1 (BIP39) recovery seed on vault(s)",
+			Usage:       "sec enroll-recovery [--profile <name>] [--seed <mnemonic>] [--force] [--all-profiles] [--dry-run]",
+			Flags:       []string{"--profile", "--seed", "--force", "--all-profiles", "--dry-run"},
+			Handler:     handleEnrollRecovery,
+		},
+		{
 			Name:        "migrate-local",
 			Category:    "Backup & Migration",
 			Description: "Import dotenv file and sanitize it",
@@ -635,15 +671,26 @@ func initRegistry() {
 			Name:        "skill",
 			Category:    "Session & Setup",
 			Description: "Install, view, or update AI assistant integration skills",
-			Usage:       "sec skill <install|show|status|update> [--target <t>] [--scope <global|workspace>]",
-			Flags:       []string{"--target", "--scope"},
+			Usage:       "sec skill <install|install-rules|show|status|update> [--target <t>] [--scope <global|workspace>] [--global] [--workspace]",
+			Flags:       []string{"--target", "--scope", "--global", "--workspace"},
 			Subcommands: []SubcommandSpec{
-				{Name: "install", Description: "Install sec-agent integration skill across IDEs"},
+				{Name: "install", Description: "Install sec-agent integration skill across IDEs", Flags: []string{"--target", "--scope"}},
+				{Name: "install-rules", Aliases: []string{"rules"}, Description: "Install Turn-1 anti-stall rule files", Flags: []string{"--global", "--workspace"}},
 				{Name: "show", Aliases: []string{"view"}, Description: "Display AI integration instructions or manual to stdout"},
 				{Name: "status", Aliases: []string{"list", "ls"}, Description: "Display installed AI agent skill status"},
 				{Name: "update", Description: "Sync AI skills across all installed IDE targets"},
 			},
 			Handler: handleSkill,
+		},
+		{
+			Name:        "install-rules",
+			Category:    "Session & Setup",
+			Description: "Install Turn-1 anti-stall rule across IDE configurations",
+			Usage:       "sec install-rules [--global] [--workspace]",
+			Flags:       []string{"--global", "--workspace"},
+			Handler: func(profile string, args []string) {
+				handleInstallRules(args)
+			},
 		},
 		{
 			Name:        "init-shell",

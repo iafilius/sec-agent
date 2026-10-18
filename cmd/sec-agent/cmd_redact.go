@@ -3,39 +3,194 @@ package main
 import (
 	"bufio"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-
-	"secure_secrets/internal/daemon"
 	"strings"
 	"syscall"
 	"time"
+
+	"secure_secrets/internal/daemon"
 )
+
+// isHexChar checks if byte is a valid hexadecimal character.
+func isHexChar(b byte) bool {
+	return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'f') || (b >= 'A' && b <= 'F')
+}
+
+// isPureHex reports whether a string consists entirely of hexadecimal characters.
+func isPureHex(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if !isHexChar(s[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// isHexCollisionAt checks if an occurrence of a hex secret at idx is part of a longer hex string (e.g. Git commit SHA or SHA-256).
+func isHexCollisionAt(s string, idx int, subLen int) bool {
+	if idx > 0 && isHexChar(s[idx-1]) {
+		return true
+	}
+	end := idx + subLen
+	if end < len(s) && isHexChar(s[end]) {
+		return true
+	}
+	return false
+}
+
+// containsSecretValue checks if line contains secret, suppressing false-positive collisions with longer hex hashes.
+func containsSecretValue(line, secret string) bool {
+	if !strings.Contains(line, secret) {
+		return false
+	}
+	if !isPureHex(secret) {
+		return true
+	}
+	pos := 0
+	for {
+		idx := strings.Index(line[pos:], secret)
+		if idx == -1 {
+			break
+		}
+		actualIdx := pos + idx
+		if !isHexCollisionAt(line, actualIdx, len(secret)) {
+			return true
+		}
+		pos = actualIdx + 1
+	}
+	return false
+}
+
+// replaceSecretMatches replaces occurrences of secret in line, suppressing false-positive collisions with longer hex hashes.
+func replaceSecretMatches(line, secret, replacement string) string {
+	if !strings.Contains(line, secret) {
+		return line
+	}
+	if !isPureHex(secret) {
+		return strings.ReplaceAll(line, secret, replacement)
+	}
+
+	var sb strings.Builder
+	pos := 0
+	for {
+		idx := strings.Index(line[pos:], secret)
+		if idx == -1 {
+			sb.WriteString(line[pos:])
+			break
+		}
+		actualIdx := pos + idx
+		if isHexCollisionAt(line, actualIdx, len(secret)) {
+			// Substring of a longer hex digest - retain unchanged
+			sb.WriteString(line[pos : actualIdx+len(secret)])
+			pos = actualIdx + len(secret)
+		} else {
+			// Standalone secret match - redact
+			sb.WriteString(line[pos:actualIdx])
+			sb.WriteString(replacement)
+			pos = actualIdx + len(secret)
+		}
+	}
+	return sb.String()
+}
+
+// expandDerivedSecrets expands raw secrets into exact, Base64-encoded, and URL-encoded forms.
+func expandDerivedSecrets(rawSecrets map[string]string) map[string]string {
+	expanded := make(map[string]string)
+	for name, val := range rawSecrets {
+		trimmed := strings.TrimSpace(val)
+		if len(trimmed) < 4 {
+			continue
+		}
+		expanded[trimmed] = name
+
+		// Standard Base64
+		b64 := base64.StdEncoding.EncodeToString([]byte(trimmed))
+		if len(b64) >= 6 && b64 != trimmed {
+			expanded[b64] = name + " (base64)"
+		}
+
+		// URL Query Escaped
+		qEsc := url.QueryEscape(trimmed)
+		if len(qEsc) >= 6 && qEsc != trimmed {
+			expanded[qEsc] = name + " (url-encoded)"
+		}
+
+		// URL Path Escaped
+		pEsc := url.PathEscape(trimmed)
+		if len(pEsc) >= 6 && pEsc != trimmed && pEsc != qEsc {
+			expanded[pEsc] = name + " (url-encoded)"
+		}
+	}
+	return expanded
+}
+
+// expandDerivedSecretList expands secret strings into exact, Base64-encoded, and URL-encoded forms for stream writers.
+func expandDerivedSecretList(secrets []string) []string {
+	var expanded []string
+	seen := make(map[string]bool)
+	add := func(s string) {
+		trimmed := strings.TrimSpace(s)
+		if len(trimmed) >= 4 && !seen[trimmed] {
+			seen[trimmed] = true
+			expanded = append(expanded, trimmed)
+		}
+	}
+
+	for _, s := range secrets {
+		trimmed := strings.TrimSpace(s)
+		if len(trimmed) < 4 {
+			continue
+		}
+		add(trimmed)
+
+		b64 := base64.StdEncoding.EncodeToString([]byte(trimmed))
+		if len(b64) >= 6 {
+			add(b64)
+		}
+
+		qEsc := url.QueryEscape(trimmed)
+		if len(qEsc) >= 6 {
+			add(qEsc)
+		}
+
+		pEsc := url.PathEscape(trimmed)
+		if len(pEsc) >= 6 {
+			add(pEsc)
+		}
+	}
+	return expanded
+}
 
 func handleRedact(profile string, args []string) {
 	// Fetch active profile secrets for redaction scanning
-	secretMap := make(map[string]string)
+	rawMap := make(map[string]string)
 	req := daemon.IPCRequest{Action: "backup"}
 	if resp, err := queryDaemon(profile, req); err == nil && resp != nil && resp.Success && resp.Secrets != nil {
 		for k, entry := range resp.Secrets {
 			val := strings.TrimSpace(entry.Value)
-			if len(val) >= 6 {
-				secretMap[val] = k
+			if len(val) >= 4 {
+				rawMap[k] = val
 			}
 		}
 	}
+
+	secretMap := expandDerivedSecrets(rawMap)
 
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
 		line := scanner.Text()
 		for val, name := range secretMap {
-			if strings.Contains(line, val) {
-				line = strings.ReplaceAll(line, val, fmt.Sprintf("[REDACTED_SEC_SECRET:%s]", name))
-			}
+			line = replaceSecretMatches(line, val, fmt.Sprintf("[REDACTED_SEC_SECRET:%s]", name))
 		}
 		fmt.Println(line)
 	}

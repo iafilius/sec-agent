@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"regexp"
 	"secure_secrets/internal/config"
 	"secure_secrets/internal/daemon"
 	"sort"
@@ -37,6 +39,7 @@ func handleGet(profile string, path string, args []string) {
 	showExpired := false
 	isPrefix := false
 	showRecord := false
+	autoExtend := false
 
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--json" {
@@ -54,6 +57,8 @@ func handleGet(profile string, path string, args []string) {
 			showComment = true
 		} else if args[i] == "--show-expired" {
 			showExpired = true
+		} else if args[i] == "--auto-extend" {
+			autoExtend = true
 		} else if args[i] == "--meta" || args[i] == "-m" {
 			if i+1 < len(args) {
 				showMetaKey = args[i+1]
@@ -64,6 +69,8 @@ func handleGet(profile string, path string, args []string) {
 			}
 		}
 	}
+
+	checkAndAutoExtendSession(profile, autoExtend)
 
 	if isPrefix || strings.HasSuffix(path, "/") || showRecord {
 		resp, err := queryDaemon(profile, daemon.IPCRequest{
@@ -574,6 +581,43 @@ func disableTerminalEcho(fd int) (restore func(), err error) {
 // fail on a non-TTY fd like an os.Pipe used to simulate an interactive session).
 var disableTerminalEchoFn = disableTerminalEcho
 
+var (
+	shellPromptRegex = regexp.MustCompile(`(?m)^\s*([a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+:[~/\w.-]*[$#%]|bash-[0-9.]+[$#]|zsh%|\$|%)\s+`)
+	knownCmdPrefixes = []string{
+		"sec set ",
+		"sec-agent set ",
+		"./sec ",
+		"./sec-agent ",
+		"export ",
+		"echo ",
+		"eval ",
+	}
+)
+
+func detectSuspiciousStdinContent(val string) (bool, string) {
+	trimmed := strings.TrimSpace(val)
+	if trimmed == "" {
+		return false, ""
+	}
+
+	for _, prefix := range knownCmdPrefixes {
+		if strings.HasPrefix(trimmed, prefix) {
+			preview := trimmed
+			if len(preview) > 30 {
+				preview = preview[:27] + "..."
+			}
+			return true, fmt.Sprintf("starts with command %q", preview)
+		}
+	}
+
+	if loc := shellPromptRegex.FindStringIndex(trimmed); len(loc) == 2 && loc[0] == 0 {
+		promptMatch := strings.TrimSpace(trimmed[loc[0]:loc[1]])
+		return true, fmt.Sprintf("starts with terminal prompt prefix %q", promptMatch)
+	}
+
+	return false, ""
+}
+
 func handleSet(profile string, path, value string, args []string) {
 	confirm := confirmProdFlag
 	for _, a := range args {
@@ -592,12 +636,18 @@ func handleSet(profile string, path, value string, args []string) {
 	expiresStr := ""
 	useStdin := false
 	noTrim := false
+	allowCommandString := false
+	quickFlag := false
 
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--stdin" {
 			useStdin = true
 		} else if args[i] == "--no-trim" {
 			noTrim = true
+		} else if args[i] == "--allow-command-string" || args[i] == "--force" {
+			allowCommandString = true
+		} else if args[i] == "-q" || args[i] == "--quick" || args[i] == "--non-interactive" {
+			quickFlag = true
 		}
 	}
 
@@ -610,6 +660,12 @@ func handleSet(profile string, path, value string, args []string) {
 			value = string(data)
 		} else {
 			value = strings.TrimRight(string(data), "\r\n")
+		}
+
+		if !allowCommandString {
+			if suspicious, reason := detectSuspiciousStdinContent(value); suspicious {
+				fail("INVALID_ARGUMENT", fmt.Errorf("stdin value appears to contain a shell command or terminal prompt (%s)", reason), "If you intentionally wish to store this text as a secret value, pass --allow-command-string.")
+			}
 		}
 	} else if value == "" {
 		if !term.IsTerminal(int(os.Stdin.Fd())) {
@@ -707,6 +763,23 @@ func handleSet(profile string, path, value string, args []string) {
 			} else {
 				fmt.Fprintln(os.Stderr, "Error: --rotate-ttl requires a duration (e.g. 30d, 12h)")
 				os.Exit(1)
+			}
+		}
+	}
+
+	if isInteractiveTerminal() && os.Getenv("SEC_TEST_MODE") != "1" && !quickFlag && !useStdin && value != "-" {
+		if description == "" && expiresStr == "" && notes == "" && len(metadata) == 0 {
+			reader := bufio.NewReader(os.Stdin)
+			fmt.Fprint(os.Stderr, "Description (optional, Enter to skip): ")
+			if descInput, err := reader.ReadString('\n'); err == nil {
+				description = strings.TrimSpace(descInput)
+			}
+			fmt.Fprint(os.Stderr, "Expiration (optional e.g. 90d, 1y, or Enter for none): ")
+			if expInput, err := reader.ReadString('\n'); err == nil {
+				expTrim := strings.TrimSpace(expInput)
+				if expTrim != "" {
+					expiresStr = expTrim
+				}
 			}
 		}
 	}
@@ -1101,6 +1174,7 @@ func handleList(profile string, args []string) {
 	showLong := false
 	staleDays := 0
 	checkStale := false
+	checkIncomplete := false
 
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--json" {
@@ -1109,6 +1183,8 @@ func handleList(profile string, args []string) {
 			showTrash = true
 		} else if args[i] == "-l" || args[i] == "--long" {
 			showLong = true
+		} else if args[i] == "--incomplete" || args[i] == "--hygiene" || args[i] == "--audit-hygiene" {
+			checkIncomplete = true
 		} else if args[i] == "--stale" {
 			checkStale = true
 			staleDays = 30
@@ -1134,6 +1210,84 @@ func handleList(profile string, args []string) {
 				}
 			}
 		}
+	}
+
+	if checkIncomplete {
+		bkResp, err := queryDaemon(profile, daemon.IPCRequest{Action: "backup"})
+		if err != nil || !bkResp.Success {
+			failDaemonNotRunning(profile)
+		}
+
+		type IncompleteItem struct {
+			Key           string   `json:"key"`
+			MissingFields []string `json:"missing_fields"`
+			Status        string   `json:"status"`
+		}
+		var list []IncompleteItem
+
+		var sortedKeys []string
+		for k := range bkResp.Secrets {
+			if prefix != "" && !strings.HasPrefix(k, prefix) {
+				continue
+			}
+			if strings.HasPrefix(k, "__") {
+				continue
+			}
+			sortedKeys = append(sortedKeys, k)
+		}
+		sort.Strings(sortedKeys)
+
+		for _, k := range sortedKeys {
+			entry := bkResp.Secrets[k]
+			var missing []string
+			if entry.Expires.IsZero() {
+				missing = append(missing, "Expires")
+			}
+			if strings.TrimSpace(entry.Description) == "" && strings.TrimSpace(entry.Comment) == "" {
+				missing = append(missing, "Description")
+			}
+			if strings.TrimSpace(entry.Notes) == "" {
+				missing = append(missing, "Notes")
+			}
+
+			if len(missing) > 0 {
+				status := "incomplete"
+				if len(missing) == 3 {
+					status = "bare"
+				}
+				list = append(list, IncompleteItem{
+					Key:           k,
+					MissingFields: missing,
+					Status:        status,
+				})
+			}
+		}
+
+		if showJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(list)
+			return
+		}
+
+		if len(list) == 0 {
+			fmt.Printf("All secrets in profile %q have complete lifecycle metadata (expiry, description, notes).\n", profile)
+			return
+		}
+
+		fmt.Printf("=== 📋 Secret Lifecycle Hygiene Report (Profile: %s) ===\n\n", profile)
+		fmt.Printf("%-32s %-30s %s\n", "KEY PATH", "MISSING FIELDS", "HYGIENE STATUS")
+		fmt.Println(strings.Repeat("-", 76))
+		for _, item := range list {
+			badge := "🟡 Incomplete"
+			if item.Status == "bare" {
+				badge = "🔴 Bare"
+			}
+			missingStr := strings.Join(item.MissingFields, ", ")
+			fmt.Printf("%-32s %-30s %s\n", item.Key, missingStr, badge)
+		}
+		fmt.Printf("\nTip: Run 'sec relabel <key> --expires <ttl> --desc <text> --notes <runbook>' to enrich without exposing secrets.\n")
+		return
 	}
 
 	if checkExpiring {

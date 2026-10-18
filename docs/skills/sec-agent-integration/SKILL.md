@@ -1,10 +1,10 @@
 ---
 name: sec-agent-integration
 description: Use the sec-agent CLI utility to start background daemons, store secrets, run applications in isolated environments, migrate dotenv files, install AI skills, inspect snapshots, and manage backups.
-version: v2.14.4
+version: v2.17.0
 ---
 
-# sec-agent Secrets Management Integration (v2.14.4)
+# sec-agent Secrets Management Integration (v2.17.0)
 
 This skill enables AI coding agents and autonomous assistants to use the `sec-agent` CLI tool (v1.9.4+) to securely retrieve credentials, run application build/test/terraform pipelines in isolated process environments, migrate dotenv configuration files, install integration skills across IDEs, inspect point-in-time snapshots (`sec snapshot`), and manage KeePassXC `.kdbx` backups on macOS.
 
@@ -30,16 +30,34 @@ When operating in a workspace that uses `sec-agent` (indicated by a `.secrc` fil
    * **Daemon Locked / Not Running**: If the task requires secrets, the agent SHALL directly execute `sec-agent open` (or `sec open`, or the target `sec run` command) directly in its terminal tool runner at Turn 1. macOS natively displays the system Touch ID biometric window on the operator's physical display outside chat channels. **Do NOT hesitate to execute `sec open` or conclude you cannot do Touch ID**; you are invoking the local CLI which prompts the local human operator on their physical screen. Once unlocked, the background daemon detaches into its own POSIX session and persists for 8 hours across separate subsequent tool turns and subprocesses without requiring command chaining (`eval $(sec open) && ...`).
    * **Decryption Authentication Errors**: If unlocking or recovery returns `cipher: message authentication failed`, immediately run `sec-agent doctor` to check for nested envelope depth anomalies before advising the user to re-enter their 24-word recovery seed.
 4. **Long-Running & Unattended Task Longevity Protocol**:
-   * **Anticipated Long Jobs**: When the agent is tasked with executing long-running, multi-step, batch, or unattended workflows (such as `/goal`, lengthy test suites, kernel/code compilation, data migrations, or overnight background tasks), the agent **MUST proactively verify remaining session TTL** at Turn 1 via `sec status`.
+   * **Anticipated Long Jobs**: When the agent is tasked with executing long-running, multi-step, batch, or unattended workflows (such as `/goal`, lengthy test suites, kernel/code compilation, data migrations, or overnight background tasks), the agent **MUST proactively verify remaining session TTL** at Turn 1 via `sec status` or `sec status --quick`.
    * **In-Flight Session Extension (`sec extend`)**: If the session is active but remaining TTL is insufficient for the anticipated workload, the agent SHALL run:
      ```bash
      sec extend --ttl <duration> # e.g. sec extend --ttl 24h
      ```
      This pushes back daemon expiration in memory **without triggering Touch ID**, preventing mid-run failures while the human operator is away or asleep.
+   * **Automatic Low-TTL Extension (`--auto-extend`)**: Pass `--auto-extend` to `sec run` or `sec get` (or configure `"auto_extend": true` in `.secrc`). When remaining session TTL drops below 15 minutes, `sec-agent` automatically calls `sec extend` in the background prior to command execution.
+   * **Sliding Hard TTL Refresh**: Active authenticated requests occurring within the daemon's inactivity grace period automatically slide hard session expiration forward, eliminating abrupt expirations during continuous background work.
    * **Upfront Extended Unlock**: If the session is currently locked and a long unattended task is about to begin, prompt the user or execute `sec open` with an explicit duration:
      ```bash
      sec open --ttl 24h # or configured in .secrc: {"ttl": "24h"}
      ```
+5. **Graceful Biometric Timeout & Task Deferral Protocol (Operator AFK Handling)**:
+   * **Active 120-Second Timeout**: Touch ID prompts enforce an active 120-second timeout (configurable via `--timeout <duration>`, `.secrc` `"prompt_timeout"`, or `SEC_PROMPT_TIMEOUT`). When an operator is away from keyboard (AFK), the system invalidates the prompt dialog, alerts the operator via desktop notification and audio cue, and exits with code 4 (`ERR_BIOMETRIC_TIMEOUT`).
+   * **Autonomous Agent Action on Exit Code 4**:
+     1. **Do NOT abort or fail the task trajectory**: Exit code 4 is non-fatal; it indicates the operator is temporarily away.
+     2. **Partition Workload**: Immediately partition pending tasks into offline/vault-free steps vs. secret-dependent steps.
+     3. **Execute Vault-Free Work**: Proceed with all offline tasks immediately (e.g. code editing, refactoring, local unit tests, linting, formatting, documentation, git staging).
+     4. **Frictionless Resumption**: When secrets are required or the operator sends a message in chat, prompt:
+        `"Biometric prompt timed out while you were away. Please run 'sec open' (or approve Touch ID) to proceed with [remaining tasks]."`
+   * **Exit Code Reference**:
+     * `0`: Success / Unlocked
+     * `1`: User Canceled (`LAErrorUserCancel` / dialog dismissed)
+     * `2`: Invalid CLI syntax or biometrics unavailable
+     * `3`: Vault locked / daemon not running
+     * `4`: `ERR_BIOMETRIC_TIMEOUT` (120s expired, operator AFK — trigger deferral protocol)
+     * `5`: `ERR_BIOMETRIC_LOCKOUT` (OS requires passcode reset before biometrics re-arm)
+     * `6`: `ERR_BIOMETRIC_FAILED` (sensor rejected fingerprint)
 
 ### 1.2. Pre-flight Initialization Guard (`sec-agent init`)
 When running `sec-agent` on a fresh workstation or uninitialized environment:
@@ -64,16 +82,18 @@ sec-agent version [--json]
 sec-agent status --all
 
 # Run deep pre-flight vault envelope, keychain key, and system diagnostics
-# (Pass --skip-keychain or run in headless/agent environments to skip live Touch ID challenge)
-sec-agent doctor [--skip-keychain]
+# (Pass --skip-keychain or run in headless/agent environments to skip live Touch ID challenge; pass --probe-keychain to opt-in)
+sec-agent doctor [--skip-keychain] [--probe-keychain]
 
 # Audit and automatically flatten multi-nested corrupted vault envelopes offline
 sec-agent doctor --repair
 ```
 
-* **Daemon "Active" / "Running"**: The session is unlocked and secrets are queryable.
-* **Daemon "Session locked" / "Not running"**: Tell the user to run `eval $(sec-agent open)`.
+* **Daemon "Active" / "Running"**: The session is unlocked and secrets are queryable. `Remaining TTL` is visible in `sec status`.
+* **Daemon "Session locked" / "Not running"**: Tell the user to run `eval $(sec-agent open)` (or `sec open`).
 * **Version Mismatch**: Advise user to run `sec-agent restart` and `eval $(sec-agent open)`.
+* **Zero-Biometric Slot 1 Audit in Doctor**: `sec doctor` statically verifies that every vault envelope on disk has an enrolled Slot 1 (BIP39) recovery seed in both interactive and headless environments. Vaults lacking recovery keys are prominently flagged:
+  `[🔴] Profile <name> Vault: NO Slot 1 Recovery Key Enrolled (CRITICAL RISK) — Run 'sec enroll-recovery --profile <name>' to protect.`
 * **Multi-Nested Envelope Auto-Repair (`sec doctor --repair`)**: If diagnostic output reports `Depth Anomaly Detected (nesting_depth > 1)` on any `.enc` vault, running `sec doctor --repair` safely writes a `.bak_nested` backup and flattens all affected profile envelopes down to single-layer format offline without requiring Keychain biometrics or seed phrases.
 
 ### 1.4. Skill Version Synchronization & Dynamic Re-Read Protocol
@@ -106,13 +126,22 @@ sec profile new <profile-name> --seed "<24-word mnemonic>" [--secrc | --no-secrc
 sec profile describe <profile-name> [--json]
 
 # Update or clear unencrypted profile summary without unlocking biometrics or modifying cryptographic payload
+# Aliases: --comment, --description
 sec profile describe <profile-name> --summary "Updated cluster secrets description"
 sec profile describe <profile-name> --clear-summary
 
 # Inspect all discovered profile vaults, schema health, and summaries in a formatted columnar table
-sec profile ls (alias: sec profile list)
+sec profile ls [--long] [--json] # alias: sec profile list
+
+# Statelessly resolve which workspace profile, tier, and .secrc file apply to any directory tree
+sec which [<path>] [--json] # alias: sec profile which [<path>]
+
+# Enroll or re-wrap a BIP39 recovery seed on an existing profile vault (first-class replacement for migrate-v2)
+sec enroll-recovery [--profile <name>] [--seed <seed>] [--dry-run]
 ```
-* **Unencrypted Profile Summaries (`sec profile describe`)**: Vault profiles (`secrets_<profile>.enc`) contain an unencrypted `summary` field in their outer `VaultEnvelope`. This enables instant, zero-biometric inspection (`sec profile describe <name>`, `sec profile ls`) across multiple repositories and projects before unlocking.
+* **Stateless Workspace Resolution (`sec which [path]`)**: Resolves workspace `.secrc` / `.secenv` / `.sec.json` configurations on-demand for any given path or current working directory without persistent file caching. Output includes target directory, resolved profile, config file path, workspace root, environment alias, and tier.
+* **First-Class Recovery Enrollment (`sec enroll-recovery`)**: Dedicated command to enroll or re-wrap Slot 1 (BIP39) recovery seed phrases on existing vaults without legacy migration terminology.
+* **Unencrypted Profile Summaries (`sec profile describe`)**: Vault profiles (`secrets_<profile>.enc`) contain an unencrypted `summary` field in their outer `VaultEnvelope`. This enables instant, zero-biometric inspection (`sec profile describe <name>`, `sec profile ls --long`, `sec profile ls --json`) across multiple repositories and projects before unlocking. Supports `--comment` and `--description` aliases.
 * **Upfront Recovery Seed Choice**: When invoked interactively without `--seed`, `sec profile new` offers a clear choice before generating anything:
   * `[1] Generate a new 24-word recovery seed (Default)`: Generates a new 24-word mnemonic, displays the security warning and word grid, and verifies words #4, #12, and #20.
   * `[2] Link an existing 24-word master recovery seed phrase`: Prompts directly for your existing 24-word seed without generating or printing any throwaway mnemonic, ensuring zero confusion.
@@ -311,7 +340,39 @@ sec-agent relabel myapp/token --expires 2026-12-31T23:59:59Z
 sec-agent relabel myapp/token --clear-alias --clear-desc --clear-notes
 ```
 
-### 5.8. Querying & Renaming Secrets
+### 5.8. Secret Lifecycle Metadata & Proactive Enrichment Protocol
+
+> [!IMPORTANT]
+> **Autonomous Agent Rule: Never Leave Ingested Secrets Bare**:
+> When an autonomous assistant stores a secret (via `sec set`, `.env` migration, or script generation), it MUST proactively offer to complete the entry with an expiration date, renewal dashboard URL, or rotation runbook using `sec relabel`:
+> `"Stored <key>. Would you like to attach an expiration date (e.g. 90d), renewal URL, or rotation instructions?"`
+
+#### Standardized Renewal Runbook Template for `--notes`:
+When adding renewal instructions to `--notes`, format as structured Markdown:
+```markdown
+### Renewal Runbook: <key>
+* **Owner:** Team or alert email (e.g. devops@company.com)
+* **Console URL:** https://console.cloud.google.com/apis/credentials
+* **Rotation Cadence:** 90 days (or quarterly)
+* **Rotation Steps:**
+  1. Generate replacement credential in Console URL.
+  2. Test with `sec pipe <key> | <validation-command>`
+  3. Update vault: `sec set <key> --stdin`
+  4. Decommission previous credential.
+```
+
+### 5.9. Secret Hygiene Scanning & Remediation (`sec list --incomplete`)
+Audit all secrets in a vault profile for missing lifecycle metadata (expiration dates, descriptions, or operational notes):
+
+```bash
+# Formatted columnar terminal report of incomplete or bare secrets
+sec list --incomplete    # alias: sec ls --hygiene
+
+# Structured machine-readable JSON for autonomous agents
+sec list --incomplete --json
+```
+
+### 5.10. Querying & Renaming Secrets
 ```bash
 sec-agent get my-project/terraform/acceptance/ --prefix [--json]
 sec-agent mv old-path/ new-path/ --prefix
@@ -334,7 +395,7 @@ sec-agent lease revoke $lease_token
 ```
 Delegate temporary credential access to subagents with **zero credential lingering**.
 
-### 5.11. Real-Time Secret Redaction & Inline `sec://` Placeholders (`sec-agent run`)
+### 5.11. Real-Time Secret Redaction, Derived Encodings & Hex Protection (`sec-agent run --redact` & `sec-agent redact`)
 ```bash
 # Dynamic stream redaction: Automatically replaces all injected vault secrets in child stdout/stderr
 # with '[REDACTED_BY_SEC]' using buffer-boundary-aware sliding window streaming
@@ -345,25 +406,78 @@ sec-agent run --allow-keys VCO_URL,VCO_TOKEN --redact -- make test-unit
 
 # Inline URI replacement: In-memory argument replacement for legacy tools requiring password flags (-p)
 sec-agent run -- ./legacy_tool -p "sec://db/password"
+
+# Pipe subprocess streams through standalone stream redactor
+cat application.log | sec-agent redact
+```
+* **Derived Encodings Redaction (Base64 & URL-Encoded)**: In both `sec run --redact` and `sec redact`, `sec-agent` automatically expands active profile secrets into their standard Base64-encoded strings (`Authorization: Basic ...`, `Bearer ...`) and URL-encoded query/path variants (`%2F`, `%2B`, `%3D`). Subprocess stdout/stderr containing these derived encodings are sanitized automatically (`[REDACTED_BY_SEC]` in `sec run`, or `[REDACTED_SEC_SECRET:<name> (base64)]` / `[REDACTED_SEC_SECRET:<name> (url-encoded)]` in `sec redact`), preventing credential exposure during verbose HTTP client traces.
+* **Hex Collision & Git SHA Protection**: When a vault secret consists of hexadecimal characters (e.g. `c0ffee` or an 8-char hex token), word boundary heuristics verify adjacent characters. Matches that are substrings of longer 40-character Git commit SHAs or 64-character SHA-256 package digests are recognized as collisions and preserved intact, preventing log corruption and false-positive pre-commit blocks.
+
+### 5.12. Ephemeral Temporary File Injection (`sec-agent run --temp-file`)
+Many production tools (`curl`, `kubectl`, `helm`, Docker, cloud SDKs) require physical credential files on disk rather than environment variables or command-line arguments:
+
+```bash
+# Inject temporary mode-0600 .netrc file populated from vault key into $NETRC:
+sec-agent run --temp-file NETRC=auth/netrc -- curl --netrc-file "$NETRC" https://api.internal/v1/metrics
+
+# Inject temporary kubeconfig configuration for kubectl:
+sec-agent run --temp-file KUBECONFIG=clusters/dev-kubeconfig -- kubectl get pods -A
+
+# Inject multiple temporary files (e.g. client mTLS certificate and private key):
+sec-agent run \
+  --temp-file CLIENT_CERT=certs/client.pem \
+  --temp-file CLIENT_KEY=certs/client.key \
+  -- curl --cert "$CLIENT_CERT" --key "$CLIENT_KEY" https://mtls.internal
+
+# Inject file rendered from template file or inline mustache syntax:
+sec-agent run --temp-file CONFIG_FILE=templates/agent.yaml.tmpl -- ./agent-daemon
 ```
 
-### 5.12. Native Pure Go SSH Client & Target Wizard (`sec-agent ssh`)
-`sec-agent` provides a built-in pure Go SSH client that authenticates directly using credentials stored in the active vault—completely eliminating the need for external `sshpass` utilities on macOS/Linux.
+* **Guaranteed Zero-Fill Shredding**: Temporary files are created in `$TMPDIR` with strict mode `0600` permissions. Upon process completion or signal termination (`SIGINT`, `SIGTERM`, `SIGHUP`), `sec-agent` immediately overwrites all temporary file bytes with zeroes before unlinking them from disk, ensuring **zero disk credential residue**.
+* **Flexible Target Resolution**: Targets can be a direct vault key (`auth/netrc`), an inline mustache template (`{{auth/username}}:{{auth/password}}`), or a local template file on disk.
+* **Stream Redaction Integration**: Contents of all generated temporary files are automatically registered with the stream redactor so accidental echoes or verbose traces are masked in stdout/stderr.
+
+### 5.13. Native Pure Go SSH Client, Vault-Stored Keys & Zero-Trace Pinning (`sec-agent ssh`)
+`sec-agent` provides a built-in pure Go SSH client that authenticates directly using credentials stored in the active vault—completely eliminating the need for external `sshpass` utilities on macOS/Linux. Native Go SSH execution is the default engine for both password and private key authentication, executing entirely in memory without writing keys to disk or `/tmp`.
 
 ```bash
 # Setup remote SSH target interactively into vault and workspace .secrc:
 sec-agent ssh init ax3600 --host 192.168.31.1 --user root --port 22 [--password <pass> | --key <path>]
 
-# Connect to named target from .secrc ("ssh_targets") or vault ("ssh/<target>/..."):
+# Store multiline private key (PEM / OpenSSH format) directly in the encrypted vault:
+cat ~/.ssh/id_ed25519 | sec-agent set ssh/ax3600/key --stdin --no-trim
+
+# Connect to named target (auto-resolves vault key ssh/<target>/key or ssh/<target>/private_key):
 sec-agent ssh ax3600
 
-# Execute non-interactive remote command with vault password/key injected in memory:
+# Explicit vault key path override:
+sec-agent ssh root@192.168.31.1 --ssh-key-secret ssh/homelab/admin_key -- "uptime"
+
+# Execute non-interactive remote command with zero disk exposure:
 sec-agent ssh ax3600 -- uci show wireless
 
-# Direct connection via user@host using active profile vault credentials:
-sec-agent ssh root@192.168.31.1 -- "uptime"
+# Automated / headless host key verification (Trust-On-First-Use pins fingerprint to vault):
+sec-agent ssh ax3600 --tofu -- "uptime"
+
+# Inspect pinned host key fingerprint in vault:
+sec-agent ssh host-key show ax3600
+
+# Reset pinned host key fingerprint after remote reflash or rebuild:
+sec-agent ssh reset-host-key ax3600
+
+# Update pinned host key fingerprint in-flight:
+sec-agent ssh ax3600 --update-host-key -- "uptime"
+
+# Insecure bypass (ignores host key verification; does not mutate vault):
+sec-agent ssh ax3600 --insecure -- "uptime"
+
+# Delegated OpenSSH fallback with zero-trace known_hosts suppression:
+sec-agent ssh ax3600 --openssh --no-trace -- "uptime"
 ```
-* **Zero Disk Passwords**: Passwords and key passphrases are decrypted in-memory and passed to Go's `ssh.ClientConfig` without touching disk or process argument lists.
+* **Native Pure Go Default**: Connects directly in-process via `golang.org/x/crypto/ssh` for both password and key authentication without invoking external `/usr/bin/ssh` or `sshpass`.
+* **Zero Disk Private Keys**: Decrypts OpenSSH/PEM keys directly from vault storage in memory. No temporary files are ever created on disk or in `/tmp`.
+* **Vault-Backed Host Key Pinning (TOFU)**: Public host key SHA-256 fingerprints are pinned into encrypted vault storage (`ssh/<target>/host_fingerprint`). If a host key changes, connection aborts immediately with `HOST_KEY_MISMATCH` to prevent MitM attacks.
+* **Zero-Trace OpenSSH Delegation (`--no-trace`)**: When delegating to system OpenSSH via `--openssh`, `--no-trace` injects `-o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR -o IdentitiesOnly=yes`, leaving zero host traces in `~/.ssh/known_hosts`.
 * **Exit Code Propagation**: Remote command exit codes (`exitErr.ExitStatus()`) propagate directly to the calling shell.
 
 ### 5.13. Companion Metadata Environment Variables
@@ -379,13 +493,17 @@ sec-agent check --remote root@192.168.31.1 --uci wireless.wifinet_dev_5g.key=wif
 sec-agent check --remote deploy@api.prod --env API_TOKEN=prod/api_token
 ```
 
-### 5.15. Ephemeral SSH Agent & Passphrase Injection (`sec-agent run --ssh-key`)
+### 5.15. Ephemeral SSH Agent & Vault Key Injection (`sec-agent run --ssh-key` & `--ssh-key-secret`)
 ```bash
-# Launch ephemeral in-memory SSH agent with vault passphrase for SSH/Rsync/Git automation
+# Launch ephemeral in-memory SSH agent with filesystem key and vault passphrase:
 sec-agent run --ssh-key ~/.ssh/id_ed25519_ax3600 \
               --ssh-passphrase-key router-ax3600-prod/ssh/key_passphrase \
               -- ssh root@192.168.31.1 "uci show"
+
+# Launch ephemeral in-memory SSH agent directly from vault-stored private key (zero disk files):
+sec-agent run --ssh-key-secret ssh/ax3600/key -- git clone git@github.com:org/repo.git
 ```
+* **In-Memory Agent**: Spins up an in-process ephemeral SSH agent, populates it from vault bytes in RAM, sets `SSH_AUTH_SOCK` for the child command, and cleanly terminates the agent on exit.
 
 ### 5.16. Stdin Stream Injection & Redaction (`sec-agent stream`)
 ```bash

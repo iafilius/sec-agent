@@ -210,3 +210,112 @@ func TestRunStdinKeyInjection(t *testing.T) {
 	}
 }
 
+func TestTempFileManagerUnit(t *testing.T) {
+	mgr := newTempFileManager()
+	content := "machine github.com login testuser password MySecretToken123\n"
+	tempPath, err := mgr.CreateTempFile("NETRC", content)
+	if err != nil {
+		t.Fatalf("CreateTempFile failed: %v", err)
+	}
+
+	info, err := os.Stat(tempPath)
+	if err != nil {
+		t.Fatalf("failed to stat temp file: %v", err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Errorf("expected file mode 0600, got %v", info.Mode().Perm())
+	}
+
+	readBytes, err := os.ReadFile(tempPath)
+	if err != nil {
+		t.Fatalf("failed to read temp file: %v", err)
+	}
+	if string(readBytes) != content {
+		t.Errorf("expected content %q, got %q", content, string(readBytes))
+	}
+
+	mgr.Cleanup()
+
+	// Verify file is unlinked
+	if _, err := os.Stat(tempPath); !os.IsNotExist(err) {
+		t.Errorf("expected temp file to be deleted after cleanup, got err: %v", err)
+	}
+}
+
+func TestRunTempFileInjectionAndShredding(t *testing.T) {
+	profile := "tempfile-run-profile"
+	sockPath, _ := config.GetSocketPath(profile)
+	dbPath, _ := store.GetStorePath(profile)
+	_ = os.Remove(sockPath)
+	_ = os.Remove(dbPath)
+	defer os.Remove(sockPath)
+	defer os.Remove(dbPath)
+
+	binPath := filepath.Join(t.TempDir(), "sec_tempfile_bin")
+	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
+	if err := buildCmd.Run(); err != nil {
+		t.Fatalf("failed to build test binary: %v", err)
+	}
+
+	masterKey := []byte("01234567890123456789012345678901")
+	st := &store.EncryptedStore{
+		Secrets: map[store.SecretKey]store.SecretEntry{
+			"auth/netrc": {Value: "machine api.internal login bot password secretToken123"},
+		},
+	}
+	_ = store.SaveStore(profile, st, masterKey)
+
+	d, err := daemon.NewDaemon(profile, 30*time.Second, Version)
+	if err != nil {
+		t.Fatalf("failed to create test daemon: %v", err)
+	}
+	token := "tempfile-token-123"
+	d.SetMasterKeyForTest(masterKey)
+	d.SetSessionTokenForTest(token)
+	d.SetSecretsForTest(map[string]store.SecretEntry{
+		"auth/netrc": {Value: "machine api.internal login bot password secretToken123"},
+	})
+	go d.Start()
+	defer d.Stop()
+
+	sock, _ := config.GetSocketPath(profile)
+	for i := 0; i < 50; i++ {
+		if _, err := os.Stat(sock); err == nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// 1. Run bash reading NETRC path and printing path and contents
+	script := `echo "PATH:$NETRC"; cat "$NETRC"`
+	cmd := exec.Command(binPath, "run", "--temp-file", "NETRC=auth/netrc", "--no-redact", "--profile", profile, "--", "bash", "-c", script)
+	cmd.Env = append(os.Environ(), "SEC_SESSION_TOKEN="+token)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sec run --temp-file failed: %v\nOutput: %s", err, out)
+	}
+
+	outStr := string(out)
+	if !strings.Contains(outStr, "machine api.internal login bot password secretToken123") {
+		t.Fatalf("expected child process to read temp file contents, got:\n%s", outStr)
+	}
+
+	// Extract temp file path
+	var extractedPath string
+	for _, line := range strings.Split(outStr, "\n") {
+		if strings.HasPrefix(line, "PATH:") {
+			extractedPath = strings.TrimPrefix(line, "PATH:")
+			break
+		}
+	}
+	if extractedPath == "" {
+		t.Fatalf("failed to extract PATH from output:\n%s", outStr)
+	}
+
+	// Verify temporary file was deleted immediately on command completion
+	if _, err := os.Stat(extractedPath); !os.IsNotExist(err) {
+		t.Errorf("temporary file %s was NOT shredded/deleted after command exit!", extractedPath)
+	}
+}
+
+

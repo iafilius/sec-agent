@@ -170,7 +170,7 @@ func TestShellCompletionOutput(t *testing.T) {
 		if !strings.Contains(out, "env") {
 			t.Errorf("expected shell completion for %s to contain 'env', got:\n%s", shell, out)
 		}
-		for _, cmd := range []string{"pipe", "describe", "edit-notes"} {
+		for _, cmd := range []string{"pipe", "describe", "edit-notes", "which", "enroll-recovery"} {
 			if !strings.Contains(out, cmd) {
 				t.Errorf("expected shell completion for %s to contain command %q, got:\n%s", shell, cmd, out)
 			}
@@ -185,6 +185,33 @@ func TestShellCompletionOutput(t *testing.T) {
 			if !strings.Contains(out, "-l stdin-key") {
 				t.Errorf("expected shell completion for fish to contain '-l stdin-key', got:\n%s", out)
 			}
+			if !strings.Contains(out, "-l auto-extend") {
+				t.Errorf("expected shell completion for fish to contain '-l auto-extend', got:\n%s", out)
+			}
+			if !strings.Contains(out, "-l probe-keychain") {
+				t.Errorf("expected shell completion for fish to contain '-l probe-keychain', got:\n%s", out)
+			}
+			if !strings.Contains(out, "-l long") {
+				t.Errorf("expected shell completion for fish to contain '-l long', got:\n%s", out)
+			}
+			if !strings.Contains(out, "-l allow-command-string") {
+				t.Errorf("expected shell completion for fish to contain '-l allow-command-string', got:\n%s", out)
+			}
+			if !strings.Contains(out, "-l incomplete") {
+				t.Errorf("expected shell completion for fish to contain '-l incomplete', got:\n%s", out)
+			}
+			if !strings.Contains(out, "-l hygiene") {
+				t.Errorf("expected shell completion for fish to contain '-l hygiene', got:\n%s", out)
+			}
+			if !strings.Contains(out, "-l ssh-key-secret") {
+				t.Errorf("expected shell completion for fish to contain '-l ssh-key-secret', got:\n%s", out)
+			}
+			if !strings.Contains(out, "-l no-trace") {
+				t.Errorf("expected shell completion for fish to contain '-l no-trace', got:\n%s", out)
+			}
+			if !strings.Contains(out, "-l tofu") {
+				t.Errorf("expected shell completion for fish to contain '-l tofu', got:\n%s", out)
+			}
 		} else {
 			if !strings.Contains(out, "--repair") {
 				t.Errorf("expected shell completion for %s to contain '--repair', got:\n%s", shell, out)
@@ -194,6 +221,33 @@ func TestShellCompletionOutput(t *testing.T) {
 			}
 			if !strings.Contains(out, "--stdin-key") {
 				t.Errorf("expected shell completion for %s to contain '--stdin-key', got:\n%s", shell, out)
+			}
+			if !strings.Contains(out, "--auto-extend") {
+				t.Errorf("expected shell completion for %s to contain '--auto-extend', got:\n%s", shell, out)
+			}
+			if !strings.Contains(out, "--probe-keychain") {
+				t.Errorf("expected shell completion for %s to contain '--probe-keychain', got:\n%s", shell, out)
+			}
+			if !strings.Contains(out, "--long") {
+				t.Errorf("expected shell completion for %s to contain '--long', got:\n%s", shell, out)
+			}
+			if !strings.Contains(out, "--allow-command-string") {
+				t.Errorf("expected shell completion for %s to contain '--allow-command-string', got:\n%s", shell, out)
+			}
+			if !strings.Contains(out, "--incomplete") {
+				t.Errorf("expected shell completion for %s to contain '--incomplete', got:\n%s", shell, out)
+			}
+			if !strings.Contains(out, "--hygiene") {
+				t.Errorf("expected shell completion for %s to contain '--hygiene', got:\n%s", shell, out)
+			}
+			if !strings.Contains(out, "--ssh-key-secret") {
+				t.Errorf("expected shell completion for %s to contain '--ssh-key-secret', got:\n%s", shell, out)
+			}
+			if !strings.Contains(out, "--no-trace") {
+				t.Errorf("expected shell completion for %s to contain '--no-trace', got:\n%s", shell, out)
+			}
+			if !strings.Contains(out, "--tofu") {
+				t.Errorf("expected shell completion for %s to contain '--tofu', got:\n%s", shell, out)
 			}
 		}
 	}
@@ -279,12 +333,26 @@ var recognizedFlagAliases = map[string]map[string]bool{
 	},
 	"set": {
 		"--description": true, // Alias for --desc
+		"--force":       true, // Alias for --allow-command-string
 	},
 	"relabel": {
 		"--description": true, // Alias for --desc
 	},
 	"run": {
 		"--stdin-no-newline": true, // Alias for --stdin-raw
+		"--key-secret":       true, // Alias for --ssh-key-secret
+	},
+	"ssh": {
+		"--key-secret":      true, // Alias for --ssh-key-secret
+		"--trust-first-use": true, // Alias for --tofu
+		"--no-verify":       true, // Alias for --insecure
+	},
+	"profile": {
+		"--comment":     true, // Alias for --summary
+		"--description": true, // Alias for --summary
+	},
+	"ls": {
+		"--audit-hygiene": true, // Alias for --hygiene
 	},
 }
 
