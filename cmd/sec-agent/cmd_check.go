@@ -30,7 +30,16 @@ func handleCheck(profile string, args []string) {
 	scriptsPath := "."
 
 	for i := 0; i < len(args); i++ {
-		if args[i] == "--scan-weak" || args[i] == "-w" {
+		if args[i] == "--scan" || args[i] == "--scan-workspace" {
+			var scanArgs []string
+			for j := 0; j < len(args); j++ {
+				if j != i {
+					scanArgs = append(scanArgs, args[j])
+				}
+			}
+			handleScan(profile, scanArgs)
+			return
+		} else if args[i] == "--scan-weak" || args[i] == "-w" {
 			scanWeak = true
 		} else if args[i] == "--leaks" || args[i] == "--scan-leaks" || args[i] == "-l" || args[i] == "--history" {
 			scanLeaks = true

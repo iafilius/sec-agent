@@ -2,8 +2,14 @@ package main
 
 import (
 	"bufio"
+	"crypto/hmac"
+	crand "crypto/rand"
+	// #nosec G505 - required by OpenSSH known_hosts HMAC-SHA1 specification
+	"crypto/sha1"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -25,14 +31,17 @@ type hostKeyOptions struct {
 	insecure        bool
 	trustOnFirstUse bool
 	updateHostKey   bool
+	noTrace         bool
 }
 
 func handleSSH(profile string, args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Println("Usage: sec ssh [init <target>] [host-key show <target>] [reset-host-key <target>] | [<target> | user@host] [flags] [-- <cmd...>]")
+		fmt.Println("Usage: sec ssh [init <target>] [import-key <target> <file>] [sanitize [<target>]] [host-key show <target>] [reset-host-key <target>] | [<target> | user@host] [flags] [-- <cmd...>]")
 		fmt.Println("\nExecutes remote SSH commands or interactive sessions under vault authentication with zero disk exposure.")
 		fmt.Println("\nSubcommands:")
 		fmt.Println("  init <target>                Configure remote SSH target into vault and workspace .secrc")
+		fmt.Println("  import-key <target> <file>   Ingest SSH private key into vault, optionally shred, and sanitize")
+		fmt.Println("  sanitize [<target>] [--all]  Scrub target hostnames and hashed entries from known_hosts")
 		fmt.Println("  host-key show <target>       Show pinned SSH host key fingerprint from vault")
 		fmt.Println("  reset-host-key <target>      Reset pinned SSH host key fingerprint in vault")
 		fmt.Println("\nFlags & Arguments:")
@@ -53,6 +62,14 @@ func handleSSH(profile string, args []string) {
 
 	if args[0] == "init" {
 		handleSSHInit(profile, args[1:])
+		return
+	}
+	if args[0] == "import-key" {
+		handleSSHImportKey(profile, args[1:])
+		return
+	}
+	if args[0] == "sanitize" {
+		handleSSHSanitize(profile, args[1:])
 		return
 	}
 	if args[0] == "host-key" || args[0] == "hostkey" {
@@ -134,7 +151,11 @@ func handleSSH(profile string, args []string) {
 				sshKeyPath = tgt.IdentityFile
 			}
 			if tgt.KeySecret != "" && sshKeySecret == "" {
-				sshKeySecret = tgt.KeySecret
+				ks := strings.TrimSpace(tgt.KeySecret)
+				if !strings.Contains(ks, "/") {
+					ks = "ssh/shared/" + ks + "/private_key"
+				}
+				sshKeySecret = ks
 			}
 			if tgt.PassphraseKey != "" && sshPassphraseKey == "" {
 				sshPassphraseKey = tgt.PassphraseKey
@@ -178,6 +199,12 @@ func handleSSH(profile string, args []string) {
 		if sshKeySecret == "" && sshKeyPath == "" {
 			if resp, err := queryDaemon(profile, daemon.IPCRequest{Action: "get", Path: pfx + "private_key"}); err == nil && resp.Success && resp.Value != "" {
 				sshKeySecret = pfx + "private_key"
+			} else if resp, err := queryDaemon(profile, daemon.IPCRequest{Action: "get", Path: pfx + "key_secret"}); err == nil && resp.Success && resp.Value != "" {
+				resolvedPtr := strings.TrimSpace(resp.Value)
+				if !strings.Contains(resolvedPtr, "/") {
+					resolvedPtr = "ssh/shared/" + resolvedPtr + "/private_key"
+				}
+				sshKeySecret = resolvedPtr
 			} else if resp, err := queryDaemon(profile, daemon.IPCRequest{Action: "get", Path: pfx + "key"}); err == nil && resp.Success && resp.Value != "" {
 				if strings.HasPrefix(strings.TrimSpace(resp.Value), "-----BEGIN") {
 					sshKeySecret = pfx + "key"
@@ -264,6 +291,7 @@ func handleSSH(profile string, args []string) {
 		insecure:        insecureHostKey,
 		trustOnFirstUse: trustOnFirstUse,
 		updateHostKey:   updateHostKey,
+		noTrace:         noTrace,
 	}
 
 	// 5. Native Go SSH Connection (default for both password and key auth)
@@ -358,8 +386,9 @@ func vaultHostKeyCallback(profile, target, host string, port int, opts hostKeyOp
 		}
 
 		resp, err := queryDaemon(profile, daemon.IPCRequest{
-			Action: "get",
-			Path:   vaultPath,
+			Action:  "get",
+			Path:    vaultPath,
+			NoTrace: opts.noTrace,
 		})
 
 		hasPinned := (err == nil && resp.Success && resp.Value != "")
@@ -539,15 +568,17 @@ func runNativeSSH(profile, target, host string, port int, sshUser, password stri
 }
 
 func handleSSHInit(profile string, args []string) {
-	var target, host, sshUser, password, keyPath string
+	var target, host, sshUser, password, keyPath, importKeyPath, keySecret string
 	port := 22
 	autoSecrc := false
 	noSecrc := false
+	shredKey := false
+	keepPub := false
 
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if a == "--help" || a == "-h" || a == "help" {
-			fmt.Println("Usage: sec ssh init <target> [--host <host>] [--user <user>] [--port <port>] [--password <password> | --key <path>] [--secrc|--no-secrc]")
+			fmt.Println("Usage: sec ssh init <target> [--host <host>] [--user <user>] [--port <port>] [--password <password> | --key <path> | --import-key <path> [--shred] [--keep-pub] | --key-secret <vault-key>] [--secrc|--no-secrc]")
 			fmt.Println("\nConfigure remote SSH target credentials into vault and workspace .secrc without using sshpass.")
 			return
 		}
@@ -568,6 +599,20 @@ func handleSSHInit(profile string, args []string) {
 		} else if a == "--key" && i+1 < len(args) {
 			keyPath = args[i+1]
 			i++
+		} else if a == "--import-key" && i+1 < len(args) {
+			importKeyPath = args[i+1]
+			i++
+		} else if (a == "--key-secret" || a == "--ssh-key-secret") && i+1 < len(args) {
+			keySecret = args[i+1]
+			i++
+		} else if strings.HasPrefix(a, "--key-secret=") {
+			keySecret = strings.TrimPrefix(a, "--key-secret=")
+		} else if strings.HasPrefix(a, "--ssh-key-secret=") {
+			keySecret = strings.TrimPrefix(a, "--ssh-key-secret=")
+		} else if a == "--shred" {
+			shredKey = true
+		} else if a == "--keep-pub" {
+			keepPub = true
 		} else if a == "--secrc" {
 			autoSecrc = true
 		} else if a == "--no-secrc" {
@@ -578,7 +623,7 @@ func handleSSHInit(profile string, args []string) {
 	}
 
 	if target == "" {
-		fmt.Fprintln(os.Stderr, "Usage: sec ssh init <target> [--host <host>] [--user <user>] [--port <port>] [--password <password> | --key <path>] [--secrc|--no-secrc]")
+		fmt.Fprintln(os.Stderr, "Usage: sec ssh init <target> [--host <host>] [--user <user>] [--port <port>] [--password <password> | --key <path> | --import-key <path> [--shred] [--keep-pub] | --key-secret <vault-key>] [--secrc|--no-secrc]")
 		os.Exit(1)
 	}
 
@@ -611,11 +656,15 @@ func handleSSHInit(profile string, args []string) {
 			}
 		}
 
-		if password == "" && keyPath == "" {
-			fmt.Print("  Authentication [1: Password, 2: Key file] (default: 1): ")
+		if password == "" && keyPath == "" && importKeyPath == "" {
+			fmt.Print("  Authentication [1: Password, 2: Key file, 3: Ingest Key into Vault] (default: 1): ")
 			choice, _ := reader.ReadString('\n')
 			choice = strings.TrimSpace(choice)
-			if choice == "2" {
+			if choice == "3" {
+				fmt.Print("  Private Key Path to Ingest: ")
+				kp, _ := reader.ReadString('\n')
+				importKeyPath = strings.TrimSpace(kp)
+			} else if choice == "2" {
 				fmt.Print("  Private Key Path: ")
 				kp, _ := reader.ReadString('\n')
 				keyPath = strings.TrimSpace(kp)
@@ -633,6 +682,40 @@ func handleSSHInit(profile string, args []string) {
 	}
 	if sshUser == "" {
 		sshUser = "root"
+	}
+
+	// Validate and read imported key upfront before modifying vault
+	var importKeyBytes []byte
+	var importKeyType, importKeyFingerprint string
+	if importKeyPath != "" {
+		cleanImportPath := importKeyPath
+		if strings.HasPrefix(cleanImportPath, "~/") {
+			if home, err := os.UserHomeDir(); err == nil {
+				cleanImportPath = filepath.Join(home, strings.TrimPrefix(cleanImportPath, "~/"))
+			}
+		}
+		cleanImportPath = filepath.Clean(cleanImportPath)
+		// #nosec G304 G703
+		b, err := os.ReadFile(cleanImportPath)
+		if err != nil {
+			fail("SSH_KEY_FILE_NOT_FOUND", fmt.Errorf("failed to read SSH private key file %s: %w", importKeyPath, err), "Verify that the file path exists and is readable.")
+		}
+		var signer ssh.Signer
+		if password != "" {
+			signer, err = ssh.ParsePrivateKeyWithPassphrase(b, []byte(password))
+		} else {
+			signer, err = ssh.ParsePrivateKey(b)
+		}
+		if err != nil {
+			if strings.Contains(err.Error(), "passphrase") || strings.Contains(err.Error(), "encrypted") {
+				fail("SSH_KEY_PASSPHRASE_REQUIRED", fmt.Errorf("private key in %s is encrypted with a passphrase: %w", importKeyPath, err), "Pass --password <passphrase> or import with 'sec ssh import-key --passphrase-key'")
+			}
+			fail("INVALID_SSH_KEY", fmt.Errorf("invalid SSH private key in %s: %w", importKeyPath, err), "Ensure the file contains a valid OpenSSH, RSA, ECDSA, or ED25519 private key.")
+		}
+		pubKey := signer.PublicKey()
+		importKeyType = pubKey.Type()
+		importKeyFingerprint = ssh.FingerprintSHA256(pubKey)
+		importKeyBytes = b
 	}
 
 	// Store secrets in profile vault
@@ -660,11 +743,58 @@ func handleSSHInit(profile string, args []string) {
 	saveSecret("port", strconv.Itoa(port), fmt.Sprintf("SSH Port for %s", target), nil)
 
 	passwordKey := ""
-	if password != "" {
+	if password != "" && importKeyPath == "" {
 		passwordKey = basePrefix + "password"
 		saveSecret("password", password, fmt.Sprintf("SSH Password for %s", target), map[string]string{"alias": "SSH_PASSWORD"})
 	}
-	if keyPath != "" {
+
+	if len(importKeyBytes) > 0 {
+		meta := map[string]string{
+			"algorithm":     importKeyType,
+			"fingerprint":   importKeyFingerprint,
+			"imported_at":   time.Now().UTC().Format(time.RFC3339),
+			"imported_from": filepath.Base(importKeyPath),
+		}
+		saveSecret("private_key", string(importKeyBytes), fmt.Sprintf("SSH Private Key for %s (%s)", target, importKeyType), meta)
+
+		if shredKey {
+			cleanImportPath := importKeyPath
+			if strings.HasPrefix(cleanImportPath, "~/") {
+				if home, err := os.UserHomeDir(); err == nil {
+					cleanImportPath = filepath.Join(home, strings.TrimPrefix(cleanImportPath, "~/"))
+				}
+			}
+			cleanImportPath = filepath.Clean(cleanImportPath)
+			if sErr := shredFile(cleanImportPath); sErr != nil {
+				fail("SHRED_FAILED", fmt.Errorf("failed to shred source key file %s: %w", importKeyPath, sErr), "")
+			}
+			fmt.Printf("[✓] Securely shredded source key file: %s\n", importKeyPath)
+
+			if !keepPub {
+				if pErr := shredCompanionPublicKeys(cleanImportPath); pErr != nil {
+					fail("SHRED_FAILED", pErr, "")
+				}
+			}
+		}
+
+		khPath := getKnownHostsPath()
+		if khPath != "" {
+			var cands []string
+			cands = append(cands, target, host)
+			if port != 22 {
+				cands = append(cands, fmt.Sprintf("[%s]:%d", host, port), fmt.Sprintf("[%s]:%d", target, port))
+			}
+			removed, _ := sanitizeKnownHosts(khPath, cands)
+			if removed > 0 {
+				fmt.Printf("[✓] Sanitized %d matching known_hosts entries for target %q\n", removed, target)
+			}
+		}
+	} else if keySecret != "" {
+		if !strings.Contains(keySecret, "/") {
+			keySecret = "ssh/shared/" + keySecret + "/private_key"
+		}
+		saveSecret("key_secret", keySecret, fmt.Sprintf("SSH Shared Key Secret for %s", target), nil)
+	} else if keyPath != "" {
 		saveSecret("key", keyPath, fmt.Sprintf("SSH Key Path for %s", target), nil)
 	}
 
@@ -701,6 +831,7 @@ func handleSSHInit(profile string, args []string) {
 				Port:         port,
 				PasswordKey:  passwordKey,
 				IdentityFile: keyPath,
+				KeySecret:    keySecret,
 			}
 			if data, err := json.MarshalIndent(cfg, "", "  "); err == nil {
 				data = append(data, '\n')
@@ -727,4 +858,561 @@ func validateSSHTargetName(target string) error {
 		}
 	}
 	return store.SecretKey("ssh/" + target).Validate()
+}
+
+func shredFile(path string) error {
+	cleanPath := filepath.Clean(path)
+	// #nosec G703
+	info, err := os.Stat(cleanPath)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return fmt.Errorf("cannot shred directory: %s", cleanPath)
+	}
+	size := info.Size()
+
+	// #nosec G304 G703
+	f, err := os.OpenFile(cleanPath, os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	if size > 0 {
+		// Pass 1: Cryptographically secure random bytes
+		randomBuf := make([]byte, 4096)
+		remaining := size
+		for remaining > 0 {
+			toWrite := int64(len(randomBuf))
+			if remaining < toWrite {
+				toWrite = remaining
+			}
+			if _, err := io.ReadFull(crand.Reader, randomBuf[:toWrite]); err != nil {
+				return fmt.Errorf("failed generating random bytes: %w", err)
+			}
+			if _, err := f.Write(randomBuf[:toWrite]); err != nil {
+				return fmt.Errorf("failed writing random pass: %w", err)
+			}
+			remaining -= toWrite
+		}
+		if err := f.Sync(); err != nil {
+			return fmt.Errorf("failed to sync random pass: %w", err)
+		}
+
+		// Pass 2: Overwrite with all zeros (0x00)
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return fmt.Errorf("failed seeking start: %w", err)
+		}
+		zeroBuf := make([]byte, 4096)
+		remaining = size
+		for remaining > 0 {
+			toWrite := int64(len(zeroBuf))
+			if remaining < toWrite {
+				toWrite = remaining
+			}
+			if _, err := f.Write(zeroBuf[:toWrite]); err != nil {
+				return fmt.Errorf("failed writing zero pass: %w", err)
+			}
+			remaining -= toWrite
+		}
+		if err := f.Sync(); err != nil {
+			return fmt.Errorf("failed to sync zero pass: %w", err)
+		}
+	}
+
+	if err := f.Truncate(0); err != nil {
+		return fmt.Errorf("failed to truncate file: %w", err)
+	}
+	_ = f.Close()
+
+	// #nosec G703
+	return os.Remove(cleanPath)
+}
+
+func shredCompanionPublicKeys(privateKeyPath string) error {
+	cleanPath := filepath.Clean(privateKeyPath)
+	companionFiles := []string{cleanPath + ".pub", cleanPath + "-cert.pub"}
+	for _, pubPath := range companionFiles {
+		// #nosec G703
+		if fi, err := os.Stat(pubPath); err == nil && !fi.IsDir() {
+			if sErr := shredFile(pubPath); sErr != nil {
+				return fmt.Errorf("failed to shred companion public key %s: %w", pubPath, sErr)
+			}
+			fmt.Printf("[✓] Securely shredded companion public key: %s\n", pubPath)
+		}
+	}
+	return nil
+}
+
+func getKnownHostsPath() string {
+	if custom := os.Getenv("SEC_KNOWN_HOSTS_PATH"); custom != "" {
+		return custom
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".ssh", "known_hosts")
+}
+
+func sanitizeKnownHosts(knownHostsPath string, targets []string) (int, error) {
+	if len(targets) == 0 {
+		return 0, nil
+	}
+	cleanPath := filepath.Clean(knownHostsPath)
+	// #nosec G304 G703
+	data, err := os.ReadFile(cleanPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+
+	candidateMap := make(map[string]bool)
+	for _, t := range targets {
+		t = strings.TrimSpace(t)
+		if t != "" {
+			candidateMap[t] = true
+			candidateMap[strings.ToLower(t)] = true
+		}
+	}
+	if len(candidateMap) == 0 {
+		return 0, nil
+	}
+
+	lines := strings.Split(string(data), "\n")
+	var keptLines []string
+	removedCount := 0
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			keptLines = append(keptLines, line)
+			continue
+		}
+
+		fields := strings.Fields(trimmed)
+		if len(fields) < 2 {
+			keptLines = append(keptLines, line)
+			continue
+		}
+
+		hostField := fields[0]
+		if (hostField == "@cert-authority" || hostField == "@revoked") && len(fields) >= 3 {
+			hostField = fields[1]
+		}
+
+		matched := false
+
+		if strings.HasPrefix(hostField, "|1|") {
+			parts := strings.Split(hostField, "|")
+			if len(parts) >= 4 && parts[1] == "1" {
+				saltB64 := parts[2]
+				expectedHash := parts[3]
+				saltBytes, sErr := base64.StdEncoding.DecodeString(saltB64)
+				if sErr == nil {
+					for cand := range candidateMap {
+						// #nosec G505 - required by OpenSSH known_hosts HMAC-SHA1 specification
+						mac := hmac.New(sha1.New, saltBytes)
+						mac.Write([]byte(cand))
+						sumB64 := base64.StdEncoding.EncodeToString(mac.Sum(nil))
+						if sumB64 == expectedHash {
+							matched = true
+							break
+						}
+					}
+				}
+			}
+		} else {
+			subHosts := strings.Split(hostField, ",")
+			for _, sh := range subHosts {
+				sh = strings.TrimSpace(sh)
+				if candidateMap[sh] || candidateMap[strings.ToLower(sh)] {
+					matched = true
+					break
+				}
+			}
+		}
+
+		if matched {
+			removedCount++
+		} else {
+			keptLines = append(keptLines, line)
+		}
+	}
+
+	if removedCount > 0 {
+		newContent := strings.Join(keptLines, "\n")
+		dir := filepath.Dir(cleanPath)
+		tmpFile, err := os.CreateTemp(dir, "known_hosts_sanitize_*")
+		if err != nil {
+			return 0, fmt.Errorf("failed creating temp known_hosts: %w", err)
+		}
+		tmpName := tmpFile.Name()
+		defer func() { _ = os.Remove(tmpName) }()
+
+		if _, err := tmpFile.WriteString(newContent); err != nil {
+			_ = tmpFile.Close()
+			return 0, fmt.Errorf("failed writing sanitized known_hosts: %w", err)
+		}
+		if err := tmpFile.Sync(); err != nil {
+			_ = tmpFile.Close()
+			return 0, fmt.Errorf("failed syncing sanitized known_hosts: %w", err)
+		}
+		if err := tmpFile.Close(); err != nil {
+			return 0, fmt.Errorf("failed closing temp known_hosts: %w", err)
+		}
+
+		// #nosec G302 G703
+		if err := os.Chmod(tmpName, 0600); err != nil {
+			return 0, fmt.Errorf("failed chmod temp known_hosts: %w", err)
+		}
+
+		if err := os.Rename(tmpName, cleanPath); err != nil {
+			return 0, fmt.Errorf("failed replacing known_hosts: %w", err)
+		}
+	}
+
+	oldPath := cleanPath + ".old"
+	if _, err := os.Stat(oldPath); err == nil {
+		_ = os.Remove(oldPath)
+	}
+
+	return removedCount, nil
+}
+
+func handleSSHImportKey(profile string, args []string) {
+	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
+		fmt.Println("Usage: sec ssh import-key [<target> | --shared <name>] <file_path> [--shred] [--keep-pub] [--sanitize | --no-sanitize] [--passphrase-key <key>]")
+		fmt.Println("\nIngest an OpenSSH private key directly into vault memory, record metadata, optionally shred source and companion public key files from disk, and sanitize known_hosts.")
+		return
+	}
+
+	var target, filePath, passphraseKey, sharedName string
+	shred := false
+	keepPub := false
+	doSanitize := true
+
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--shred" {
+			shred = true
+		} else if a == "--keep-pub" {
+			keepPub = true
+		} else if a == "--no-sanitize" {
+			doSanitize = false
+		} else if a == "--sanitize" {
+			doSanitize = true
+		} else if a == "--shared" && i+1 < len(args) {
+			sharedName = args[i+1]
+			i++
+		} else if strings.HasPrefix(a, "--shared=") {
+			sharedName = strings.TrimPrefix(a, "--shared=")
+		} else if a == "--passphrase-key" && i+1 < len(args) {
+			passphraseKey = args[i+1]
+			i++
+		} else if strings.HasPrefix(a, "--passphrase-key=") {
+			passphraseKey = strings.TrimPrefix(a, "--passphrase-key=")
+		} else if !strings.HasPrefix(a, "-") {
+			if target == "" && sharedName == "" {
+				target = a
+			} else if filePath == "" {
+				filePath = a
+			}
+		}
+	}
+
+	if sharedName != "" {
+		if err := validateSSHTargetName(sharedName); err != nil {
+			fail("INVALID_TARGET_NAME", fmt.Errorf("invalid shared key name %q: %w", sharedName, err), "Shared key name must contain only alphanumeric characters, dashes, and underscores.")
+		}
+		target = "shared/" + sharedName
+		doSanitize = false
+	} else {
+		if target == "" || filePath == "" {
+			fail("MISSING_ARGUMENT", fmt.Errorf("both target (or --shared <name>) and <file_path> are required"), "Usage: sec ssh import-key [<target> | --shared <name>] <file_path> [--shred] [--keep-pub] [--sanitize | --no-sanitize] [--passphrase-key <key>]")
+		}
+		if err := validateSSHTargetName(target); err != nil {
+			fail("INVALID_TARGET_NAME", fmt.Errorf("invalid SSH target name %q: %w", target, err), "Target name must contain only alphanumeric characters, dashes, and underscores.")
+		}
+	}
+
+	if filePath == "" {
+		fail("MISSING_ARGUMENT", fmt.Errorf("file path is required"), "Usage: sec ssh import-key [<target> | --shared <name>] <file_path> [--shred] [--keep-pub] [--sanitize | --no-sanitize] [--passphrase-key <key>]")
+	}
+
+	cleanPath := filePath
+	if strings.HasPrefix(cleanPath, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			cleanPath = filepath.Join(home, strings.TrimPrefix(cleanPath, "~/"))
+		}
+	}
+	cleanPath = filepath.Clean(cleanPath)
+
+	// #nosec G304 G703
+	keyBytes, err := os.ReadFile(cleanPath)
+	if err != nil {
+		fail("SSH_KEY_FILE_NOT_FOUND", fmt.Errorf("failed to read SSH private key file %s: %w", filePath, err), "Verify that the file path exists and is readable.")
+	}
+
+	passphrase := ""
+	if passphraseKey != "" {
+		resp, err := queryDaemon(profile, daemon.IPCRequest{
+			Action: "get",
+			Path:   passphraseKey,
+		})
+		if err != nil {
+			failDaemonNotRunning(profile)
+		}
+		if !resp.Success {
+			code, rem := mapDaemonError(resp.Error)
+			fail(code, fmt.Errorf("failed to read passphrase key %q from vault: %s", passphraseKey, resp.Error), rem)
+		}
+		passphrase = resp.Value
+	}
+
+	var signer ssh.Signer
+	if passphrase != "" {
+		signer, err = ssh.ParsePrivateKeyWithPassphrase(keyBytes, []byte(passphrase))
+	} else {
+		signer, err = ssh.ParsePrivateKey(keyBytes)
+	}
+
+	if err != nil {
+		if strings.Contains(err.Error(), "passphrase") || strings.Contains(err.Error(), "encrypted") {
+			fail("SSH_KEY_PASSPHRASE_REQUIRED", fmt.Errorf("private key in %s is encrypted with a passphrase: %w", filePath, err), "Pass --passphrase-key <vault-key-containing-passphrase>")
+		}
+		fail("INVALID_SSH_KEY", fmt.Errorf("invalid SSH private key in %s: %w", filePath, err), "Ensure the file contains a valid OpenSSH, RSA, ECDSA, or ED25519 private key.")
+	}
+
+	pubKey := signer.PublicKey()
+	keyType := pubKey.Type()
+	fingerprint := ssh.FingerprintSHA256(pubKey)
+
+	metadata := map[string]string{
+		"algorithm":     keyType,
+		"fingerprint":   fingerprint,
+		"imported_at":   time.Now().UTC().Format(time.RFC3339),
+		"imported_from": filepath.Base(filePath),
+	}
+
+	vaultPath := "ssh/" + target + "/private_key"
+	req := daemon.IPCRequest{
+		Action:   "set",
+		Path:     vaultPath,
+		Value:    string(keyBytes),
+		Comment:  fmt.Sprintf("SSH Private Key for %s (%s)", target, keyType),
+		Metadata: metadata,
+	}
+
+	resp, err := queryDaemon(profile, req)
+	if err != nil {
+		failDaemonNotRunning(profile)
+	}
+	if !resp.Success {
+		code, rem := mapDaemonError(resp.Error)
+		fail(code, fmt.Errorf("failed to store private key into vault: %s", resp.Error), rem)
+	}
+
+	fmt.Printf("✅ Imported SSH private key for %q into vault (%s, %s)\n", target, keyType, fingerprint)
+
+	// Post-commit Phase 2: Shredding (guaranteed only after successful vault commit)
+	if shred {
+		if sErr := shredFile(cleanPath); sErr != nil {
+			fail("SHRED_FAILED", fmt.Errorf("failed to shred source key file %s: %w", filePath, sErr), "Ensure the file is writable and not locked.")
+		}
+		fmt.Printf("[✓] Securely shredded source key file: %s\n", filePath)
+
+		if !keepPub {
+			if pErr := shredCompanionPublicKeys(cleanPath); pErr != nil {
+				fail("SHRED_FAILED", pErr, "Ensure the companion public key file is writable and not locked.")
+			}
+		}
+	}
+
+	// Host sanitization
+	if doSanitize {
+		var candidates []string
+		candidates = append(candidates, target)
+
+		if hResp, err := queryDaemon(profile, daemon.IPCRequest{Action: "get", Path: "ssh/" + target + "/host"}); err == nil && hResp.Success && hResp.Value != "" {
+			host := strings.TrimSpace(hResp.Value)
+			candidates = append(candidates, host)
+			port := 22
+			if pResp, err := queryDaemon(profile, daemon.IPCRequest{Action: "get", Path: "ssh/" + target + "/port"}); err == nil && pResp.Success && pResp.Value != "" {
+				if p, pErr := strconv.Atoi(strings.TrimSpace(pResp.Value)); pErr == nil && p > 0 {
+					port = p
+				}
+			}
+			if port != 22 {
+				candidates = append(candidates, fmt.Sprintf("[%s]:%d", host, port))
+				candidates = append(candidates, fmt.Sprintf("[%s]:%d", target, port))
+			}
+		} else {
+			cfgFile := findWorkspaceConfigFile()
+			if cfgFile != "" {
+				var cfg WorkspaceConfig
+				// #nosec G304 G703
+				if data, err := os.ReadFile(cfgFile); err == nil {
+					_ = json.Unmarshal(data, &cfg)
+					if tCfg, ok := cfg.SSHTargets[target]; ok && tCfg.Host != "" {
+						candidates = append(candidates, tCfg.Host)
+						if tCfg.Port > 0 && tCfg.Port != 22 {
+							candidates = append(candidates, fmt.Sprintf("[%s]:%d", tCfg.Host, tCfg.Port))
+							candidates = append(candidates, fmt.Sprintf("[%s]:%d", target, tCfg.Port))
+						}
+					}
+				}
+			}
+		}
+
+		khPath := getKnownHostsPath()
+		if khPath != "" {
+			removed, sErr := sanitizeKnownHosts(khPath, candidates)
+			if sErr == nil && removed > 0 {
+				fmt.Printf("[✓] Sanitized %d matching known_hosts entries for target %q\n", removed, target)
+			}
+		}
+	}
+}
+
+func handleSSHSanitize(profile string, args []string) {
+	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
+		fmt.Println("Usage: sec ssh sanitize [<target>] [--all]")
+		fmt.Println("\nScrub target hostnames, IPs, and HMAC-SHA1 hashed entries from ~/.ssh/known_hosts.")
+		return
+	}
+
+	var target string
+	allTargets := false
+
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--all" {
+			allTargets = true
+		} else if !strings.HasPrefix(a, "-") && target == "" {
+			target = a
+		}
+	}
+
+	if target == "" && !allTargets {
+		fail("MISSING_ARGUMENT", fmt.Errorf("specify a <target> or pass --all"), "Usage: sec ssh sanitize [<target>] [--all]")
+	}
+
+	var candidates []string
+	candidateSet := make(map[string]bool)
+
+	addCandidate := func(c string) {
+		c = strings.TrimSpace(c)
+		if c != "" && !candidateSet[c] {
+			candidateSet[c] = true
+			candidates = append(candidates, c)
+		}
+	}
+
+	if allTargets {
+		resp, err := queryDaemon(profile, daemon.IPCRequest{
+			Action: "list",
+		})
+		targetNames := make(map[string]bool)
+		if err == nil && resp.Success {
+			var keys []string
+			if err := json.Unmarshal([]byte(resp.Value), &keys); err == nil {
+				for _, k := range keys {
+					if strings.HasPrefix(k, "ssh/") {
+						parts := strings.Split(strings.TrimPrefix(k, "ssh/"), "/")
+						if len(parts) >= 2 && parts[0] != "hosts" && parts[0] != "shared" {
+							targetNames[parts[0]] = true
+						}
+					}
+				}
+			}
+		}
+
+		cfgFile := findWorkspaceConfigFile()
+		if cfgFile != "" {
+			var cfg WorkspaceConfig
+			// #nosec G304 G703
+			if data, err := os.ReadFile(cfgFile); err == nil {
+				_ = json.Unmarshal(data, &cfg)
+				for tName := range cfg.SSHTargets {
+					targetNames[tName] = true
+				}
+			}
+		}
+
+		for tName := range targetNames {
+			addCandidate(tName)
+			host := ""
+			port := 22
+			if hResp, err := queryDaemon(profile, daemon.IPCRequest{Action: "get", Path: "ssh/" + tName + "/host"}); err == nil && hResp.Success && hResp.Value != "" {
+				host = strings.TrimSpace(hResp.Value)
+			}
+			if pResp, err := queryDaemon(profile, daemon.IPCRequest{Action: "get", Path: "ssh/" + tName + "/port"}); err == nil && pResp.Success && pResp.Value != "" {
+				if p, pErr := strconv.Atoi(strings.TrimSpace(pResp.Value)); pErr == nil && p > 0 {
+					port = p
+				}
+			}
+			if host != "" {
+				addCandidate(host)
+				if port != 22 {
+					addCandidate(fmt.Sprintf("[%s]:%d", host, port))
+					addCandidate(fmt.Sprintf("[%s]:%d", tName, port))
+				}
+			}
+		}
+	} else {
+		addCandidate(target)
+		host := ""
+		port := 22
+		if hResp, err := queryDaemon(profile, daemon.IPCRequest{Action: "get", Path: "ssh/" + target + "/host"}); err == nil && hResp.Success && hResp.Value != "" {
+			host = strings.TrimSpace(hResp.Value)
+		}
+		if pResp, err := queryDaemon(profile, daemon.IPCRequest{Action: "get", Path: "ssh/" + target + "/port"}); err == nil && pResp.Success && pResp.Value != "" {
+			if p, pErr := strconv.Atoi(strings.TrimSpace(pResp.Value)); pErr == nil && p > 0 {
+				port = p
+			}
+		}
+		if host == "" {
+			cfgFile := findWorkspaceConfigFile()
+			if cfgFile != "" {
+				var cfg WorkspaceConfig
+				// #nosec G304 G703
+				if data, err := os.ReadFile(cfgFile); err == nil {
+					_ = json.Unmarshal(data, &cfg)
+					if tCfg, ok := cfg.SSHTargets[target]; ok {
+						host = tCfg.Host
+						if tCfg.Port > 0 {
+							port = tCfg.Port
+						}
+					}
+				}
+			}
+		}
+		if host != "" {
+			addCandidate(host)
+			if port != 22 {
+				addCandidate(fmt.Sprintf("[%s]:%d", host, port))
+				addCandidate(fmt.Sprintf("[%s]:%d", target, port))
+			}
+		}
+	}
+
+	khPath := getKnownHostsPath()
+	if khPath == "" {
+		fail("SSH_KNOWN_HOSTS_NOT_FOUND", fmt.Errorf("could not determine user home directory for known_hosts"), "")
+	}
+
+	removed, err := sanitizeKnownHosts(khPath, candidates)
+	if err != nil {
+		fail("SANITIZE_FAILED", fmt.Errorf("failed to sanitize known_hosts: %w", err), "")
+	}
+
+	targetDesc := target
+	if allTargets {
+		targetDesc = "all targets"
+	}
+	fmt.Printf("[✓] Sanitized %d known_hosts entries for %s from %s\n", removed, targetDesc, khPath)
 }

@@ -1764,6 +1764,7 @@ func handleWhich(profile string, args []string) {
 		fail("INVALID_PATH", fmt.Errorf("invalid path %q: %w", startDir, err), "")
 	}
 
+	// #nosec G703
 	fi, err := os.Stat(absDir)
 	if err != nil {
 		fail("PATH_NOT_FOUND", fmt.Errorf("path does not exist: %s", absDir), "")

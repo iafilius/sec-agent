@@ -103,8 +103,9 @@ func resolveTempFileTarget(profile string, envKey, target string, wsCfg *Workspa
 
 	// 3. Template file on disk
 	cleaned := filepath.Clean(target)
+	// #nosec G703
 	if fileInfo, statErr := os.Stat(cleaned); statErr == nil && !fileInfo.IsDir() {
-		// #nosec G304
+		// #nosec G304 G703
 		tmplBytes, rErr := os.ReadFile(cleaned)
 		if rErr != nil {
 			return "", fmt.Errorf("failed to read template file %s: %w", cleaned, rErr)

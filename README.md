@@ -28,6 +28,8 @@ It functions similarly to `ssh-agent` or `gpg-agent`, but is engineered specific
 | 🔑 **Two-Tier Secret Metadata** | Separate concise summaries from multiline notes, inspectable via CLI or JSON, with interactive `$EDITOR` editing. | `sec describe` / `sec edit-notes` |
 | 📄 **Cross-Profile Template Streaming** | Interpolate mustache `{{key}}` and cross-profile `{{@env:key}}` templates from files or stdin in memory. | `sec stream <file>` |
 | 🛡️ **Git Pre-Commit Privacy Guard** | Staged file scanner combining Shannon entropy analysis and active vault exact-match leak detection. | `sec githook install / check` |
+| 🔍 **Hybrid Workspace Security Scanner** | Multi-engine plaintext scanner (`sec-native` + Homebrew `gitleaks`/`trufflehog`) with a 3-Tier Integration Action List. | `sec scan [path] [--json]` |
+| 🕵️ **Zero-Trace Script Runner & Backups** | Execute vault-stored scripts over stdin pipes and run stealth multi-folder `rsync` backups with zero `ps aux` or history leaks. | `sec exec` / `sec backup run` |
 | 🤖 **Autonomous AI Coding Partner** | Turn-1 biometric protocol, dual-audience diagnostics, and bundled Agent Skill for Antigravity & IDEs. | `sec skill install / update` |
 | 🖥️ **Hardened Web UI & Desktop App** | Local Web UI (`127.0.0.1:9876`) with single-tab `BroadcastChannel` binding and direct in-browser Touch ID. | `sec gui` / `SecAgent.app` |
 
@@ -47,13 +49,54 @@ In modern software development, hardcoding credentials in local `.env` files is 
 
 Most secret management tools (Vault, Doppler, SOPS, 1Password CLI) suffer from the **"Secret Zero" Paradox**: to pull your encrypted secrets, they require a plaintext **API token**, **private key file**, or **bootstrap certificate** stored on your disk. They simply shift the vulnerability from a database password to a key file.
 
+```mermaid
+flowchart LR
+    accTitle: The Secret Zero Paradox: Traditional Secret Managers versus sec-agent Secure Enclave Model
+    accDescr {
+        Comparison diagram with two horizontal tracks.
+        Track 1 (Traditional Tools like Vault, Doppler, SOPS, 1Password CLI): A Secret Vault relies on a Plaintext Token or Key File stored on disk, which can be stolen by a local script, infostealer malware, or remote SSH attacker.
+        Track 2 (sec-agent Secure Enclave Model): An Encrypted Store is sealed by a master key inside the Apple Silicon Secure Enclave Hardware Chip, gated by the physical Touch ID Finger Sensor, keeping credentials hardware-locked with zero plaintext files on disk.
+    }
+
+    subgraph Traditional["❌ Traditional CLI Secret Tools (Vault, Doppler, SOPS, 1Password CLI)"]
+        direction LR
+        T1["🗄️ Secret Vault"] --> T2["📄 Plaintext Token / Key File on Disk"]
+        T2 --> T3["🚨 STOLEN BY ATTACKER / LOCAL SCRIPT"]
+    end
+
+    subgraph SecAgent["✅ sec-agent (Apple Silicon Secure Enclave Model)"]
+        direction LR
+        S1["🔐 Encrypted Store (secrets.enc)"] --> S2["🔒 macOS Secure Enclave Chip"]
+        S2 --> S3["👆 Touch ID Finger Sensor"]
+        S3 --> S4["🛡️ HARDWARE LOCKED IN RAM"]
+    end
+
+    classDef danger fill:#4a151b,stroke:#f85149,stroke-width:2px,color:#ffdcd7
+    classDef warn fill:#3b2300,stroke:#d29922,stroke-width:2px,color:#fef3c7
+    classDef safe fill:#064e3b,stroke:#10b981,stroke-width:2px,color:#d1fae5
+    classDef enclave fill:#1e293b,stroke:#38bdf8,stroke-width:2px,color:#e0f2fe
+
+    class T1,T2 warn
+    class T3 danger
+    class S1,S2,S3 enclave
+    class S4 safe
 ```
+
+<details>
+<summary>♿ <b>Accessible Text Walkthrough & Terminal ASCII Diagram (Screen Readers / Plain-Text View)</b></summary>
+
+**Screen-Reader Linear Summary:**
+1. **Traditional Tools Vulnerability**: Tools like Vault, Doppler, SOPS, and 1Password CLI require a bootstrap token, session file, or private key file on disk to authenticate. Any local malware or remote SSH attacker can read that plaintext file directly from the filesystem.
+2. **`sec-agent` Enclave Solution**: `sec-agent` stores zero plaintext key files on disk. The master key is sealed inside the Apple Silicon Secure Enclave chip and requires physical finger contact on the Touch ID sensor to unlock secrets in memory.
+
+```text
 TRADITIONAL TOOLS (Vault, Doppler, SOPS, 1Password CLI)
 [ Secret Vault ] ──▶ [ Plaintext Token / Key File on Disk ] ──▶ ❌ STOLEN BY ATTACKER / LOCAL SCRIPT
 
 SEC-AGENT (Secure Enclave Model)
 [ Encrypted Store ] ──▶ [ macOS Secure Enclave Hardware Chip ] ──▶ [ Touch ID Finger Sensor ] ──▶ ✅ HARDWARE LOCKED
 ```
+</details>
 
 * **No Plaintext Keys on Disk**: Zero secret key files, API tokens, or certificates sit anywhere on your filesystem.
 * **Hardware-Anchored Silicon Storage**: Master keys are generated and sealed inside the **macOS Secure Enclave**. The master key never touches the disk.
@@ -65,6 +108,61 @@ SEC-AGENT (Secure Enclave Model)
 ## 🔒 Security Architecture
 
 `sec-agent` is built on a **secure-by-design** model to prevent credential leakage:
+
+```mermaid
+flowchart TD
+    accTitle: sec-agent Secure Enclave Biometric Hardware Trap and Dual-Slot Recovery Architecture
+    accDescr {
+        Flowchart illustrating how sec-agent defends against local account takeover when an attacker or rogue administrator resets the macOS login password and enrolls a new fingerprint.
+        The Apple Silicon Secure Enclave detects the biometric database change via kSecAccessControlBiometryCurrentSet and immediately destroys the Slot 0 Master Key in hardware.
+        When the attacker taps Touch ID, access is denied because the hardware key was erased.
+        Access can only be restored by the legitimate owner entering the offline 24-word BIP39 paper seed phrase via Slot 1 Argon2id key derivation.
+    }
+
+    subgraph Threat["⚠️ Threat Vector: Local Account / Admin Takeover"]
+        A["🕵️ Attacker / Rogue Sysadmin<br/>Resets macOS Password & Enrolls New Fingerprint"]
+    end
+
+    subgraph HardwareTrap["🔒 Apple Silicon Secure Enclave Biometric Hardware Trap"]
+        B["🛡️ kSecAccessControlBiometryCurrentSet Triggered"]
+        C["🔥 Slot 0 Master Key Destroyed<br/>(Hardware Key Permanently Erased)"]
+        D["👆 Touch ID Tap by Attacker"]
+        E["❌ ACCESS DENIED<br/>(errSecItemNotFound — Vault Remains Sealed)"]
+    end
+
+    subgraph OfflineRecovery["🌱 Slot 1: Legitimate Owner Offline Seed Recovery"]
+        F["📜 Recovery Only via Offline Seed<br/>(User Enters 24-Word Paper BIP39 Mnemonic)"]
+        G["🔑 Argon2id KDF Unwraps Slot 1<br/>(m=64MB, t=3, p=4)"]
+        H["✅ ACCESS RESTORED FOR OWNER<br/>(Re-Sealed to Owner's Touch ID)"]
+    end
+
+    A --> B
+    B -->|"Enclave Auto-Purge"| C
+    B -->|"Attacker Tries Sensor"| D
+    C --> E
+    D --> E
+    E -.->|"Cannot Bypass Without Paper Seed"| F
+    F --> G --> H
+
+    classDef threatNode fill:#4a151b,stroke:#f85149,stroke-width:2px,color:#ffdcd7
+    classDef trapNode fill:#1e293b,stroke:#f59e0b,stroke-width:2px,color:#fef3c7
+    classDef denyNode fill:#581c1c,stroke:#ef4444,stroke-width:2px,color:#fecaca
+    classDef recoverNode fill:#064e3b,stroke:#10b981,stroke-width:2px,color:#d1fae5
+
+    class A threatNode
+    class B,C,D trapNode
+    class E denyNode
+    class F,G,H recoverNode
+```
+
+<details>
+<summary>♿ <b>Accessible Text Walkthrough & Terminal ASCII Diagram (Screen Readers / Plain-Text View)</b></summary>
+
+**Screen-Reader Linear Summary:**
+1. **Threat Event**: An attacker or system administrator resets the macOS account password and enrolls a new fingerprint in System Settings.
+2. **Enclave Hardware Trap (`kSecAccessControlBiometryCurrentSet`)**: The Secure Enclave hardware detects that the biometric fingerprint set was modified and permanently destroys the `Slot 0` master key.
+3. **Access Denied**: When the attacker taps the Touch ID sensor, hardware decryption fails with `errSecItemNotFound`, blocking access.
+4. **Offline Seed Recovery (`Slot 1`)**: Only the legitimate owner holding the physical 24-word BIP39 paper seed phrase can run `sec session recover` (using Argon2id KDF) to unwrap `Slot 1` and restore access.
 
 ```text
                                 [ ATTACKER / SYSADMIN ]
@@ -93,6 +191,7 @@ SEC-AGENT (Secure Enclave Model)
                                            ▼
                           [ ACCESS RESTORED FOR OWNER ]
 ```
+</details>
 
 * **v2.0 Dual-Slot Vault Envelope**: `sec-agent` utilizes a LUKS-style dual key-slot envelope (`VaultEnvelope`):
   * **Slot 0 (Daily Biometric Slot)**: Master key protected in macOS Keychain under `kSecAccessControlBiometryCurrentSet`. Unlocks instantly with a Touch ID tap (zero passwords typed).
@@ -155,7 +254,53 @@ make test
 
 `sec-agent` features a local, zero-friction **Hardened Web UI** served directly from the local loopback (`http://127.0.0.1:9876`). It can be launched via the CLI (`sec-agent gui`) or directly from macOS Finder as a standalone native application bundle (**`/Applications/SecAgent.app`**).
 
+```mermaid
+flowchart TD
+    accTitle: Hardened Web Browser GUI Architecture and Single-Tab Session Binding
+    accDescr {
+        Architecture diagram showing how the sec-agent gui local HTTP server on 127.0.0.1:9876 protects the browser session.
+        The Primary Browser Tab maintains an active BroadcastChannel and session heartbeat, receiving authenticated access.
+        Any Secondary or External Tab attempting to hijack or paste the URL is blocked with a 403 Forbidden Tab Lock response.
+        The local HTTP server uses ephemeral RAM-only session tokens and communicates directly with the macOS Secure Enclave and Keychain for in-process Touch ID biometric unlock.
+    }
+
+    subgraph Browser["🌐 Browser Window Isolation (BroadcastChannel & Heartbeat)"]
+        Tab1["🟢 Primary Browser Tab<br/>(Active Session Heartbeat)"]
+        Tab2["🔴 Secondary / External Tab<br/>(Hijack or Pasted URL)"]
+    end
+
+    subgraph Server["🖥️ `sec-agent gui` Loopback Server (127.0.0.1:9876)"]
+        GUI["🛡️ Hardened Local HTTP Engine<br/>• Single-Tab Binding via BroadcastChannel & Heartbeat<br/>• Ephemeral RAM-Only Session Tokens (Zero Disk Storage)<br/>• Direct In-Process Touch ID Biometric Unlock<br/>• Pre-Launch Listener Auto-Cleanup (Zero Stale Port Conflicts)"]
+    end
+
+    subgraph Silicon["🔒 Hardware Security Boundary"]
+        Enclave["🍏 macOS Secure Enclave + Keychain"]
+    end
+
+    Tab1 -->|"✅ Authenticated Session"| GUI
+    Tab2 -.->|"❌ 403 Forbidden: Tab Lock Active"| GUI
+    GUI -->|"LocalAuthentication Touch ID"| Enclave
+
+    classDef activeTab fill:#064e3b,stroke:#10b981,stroke-width:2px,color:#d1fae5
+    classDef blockedTab fill:#4a151b,stroke:#f85149,stroke-width:2px,color:#ffdcd7
+    classDef serverBox fill:#1e293b,stroke:#38bdf8,stroke-width:2px,color:#e0f2fe
+    classDef enclaveBox fill:#312e81,stroke:#818cf8,stroke-width:2px,color:#e0e7ff
+
+    class Tab1 activeTab
+    class Tab2 blockedTab
+    class GUI serverBox
+    class Enclave enclaveBox
 ```
+
+<details>
+<summary>♿ <b>Accessible Text Walkthrough & Terminal ASCII Diagram (Screen Readers / Plain-Text View)</b></summary>
+
+**Screen-Reader Linear Summary:**
+1. **Primary Browser Tab**: Establishes an active `BroadcastChannel` and heartbeat lock with the local loopback server (`127.0.0.1:9876`).
+2. **Secondary / Hijack Tab Blocked**: Any secondary browser tab or external window attempting to open the GUI URL while the primary tab is active immediately receives `403 Forbidden: Tab Lock Active`.
+3. **Ephemeral RAM Server & Enclave**: The `sec-agent gui` server keeps session tokens strictly in RAM and invokes macOS `LocalAuthentication` Touch ID directly against the Apple Silicon Secure Enclave and Keychain.
+
+```text
 ┌───────────────────────────────────────────────────────────────────────────────┐
 │                     HARDENED WEB BROWSER GUI ARCHITECTURE                     │
 ├───────────────────────────────────────────────────────────────────────────────┤
@@ -182,6 +327,7 @@ make test
 │                    └───────────────────────────────────┘                      │
 └───────────────────────────────────────────────────────────────────────────────┘
 ```
+</details>
 
 ### 🛡️ Web UI Security Architecture
 
@@ -335,14 +481,25 @@ sec copy wifi/passphrase router/wifi_passphrase --from-profile default --to-prof
 eval $(sec open)
 ```
 
-### 8. Global Workstation Status & Entropy Linter
-Single-pane-of-glass status dump and side-channel safe entropy audit:
+### 8. Global Workstation Status, Entropy Linter & Hybrid Security Scanner (`sec scan`)
+Single-pane-of-glass status dump, side-channel safe entropy audit, and multi-engine plaintext credential scanner (`sec-native` + Homebrew `gitleaks` / `trufflehog`) with a 3-Tier Integration Feasibility Advisor:
 ```bash
 # Global status matrix across all vault profiles & background daemons
 sec status --all
 
 # Side-channel safe password entropy & weakness scan
 sec check --scan-weak
+
+# Scan a workspace, directory, or home folder (~) for plaintext credentials
+sec scan .
+sec scan ~
+
+# Export a machine-readable Security Improvement Action List for automated processing
+sec scan . --output .sec-audit-actions.json
+sec scan . --json
+
+# Deep scan with Git commit history, live verification, and automatic Homebrew tool installation
+sec scan . --git-history --deep --verify-live --install-tools
 ```
 
 ### 9. Lock Session
@@ -414,6 +571,46 @@ Place a `.secignore` file in your project root to suppress harmless template fil
 *.tmpl
 **/*.secret.template
 ```
+
+### 14. Zero-Trace Command Execution (`sec exec`)
+Store sensitive shell commands or multi-line operational scripts inside the encrypted vault (`exec/<name>`) and execute them over an in-memory stdin pipe into `/bin/sh -s` with `NoTrace: true`—leaving zero traces in `.zsh_history`, temporary files on disk, `ps aux` wrapper arguments, or `~/.config/sec-agent/audit.log`:
+```bash
+# Save a command or script into exec/<name> inside the encrypted vault
+echo 'rsync -a ~/Documents backup@host:/vol/docs' | sec exec save daily-sync --stdin
+
+# List, inspect, or remove stored executable scripts
+sec exec list
+sec exec show daily-sync
+sec exec rm daily-sync
+
+# Execute a stored script in memory (optionally forwarding positional arguments)
+sec exec daily-sync
+sec exec daily-sync -- --dry-run --verbose
+```
+
+### 15. Stealth Multi-Folder `rsync` Backups (`sec backup`)
+Configure and run multi-folder `rsync` backups over `sec-agent`'s pure-Go SSH transport without exposing folder names, remote volume paths, usernames, or IP addresses on the local host:
+```bash
+# Initialize a stealth backup job stored in backup/<name> inside the vault
+sec backup init work --target backup@10.0.0.50 --local-base ~ --remote-base /Volumes/BackupDrive/Work
+
+# Add one or more relative folders (supporting spaces and custom excludes)
+sec backup add-folder work "CloudFolder - Work"
+
+# View backup job configuration or list all backup jobs
+sec backup show work
+sec backup jobs
+
+# Run all folders in the backup job (or filter to a specific folder, with optional --tofu)
+sec backup run work
+sec backup run work "CloudFolder - Work" --tofu
+```
+* **5 Zero-Trace Guarantees**:
+  1. **Zero `.zsh_history` Exposure**: Only `sec backup run <name>` is typed in the shell.
+  2. **Zero Local `ps aux` Exposure**: Local `rsync` runs in working directory `.` with `--exclude-from=/dev/fd/3` and `-e "sec ssh-stdio" . sync:target`, while `sec-agent` rewrites the remote `rsync --server` command over the encrypted Go SSH channel.
+  3. **Automatic "One Level Higher" Naming Derivation**: Inside `remote_base`, `sec-agent` automatically derives `<remote_base>/<folder>/`, `<remote_base>/<Prefix>-History/<YYYY-MM-DD>`, and `<remote_base>/rsync_<slug>_<YYYY-MM-DD_HHMM>.log`.
+  4. **Diskless SSH Authentication**: Uses `golang.org/x/crypto/ssh` in Go memory with `ssh/<target>/password` or `ssh/<target>/private_key` and vault-pinned host fingerprints (zero `~/.ssh/known_hosts` or disk key files).
+  5. **Daemon `NoTrace` Audit Suppression**: `~/.config/sec-agent/audit.log` and `secrets.enc` `mtime` remain untouched during execution.
 
 ---
 

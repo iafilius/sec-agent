@@ -170,12 +170,18 @@ func TestShellCompletionOutput(t *testing.T) {
 		if !strings.Contains(out, "env") {
 			t.Errorf("expected shell completion for %s to contain 'env', got:\n%s", shell, out)
 		}
-		for _, cmd := range []string{"pipe", "describe", "edit-notes", "which", "enroll-recovery"} {
+		for _, cmd := range []string{"pipe", "describe", "edit-notes", "which", "enroll-recovery", "scan", "exec", "backup", "add-folder"} {
 			if !strings.Contains(out, cmd) {
 				t.Errorf("expected shell completion for %s to contain command %q, got:\n%s", shell, cmd, out)
 			}
 		}
 		if shell == "fish" {
+			if !strings.Contains(out, "-l remote-base") {
+				t.Errorf("expected shell completion for fish to contain '-l remote-base', got:\n%s", out)
+			}
+			if !strings.Contains(out, "-l install-tools") || !strings.Contains(out, "-l verify-live") {
+				t.Errorf("expected shell completion for fish to contain '-l install-tools' and '-l verify-live', got:\n%s", out)
+			}
 			if !strings.Contains(out, "-l repair") {
 				t.Errorf("expected shell completion for fish to contain '-l repair', got:\n%s", out)
 			}
@@ -213,6 +219,9 @@ func TestShellCompletionOutput(t *testing.T) {
 				t.Errorf("expected shell completion for fish to contain '-l tofu', got:\n%s", out)
 			}
 		} else {
+			if !strings.Contains(out, "--install-tools") || !strings.Contains(out, "--verify-live") {
+				t.Errorf("expected shell completion for %s to contain '--install-tools' and '--verify-live', got:\n%s", shell, out)
+			}
 			if !strings.Contains(out, "--repair") {
 				t.Errorf("expected shell completion for %s to contain '--repair', got:\n%s", shell, out)
 			}
@@ -245,6 +254,9 @@ func TestShellCompletionOutput(t *testing.T) {
 			}
 			if !strings.Contains(out, "--no-trace") {
 				t.Errorf("expected shell completion for %s to contain '--no-trace', got:\n%s", shell, out)
+			}
+			if !strings.Contains(out, "--remote-base") {
+				t.Errorf("expected shell completion for %s to contain '--remote-base', got:\n%s", shell, out)
 			}
 			if !strings.Contains(out, "--tofu") {
 				t.Errorf("expected shell completion for %s to contain '--tofu', got:\n%s", shell, out)
@@ -327,9 +339,10 @@ var recognizedFlagAliases = map[string]map[string]bool{
 		"--show": true, // Backwards-compatible alias for --raw
 	},
 	"check": {
-		"--scan-leaks":   true, // Alias for --leaks
-		"--history":      true, // Alias for --leaks
-		"--scan-scripts": true, // Alias for --scripts
+		"--scan-workspace": true, // Alias for --scan
+		"--scan-leaks":     true, // Alias for --leaks
+		"--history":        true, // Alias for --leaks
+		"--scan-scripts":   true, // Alias for --scripts
 	},
 	"set": {
 		"--description": true, // Alias for --desc
@@ -353,6 +366,12 @@ var recognizedFlagAliases = map[string]map[string]bool{
 	},
 	"ls": {
 		"--audit-hygiene": true, // Alias for --hygiene
+	},
+	"backup": {
+		"--key-secret":      true, // Alias for --ssh-key-secret
+		"--trust-first-use": true, // Alias for --tofu
+		"--no-verify":       true, // Alias for --insecure
+		"--update-host-key": true, // Host key update flag
 	},
 }
 
@@ -650,6 +669,3 @@ func TestCommandRegistryFlagExecution(t *testing.T) {
 		}
 	})
 }
-
-
-

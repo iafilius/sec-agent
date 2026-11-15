@@ -116,17 +116,37 @@ Connects to remote hosts using credentials stored in the active vault. Defaults 
 *   `--insecure` / `--no-verify`: Connects without verifying or mutating vault host key fingerprints (skips TOFU and mismatch checks).
 *   `--update-host-key`: Replaces existing vault-pinned fingerprint with the newly presented host key fingerprint.
 
+#### `sec ssh import-key [<target>] <file_path> [--shred] [--keep-pub] [--sanitize | --no-sanitize] [--shared <name>] [--passphrase-key <vault-key>]`
+Ingests an OpenSSH/PEM private key directly into vault storage (`ssh/<target>/private_key` or `ssh/shared/<name>/private_key`) with algorithm, fingerprint, and source metadata.
+*   `--shred`: Overwrites source file with pseudo-random bytes and zeros via `f.Sync()` before unlinking. Automatically detects and multi-pass shreds companion `<file_path>.pub` and `<file_path>-cert.pub` files if present. Strictly aborts if key validation or vault IPC write fails, preserving all source and companion files intact.
+*   `--keep-pub`: Preserves companion public key files on disk when `--shred` is active.
+*   `--shared <name>`: Ingests a shared administrative deployment key into `ssh/shared/<name>/private_key` (skipping target host sanitization).
+*   `--sanitize` / `--no-sanitize`: Sanitizes target host/IP from workstation `~/.ssh/known_hosts` (enabled by default; pass `--no-sanitize` to keep).
+*   `--passphrase-key <vault-key>`: Vault path containing passphrase for encrypted private keys.
+
+#### `sec ssh sanitize [<target>] [--all]`
+Scrubs target hostnames, IPs, and port variants from workstation `~/.ssh/known_hosts` across both cleartext lines and HMAC-SHA1 hashed entries (`|1|<salt>|<hash>`), and automatically removes lingering `~/.ssh/known_hosts.old` backups.
+*   `--all`: Discovers and scrubs all SSH targets registered across the active vault profile and workspace `.secrc`.
+
 #### `sec ssh host-key show <target>`
 Displays the pinned SHA-256 host public key fingerprint stored in the active vault under `ssh/<target>/host_fingerprint`.
 
 #### `sec ssh reset-host-key <target>`
 Removes the pinned host key fingerprint secret from the vault to reset TOFU trust after remote host re-installation.
 
-#### `sec ssh init <target> --host <host> --user <user> [--port <port>] [--password <pass> | --key <path> | --key-secret <vault-key>]`
-Interactively configures a named SSH target and persists configuration to `.secrc` and vault storage.
+#### `sec ssh init <target> --host <host> --user <user> [--port <port>] [--password <pass> | --key <path> | --import-key <path> [--shred] [--keep-pub] | --key-secret <vault-path>] [--secrc | --no-secrc]`
+Configures a named SSH target and persists configuration to `.secrc` and vault storage.
+*   `--import-key <path>`: Ingests private key directly into vault storage (`ssh/<target>/private_key`) during initialization instead of saving local file paths in `.secrc`.
+*   `--shred`: Securely shreds the source key file specified in `--import-key` and companion `.pub` files after successful vault commit.
+*   `--keep-pub`: Preserves companion `.pub` file on disk when `--shred` is used.
+*   `--key-secret <vault-path>` (alias `--ssh-key-secret`): Stores a reference to a shared vault key (e.g. `sonic_fabric` expands to `ssh/shared/sonic_fabric/private_key`) to enable $O(1)$ single-point key rotation across multiple fabric switches.
 
 *   **Usage (Interactive)**: `sec ssh router`
 *   **Usage (Remote Command)**: `sec ssh ax3600 -- uci show wireless`
+*   **Usage (Key Ingestion & Shredding)**: `sec ssh import-key switch1 ~/.ssh/id_ed25519 --shred`
+*   **Usage (Shared Key Ingestion)**: `sec ssh import-key --shared sonic_fabric ~/.ssh/id_ed25519_deploy --shred`
+*   **Usage (Shared Key Target Init)**: `sec ssh init leaf-01 --host 192.168.122.11 --user admin --key-secret sonic_fabric`
+*   **Usage (Workstation Host Sanitization)**: `sec ssh sanitize switch1` or `sec ssh sanitize --all`
 *   **Usage (Headless TOFU)**: `sec ssh root@192.168.31.1 --tofu -- "uptime"`
 *   **Usage (Zero-Trace OpenSSH)**: `sec ssh ax3600 --openssh --no-trace -- "uname -a"`
 *   **Usage (Host Key Management)**: `sec ssh host-key show ax3600` and `sec ssh reset-host-key ax3600`

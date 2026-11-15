@@ -373,16 +373,40 @@ func initRegistry() {
 			Handler:     handleRun,
 		},
 		{
+			Name:        "exec",
+			Category:    "Profiles & Scope",
+			Description: "Execute vault-stored command or script in memory via stdin with zero host traces",
+			Usage:       "sec exec [save <name> [--stdin] [--command <cmd>] [--description <desc>] | show <name> [--no-trace] | list [--json] | rm <name> [--permanent]] | <name> [--no-trace] [--trace] [--shell <bin>] [--dir <path>] [--redact] [--no-redact] [-- <args...>]",
+			Flags:       []string{"--stdin", "--command", "-c", "--description", "-d", "--no-trace", "--trace", "--shell", "--dir", "--redact", "--no-redact", "--json", "--permanent"},
+			Subcommands: []SubcommandSpec{
+				{Name: "save", Description: "Store executable command or script in vault (exec/<name>)", Flags: []string{"--stdin", "--command", "-c", "--description", "-d"}},
+				{Name: "show", Description: "Print stored command script from vault", Flags: []string{"--no-trace", "--trace"}},
+				{Name: "list", Aliases: []string{"ls"}, Description: "List stored command scripts in vault", Flags: []string{"--json"}},
+				{Name: "rm", Aliases: []string{"delete", "del"}, Description: "Delete stored command script from vault", Flags: []string{"--permanent"}},
+			},
+			Handler: handleExec,
+		},
+		{
 			Name:        "ssh",
 			Category:    "Profiles & Scope",
 			Description: "Execute remote SSH commands or interactive sessions under vault authentication with zero disk exposure",
-			Usage:       "sec ssh [init <target> [--host <h>] [--user <u>] [--port <p>] [--password <p>] [--key <path>] [--secrc | --no-secrc]] [host-key show <target>] [reset-host-key <target>] | [<target> | user@host] [--ssh-key <path>] [--ssh-key-secret <key>] [--ssh-passphrase-key <key>] [--port <p>] [--openssh] [--no-trace] [--tofu] [--insecure] [--update-host-key] [-- <cmd...>]",
-			Flags:       []string{"--ssh-key", "-i", "--ssh-key-secret", "--key-secret", "--ssh-passphrase-key", "--port", "-p", "--openssh", "--no-trace", "--tofu", "--trust-first-use", "--insecure", "--no-verify", "--update-host-key", "--host", "--user", "--password", "--key", "--secrc", "--no-secrc"},
+			Usage:       "sec ssh [init <target> [--host <h>] [--user <u>] [--port <p>] [--password <p>] [--key <path>] [--import-key <path>] [--shred] [--keep-pub] [--key-secret <k>] [--secrc | --no-secrc]] [import-key [<target> | --shared <name>] <file> [--shred] [--keep-pub] [--sanitize | --no-sanitize] [--passphrase-key <k>]] [sanitize [<target>] [--all]] [host-key show <target>] [reset-host-key <target>] | [<target> | user@host] [--ssh-key <path>] [--ssh-key-secret <key>] [--ssh-passphrase-key <key>] [--port <p>] [--openssh] [--no-trace] [--tofu] [--insecure] [--update-host-key] [-- <cmd...>]",
+			Flags:       []string{"--ssh-key", "-i", "--ssh-key-secret", "--key-secret", "--ssh-passphrase-key", "--port", "-p", "--openssh", "--no-trace", "--tofu", "--trust-first-use", "--insecure", "--no-verify", "--update-host-key", "--host", "--user", "--password", "--key", "--import-key", "--shred", "--keep-pub", "--shared", "--sanitize", "--no-sanitize", "--passphrase-key", "--all", "--secrc", "--no-secrc"},
 			Subcommands: []SubcommandSpec{
 				{
 					Name:        "init",
 					Description: "Configure remote SSH credentials for target node into vault and .secrc",
-					Flags:       []string{"--host", "--user", "--port", "--password", "--key", "--secrc", "--no-secrc"},
+					Flags:       []string{"--host", "--user", "--port", "--password", "--key", "--import-key", "--shred", "--keep-pub", "--key-secret", "--ssh-key-secret", "--secrc", "--no-secrc"},
+				},
+				{
+					Name:        "import-key",
+					Description: "Ingest SSH private key into vault, optionally shred, and sanitize known_hosts",
+					Flags:       []string{"--shred", "--keep-pub", "--shared", "--sanitize", "--no-sanitize", "--passphrase-key"},
+				},
+				{
+					Name:        "sanitize",
+					Description: "Scrub target hostnames, IPs, and HMAC-SHA1 hashed entries from known_hosts",
+					Flags:       []string{"--all"},
 				},
 				{
 					Name:        "host-key",
@@ -434,11 +458,19 @@ func initRegistry() {
 			},
 		},
 		{
+			Name:        "scan",
+			Category:    "Security & Maintenance",
+			Description: "Scan workspace, folder, or home directory for plaintext credentials and output a Security Improvement Action List",
+			Usage:       "sec scan [<path>] [--json] [--output <file>] [--git-history] [--deep] [--verify-live] [--install-tools]",
+			Flags:       []string{"--json", "--output", "-o", "--git-history", "--deep", "--verify-live", "--install-tools"},
+			Handler:     handleScan,
+		},
+		{
 			Name:        "check",
 			Category:    "Security & Maintenance",
-			Description: "Validate schema, audit entropy, scan history, audit scripts, or verify remote drift",
-			Usage:       "sec check [--required <keys>] [--template <f>] [--scan-weak] [--leaks] [--scripts [<path>]] [--ping-host <host>] [--remote <host> --uci <k>=<v>] [--env <k>=<v>]",
-			Flags:       []string{"--required", "-r", "--template", "-t", "--scan-weak", "-w", "--leaks", "--scan-leaks", "-l", "--history", "--scripts", "--scan-scripts", "--ping-host", "--remote", "--uci", "--env"},
+			Description: "Validate schema, audit entropy, scan history/workspaces, audit scripts, or verify remote drift",
+			Usage:       "sec check [--scan [<path>]] [--required <keys>] [--template <f>] [--scan-weak] [--leaks] [--scripts [<path>]] [--ping-host <host>] [--remote <host> --uci <k>=<v>] [--env <k>=<v>]",
+			Flags:       []string{"--scan", "--scan-workspace", "--required", "-r", "--template", "-t", "--scan-weak", "-w", "--leaks", "--scan-leaks", "-l", "--history", "--scripts", "--scan-scripts", "--ping-host", "--remote", "--uci", "--env"},
 			Handler:     handleCheck,
 		},
 		{
@@ -556,18 +588,28 @@ func initRegistry() {
 		{
 			Name:        "backup",
 			Category:    "Backup & Migration",
-			Description: "Export secrets to KeePassXC (.kdbx) file or manage backups",
-			Usage:       "sec backup <export|import|list> [<file.kdbx>] [--password <p> | --custom-password] [--merge | --overwrite] [--full-metadata]",
-			Flags:       []string{"--password", "-p", "--custom-password", "--merge", "-m", "--overwrite", "--full-metadata"},
+			Description: "Manage stealth multi-folder rsync backups or export/import KeePassXC (.kdbx) backups",
+			Usage:       "sec backup <init|add-folder|remove-folder|show|jobs|run|export|import|list> [<name>|<file.kdbx>] [--target <user@host>] [--local-base <path>] [--remote-base <path>] [--ssh-key-secret <key>] [--ssh-password-key <key>] [--port <p>] [--remote-rsync <bin>] [--modify-window <sec>] [--partial-dir <dir>] [--exclude <pat>] [--folder <src>] [--dest <dst>] [--history-prefix <pfx>] [--slug <s>] [--dry-run] [--no-trace] [--trace] [--tofu] [--insecure] [--json] [--password <p> | --custom-password] [--merge | --overwrite] [--full-metadata]",
+			Flags:       []string{"--target", "--local-base", "--remote-base", "--ssh-key-secret", "--key-secret", "--ssh-password-key", "--port", "-p", "--remote-rsync", "--modify-window", "--partial-dir", "--exclude", "--folder", "--dest", "--history-prefix", "--slug", "--dry-run", "-n", "--no-trace", "--trace", "--tofu", "--trust-first-use", "--insecure", "--no-verify", "--update-host-key", "--json", "--password", "--custom-password", "--merge", "-m", "--overwrite", "--full-metadata"},
 			Subcommands: []SubcommandSpec{
+				{Name: "init", Description: "Initialize stealth multi-folder rsync backup job in vault", Flags: []string{"--target", "--local-base", "--remote-base", "--ssh-key-secret", "--key-secret", "--ssh-password-key", "--port", "-p", "--remote-rsync", "--modify-window", "--partial-dir", "--exclude", "--folder"}},
+				{Name: "add-folder", Description: "Add or update a folder in a stealth backup job", Flags: []string{"--dest", "--history-prefix", "--slug"}},
+				{Name: "remove-folder", Description: "Remove a folder from a stealth backup job"},
+				{Name: "show", Description: "Inspect stealth backup job manifest and derived remote paths"},
+				{Name: "jobs", Description: "List stealth rsync backup jobs in vault"},
+				{Name: "run", Description: "Run stealth rsync backup job over in-memory SSH transport", Flags: []string{"--dry-run", "-n", "--no-trace", "--trace", "--tofu", "--trust-first-use", "--insecure", "--no-verify", "--update-host-key"}},
 				{Name: "export", Description: "Export secrets to KeePassXC (.kdbx) file", Flags: []string{"--password", "-p", "--custom-password"}},
 				{Name: "import", Description: "Import secrets from KeePassXC (.kdbx) file", Flags: []string{"--password", "-p", "--merge", "-m", "--overwrite", "--full-metadata"}},
-				{Name: "list", Description: "List automatic KeePassXC backups in vault directory"},
+				{Name: "list", Description: "List automatic KeePassXC backups and stealth backup jobs in vault"},
 			},
 			Handler: func(profile string, args []string) {
 				if len(args) < 1 {
-					fmt.Fprintln(os.Stderr, "Usage: sec backup <file.kdbx> [--custom-password] | sec backup <export|import|list> [<file.kdbx>]")
+					fmt.Fprintln(os.Stderr, "Usage: sec backup <file.kdbx> [--custom-password] | sec backup <init|add-folder|remove-folder|show|jobs|run|export|import|list> [<name>|<file.kdbx>]")
 					os.Exit(1)
+				}
+				if isStealthBackupSubcommand(args[0]) {
+					handleStealthBackup(profile, args)
+					return
 				}
 				if args[0] == "list" {
 					handleBackupList(profile)

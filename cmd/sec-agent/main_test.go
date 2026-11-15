@@ -1607,3 +1607,70 @@ func TestNonTTYReadCommandsWithAutoOpen(t *testing.T) {
 	}
 }
 
+func TestScanCommandAndActionListOutput(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgDir := filepath.Join(tmpDir, "cfg")
+	_ = os.MkdirAll(cfgDir, 0700)
+	_ = os.WriteFile(filepath.Join(cfgDir, "secrets.enc"), []byte("{}"), 0600)
+
+	binPath := filepath.Join(tmpDir, "sec_scan_bin")
+	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build scan test binary: %v\nOutput: %s", err, out)
+	}
+
+	// 1. Clean workspace directory -> should exit 0
+	cleanWs := filepath.Join(tmpDir, "clean_ws")
+	_ = os.MkdirAll(cleanWs, 0700)
+	_ = os.WriteFile(filepath.Join(cleanWs, ".env"), []byte("DB_PASS=\"<migrated_to_sec>\"\n"), 0600)
+
+	cleanCmd := exec.Command(binPath, "scan", cleanWs)
+	cleanCmd.Env = append(os.Environ(), "SEC_CONFIG_DIR="+cfgDir, "SEC_TEST_MODE=1")
+	if out, err := cleanCmd.CombinedOutput(); err != nil {
+		t.Fatalf("expected clean workspace scan to exit 0, got %v:\n%s", err, out)
+	}
+
+	// 2. Dirty workspace directory with .env and static config -> exit 1 + JSON action plan
+	dirtyWs := filepath.Join(tmpDir, "dirty_ws")
+	_ = os.MkdirAll(dirtyWs, 0700)
+	_ = os.WriteFile(filepath.Join(dirtyWs, ".env"), []byte("STRIPE_SECRET_KEY=\"mock_secret_key_value_9876543210\"\n"), 0600)
+	_ = os.WriteFile(filepath.Join(dirtyWs, "service.conf"), []byte("api_password = \"super_secret_static_pass_999\"\n"), 0600)
+
+	outPlanFile := filepath.Join(tmpDir, "actions.json")
+	dirtyCmd := exec.Command(binPath, "scan", dirtyWs, "--output", outPlanFile)
+	dirtyCmd.Env = append(os.Environ(), "SEC_CONFIG_DIR="+cfgDir, "SEC_TEST_MODE=1")
+	outBytes, err := dirtyCmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected dirty workspace scan to exit 1 when findings exist, got exit 0:\n%s", outBytes)
+	}
+	outStr := string(outBytes)
+	if strings.Contains(outStr, "mock_secret_key_value_9876543210") || strings.Contains(outStr, "super_secret_static_pass_999") {
+		t.Fatalf("SECURITY VIOLATION: raw secret printed in human scan output:\n%s", outStr)
+	}
+	if !strings.Contains(outStr, "READY_NOW") || !strings.Contains(outStr, "NEEDS_WORKSPACE_ADAPTATION") {
+		t.Errorf("expected both READY_NOW and NEEDS_WORKSPACE_ADAPTATION tiers in human output:\n%s", outStr)
+	}
+
+	// Verify saved JSON file
+	planBytes, rErr := os.ReadFile(outPlanFile)
+	if rErr != nil {
+		t.Fatalf("expected saved JSON action list at %s: %v", outPlanFile, rErr)
+	}
+	if strings.Contains(string(planBytes), "mock_secret_key_value_9876543210") || strings.Contains(string(planBytes), "super_secret_static_pass_999") {
+		t.Fatalf("SECURITY VIOLATION: raw secret written to JSON action list:\n%s", planBytes)
+	}
+	var parsed map[string]interface{}
+	if jErr := json.Unmarshal(planBytes, &parsed); jErr != nil {
+		t.Fatalf("invalid JSON in saved action list: %v", jErr)
+	}
+
+	// 3. Verify 'sec check --scan <dir> --json' alias
+	aliasCmd := exec.Command(binPath, "check", "--scan", dirtyWs, "--json")
+	aliasCmd.Env = append(os.Environ(), "SEC_CONFIG_DIR="+cfgDir, "SEC_TEST_MODE=1")
+	aliasOut, _ := aliasCmd.CombinedOutput()
+	if !strings.Contains(string(aliasOut), "\"action_items\"") {
+		t.Errorf("expected 'sec check --scan --json' to output JSON action_items, got:\n%s", aliasOut)
+	}
+}
+
+

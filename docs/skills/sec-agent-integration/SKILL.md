@@ -437,50 +437,72 @@ sec-agent run --temp-file CONFIG_FILE=templates/agent.yaml.tmpl -- ./agent-daemo
 * **Flexible Target Resolution**: Targets can be a direct vault key (`auth/netrc`), an inline mustache template (`{{auth/username}}:{{auth/password}}`), or a local template file on disk.
 * **Stream Redaction Integration**: Contents of all generated temporary files are automatically registered with the stream redactor so accidental echoes or verbose traces are masked in stdout/stderr.
 
-### 5.13. Native Pure Go SSH Client, Vault-Stored Keys & Zero-Trace Pinning (`sec-agent ssh`)
+### 5.13. Native Pure Go SSH Client, Automated Key Ingestion & Host Sanitizer (`sec-agent ssh`)
 `sec-agent` provides a built-in pure Go SSH client that authenticates directly using credentials stored in the active vault—completely eliminating the need for external `sshpass` utilities on macOS/Linux. Native Go SSH execution is the default engine for both password and private key authentication, executing entirely in memory without writing keys to disk or `/tmp`.
 
 ```bash
-# Setup remote SSH target interactively into vault and workspace .secrc:
-sec-agent ssh init ax3600 --host 192.168.31.1 --user root --port 22 [--password <pass> | --key <path>]
+# Ingest OpenSSH private key directly into vault, record metadata, and shred source file and companion .pub:
+sec-agent ssh import-key switch1 ~/.ssh/id_ed25519 --shred
 
-# Store multiline private key (PEM / OpenSSH format) directly in the encrypted vault:
-cat ~/.ssh/id_ed25519 | sec-agent set ssh/ax3600/key --stdin --no-trim
+# Ingest private key and shred source file, but preserve companion .pub on disk:
+sec-agent ssh import-key switch1 ~/.ssh/id_ed25519 --shred --keep-pub
 
-# Connect to named target (auto-resolves vault key ssh/<target>/key or ssh/<target>/private_key):
-sec-agent ssh ax3600
+# Ingest shared administrative deployment key into vault (ssh/shared/<name>/private_key):
+sec-agent ssh import-key --shared sonic_fabric ~/.ssh/id_ed25519_fabric --shred
+
+# Ingest passphrase-protected key using passphrase from vault:
+sec-agent ssh import-key switch1 ~/.ssh/id_rsa --passphrase-key ssh/switch1/passphrase --shred
+
+# Scrub workstation ~/.ssh/known_hosts of target host/IP (both cleartext and HMAC-SHA1 hashed entries):
+sec-agent ssh sanitize switch1
+
+# Batch scrub all registered SSH targets from ~/.ssh/known_hosts and delete known_hosts.old:
+sec-agent ssh sanitize --all
+
+# Initialize target, ingest private key directly into vault, shred source file, and sanitize known_hosts:
+sec-agent ssh init switch1 --host 192.168.122.10 --user admin --import-key ~/.ssh/id_switch --shred
+
+# Initialize target referencing a shared vault key ($O(1) single-point rotation across switches):
+sec-agent ssh init leaf-01 --host 192.168.122.11 --user admin --key-secret sonic_fabric
+
+# Connect to named target (auto-resolves vault key ssh/<target>/key, ssh/<target>/private_key, or shared pointer):
+sec-agent ssh switch1
 
 # Explicit vault key path override:
 sec-agent ssh root@192.168.31.1 --ssh-key-secret ssh/homelab/admin_key -- "uptime"
 
 # Execute non-interactive remote command with zero disk exposure:
-sec-agent ssh ax3600 -- uci show wireless
+sec-agent ssh switch1 -- "uname -a"
 
 # Automated / headless host key verification (Trust-On-First-Use pins fingerprint to vault):
-sec-agent ssh ax3600 --tofu -- "uptime"
+sec-agent ssh switch1 --tofu -- "uptime"
 
 # Inspect pinned host key fingerprint in vault:
-sec-agent ssh host-key show ax3600
+sec-agent ssh host-key show switch1
 
 # Reset pinned host key fingerprint after remote reflash or rebuild:
-sec-agent ssh reset-host-key ax3600
+sec-agent ssh reset-host-key switch1
 
 # Update pinned host key fingerprint in-flight:
-sec-agent ssh ax3600 --update-host-key -- "uptime"
+sec-agent ssh switch1 --update-host-key -- "uptime"
 
 # Insecure bypass (ignores host key verification; does not mutate vault):
-sec-agent ssh ax3600 --insecure -- "uptime"
+sec-agent ssh switch1 --insecure -- "uptime"
 
 # Delegated OpenSSH fallback with zero-trace known_hosts suppression:
-sec-agent ssh ax3600 --openssh --no-trace -- "uptime"
+sec-agent ssh switch1 --openssh --no-trace -- "uptime"
 ```
 * **Native Pure Go Default**: Connects directly in-process via `golang.org/x/crypto/ssh` for both password and key authentication without invoking external `/usr/bin/ssh` or `sshpass`.
 * **Zero Disk Private Keys**: Decrypts OpenSSH/PEM keys directly from vault storage in memory. No temporary files are ever created on disk or in `/tmp`.
+* **Automated Key Ingestion & Secure Shredding (`sec ssh import-key --shred [--keep-pub]`)**: Loads private key into memory, validates PEM/OpenSSH format, commits to `ssh/<target>/private_key` with fingerprint metadata, and (only after verified vault commit) overwrites source file with pseudo-random bytes and zeros via `f.Sync()` before unlinking. Companion public key files (`<path>.pub` and `<path>-cert.pub`) are automatically discovered and multi-pass shredded unless `--keep-pub` is specified. If validation or vault write fails, all physical source files are preserved intact.
+* **Shared Vault Key References (`sec ssh init --key-secret <key>`, `sec ssh import-key --shared <name>`)**: Allows entire multi-switch fabrics or server clusters to reference a single administrative key in `ssh/shared/<name>/private_key`. Target credential resolution automatically dereferences `ssh/<target>/key_secret` pointers in memory, achieving $O(1)$ single-point key rotation without duplicate vault copies or target re-initialization.
+* **Workstation `known_hosts` Forensic Sanitizer (`sec ssh sanitize [<target>] [--all]`)**: Purges target hostnames, IPs, and port variants from `~/.ssh/known_hosts`. Accurately evaluates and scrubs both cleartext entries and OpenSSH HMAC-SHA1 hashed entries (`|1|<salt>|<hash>`) and unlinks lingering `~/.ssh/known_hosts.old` backups.
+* **Single-Step Remote Onboarding (`sec ssh init --import-key <path> [--shred] [--keep-pub]`)**: Onboards remote nodes, stores private keys directly into vault, shreds plaintext key and companion `.pub` files from disk, and sanitizes historical `known_hosts` in a single command without persisting local filesystem paths in `.secrc`.
 * **Vault-Backed Host Key Pinning (TOFU)**: Public host key SHA-256 fingerprints are pinned into encrypted vault storage (`ssh/<target>/host_fingerprint`). If a host key changes, connection aborts immediately with `HOST_KEY_MISMATCH` to prevent MitM attacks.
 * **Zero-Trace OpenSSH Delegation (`--no-trace`)**: When delegating to system OpenSSH via `--openssh`, `--no-trace` injects `-o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR -o IdentitiesOnly=yes`, leaving zero host traces in `~/.ssh/known_hosts`.
 * **Exit Code Propagation**: Remote command exit codes (`exitErr.ExitStatus()`) propagate directly to the calling shell.
 
-### 5.13. Companion Metadata Environment Variables
+### 5.14. Companion Metadata Environment Variables
 Stored secret metadata (e.g. `subnet=192.168.31.0/24`, `gateway=192.168.31.1`) is automatically exported as companion environment variables (`<KEY>_<META_KEY>`) during `sec run`:
 - `ROUTER_ADMIN="<secret>"`
 - `ROUTER_ADMIN_SUBNET="192.168.31.0/24"`
@@ -708,6 +730,77 @@ sec stream --template "export APP_KEY='{{db/password}}' GLOBAL_CA='{{@global-sha
    # Inspect Keychain binding mode, presence, and version alignment
    sec-agent keychain status [--profile <name>] [--json]
    ```
+
+### 5.38. Hybrid Workspace & Directory Security Scanner (`sec scan` & `sec check --scan`)
+1. **Multi-Engine Plaintext Credential Discovery**:
+   `sec scan [path]` (or `sec check --scan [path]`) audits any project workspace, folder, git repository (`--git-history`), or `$HOME` directory (`~`, automatically skipping `~/Library`, `.Trash`, `node_modules`, and cache folders) using a 3-engine pipeline:
+   * **`sec-native` (Built-In)**: Detects unmigrated `.env*` / `.npmrc` / `.netrc` / `.pgpass` files, insecure CLI password flags (`-p`, `--password`), static configuration secrets, and **exact matches against active unlocked `sec-agent` vault values** (with 100% `[REDACTED_BY_SEC]` masking).
+   * **`gitleaks` (Homebrew)**: Automatically invoked when installed for 160+ token rules and base64/hex decoding.
+   * **`trufflehog` (Homebrew, opt-in via `--deep` or `--verify-live`)**: Invokes 700+ credential detectors and optional live API verification.
+2. **Homebrew Package Management & Permitted Auto-Installation (`--install-tools`)**:
+   * If `gitleaks` or `trufflehog` is not installed, `sec scan` outputs a `brew install <tool>` hint.
+   * When an AI coding agent has permission to install Homebrew packages, pass `--install-tools` (`sec scan . --install-tools`) to automatically install missing scanners via `brew install` without unmanaged curl installers.
+3. **Reusable Security Improvement Action List & 3-Tier Integration Advisor**:
+   ```bash
+   # Human-readable terminal Security Improvement Action List
+   sec scan .
+
+   # Export machine-readable JSON Action List for automated processing
+   sec scan . --output .sec-audit-actions.json
+   sec scan . --json
+
+   # Deep scan with Git commit history and live credential verification
+   sec scan . --git-history --deep --verify-live
+   ```
+   Every finding is classified into one of three integration tiers:
+   * **`READY_NOW` (Tier 1)**: Directly remediable with existing `sec-agent` commands (e.g., `sec migrate-local .env --profile <profile>`).
+   * **`NEEDS_WORKSPACE_ADAPTATION` (Tier 2)**: Includes step-by-step `workspace_advice` to refactor hardcoded scripts, source literals, or static config files to consume `$ENV_VAR`, `--stdin-key`, `sec stream`, or `--temp-file`.
+   * **`SEC_AGENT_EXTENSION_OPPORTUNITY` (Tier 3)**: Identifies rigid ecosystem files (e.g. `.netrc`, `.npmrc`, fixed-path configs) and emits `sec_agent_extension_idea` proposals for extending `sec-agent` itself.
+
+### 5.39. Zero-Trace Command Execution (`sec exec`)
+Store and execute shell commands or multi-line scripts directly from the encrypted vault without leaving traces on the local host:
+```bash
+# Store a command or script in exec/<name> inside the encrypted vault via stdin
+echo 'rsync -a ~/Documents backup@host:/vol/docs' | sec exec save daily-sync --stdin
+
+# List, inspect, or remove stored executable scripts
+sec exec list
+sec exec show daily-sync
+sec exec rm daily-sync
+
+# Execute a stored script in memory (optionally forwarding positional arguments)
+sec exec daily-sync
+sec exec daily-sync -- --dry-run --verbose
+```
+* **In-Memory Stdin Pipe Execution**: `sec exec <name> [-- <args...>]` fetches `exec/<name>` from the unlocked daemon with `NoTrace: true` and streams the script directly into `/bin/sh -s -- <args...>` over an in-memory stdin pipe (`cmd.Stdin`).
+* **Zero Host Artifacts**: Nothing from the stored script body appears in `.zsh_history`, temporary files on disk, `ps aux` wrapper arguments, or `~/.config/sec-agent/audit.log` (and `secrets.enc` modification timestamps remain untouched during execution).
+
+### 5.40. Stealth Multi-Folder `rsync` Backups (`sec backup`)
+Configure and run encrypted, zero-trace multi-folder `rsync` backups over `sec-agent`'s native pure-Go SSH transport without exposing folder names, remote volume paths, usernames, or IP addresses in shell history or the local process table:
+```bash
+# Initialize a stealth backup job stored in backup/<name> inside the vault
+sec backup init work --target backup@10.0.0.50 --local-base ~ --remote-base /Volumes/BackupDrive/Work
+
+# Register one or more relative folders (with spaces or custom excludes) into the job
+sec backup add-folder work "CloudFolder - Work"
+
+# Inspect a backup job configuration or list all registered backup jobs
+sec backup show work
+sec backup jobs
+
+# Execute all folders in the backup job (or filter to a single folder, with optional --tofu)
+sec backup run work
+sec backup run work "CloudFolder - Work" --tofu
+```
+* **The 5 Zero-Trace Guarantees**:
+  1. **Zero `.zsh_history` Command/Path Exposure**: The operator or agent only runs `sec backup run <name>`, keeping sensitive folder names, IP addresses, and remote volume paths completely out of shell history.
+  2. **Zero Local `ps aux` Exposure**: Local `rsync` executes inside working directory `.` (`local_base/<folder>`) with `--exclude-from=/dev/fd/3` (fed via an anonymous pipe) and `-e "sec ssh-stdio" . sync:target`. No folder names, volume paths, history paths, usernames, or IP addresses appear in `ps aux`; `sec-agent` intercepts and rewrites the remote `rsync --server` command over the encrypted Go SSH channel.
+  3. **Automatic "One Level Higher" Naming Derivation Inside `remote_base`**: For each backed-up `<folder>`, `sec-agent` automatically derives the destination and history layout one level higher inside `remote_base`:
+     * Primary mirror: `<remote_base>/<folder>/`
+     * Incremental deleted/modified file history (`--backup --backup-dir`): `<remote_base>/<Prefix>-History/<YYYY-MM-DD>`
+     * Remote transfer log (`--log-file`): `<remote_base>/rsync_<slug>_<YYYY-MM-DD_HHMM>.log`
+  4. **Diskless SSH Authentication**: Authenticates in Go memory via `golang.org/x/crypto/ssh` using either `ssh/<target>/password` or `ssh/<target>/private_key` from the vault—with zero private keys on the host filesystem and SSH host fingerprints pinned in the vault (`ssh/<target>/host_fingerprint`) instead of `~/.ssh/known_hosts`.
+  5. **Daemon `NoTrace` Audit Suppression**: All secret and job config lookups during `sec backup run` and `sec ssh-stdio` set `NoTrace: true`, leaving `~/.config/sec-agent/audit.log` and `secrets.enc` `mtime` completely untouched during execution.
 
 ---
 

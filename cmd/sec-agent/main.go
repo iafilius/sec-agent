@@ -41,7 +41,7 @@ var (
 	confirmProdFlag bool
 )
 var (
-	Version   = "v2.17.0"
+	Version   = "v2.19.1"
 	BuildDate = "unknown"
 )
 
@@ -1619,6 +1619,9 @@ func printCommandHelp(spec CommandSpec) {
 }
 
 func main() {
+	if len(os.Args) >= 2 && os.Args[1] == "ssh-stdio" {
+		os.Exit(runInternalSSHStdio(os.Args[2:]))
+	}
 	keychain.SetVersion(Version)
 	profile, cleanArgs := extractGlobalFlags()
 	os.Args = cleanArgs

@@ -298,9 +298,15 @@ func TestSkillShow(t *testing.T) {
 	// Test default target (defaults to canonical full manual)
 	r2, w2, _ := os.Pipe()
 	os.Stdout = w2
+	var outBytes2 []byte
+	doneRead2 := make(chan struct{})
+	go func() {
+		outBytes2, _ = io.ReadAll(r2)
+		close(doneRead2)
+	}()
 	handleSkill("default", []string{"show"})
 	w2.Close()
-	outBytes2, _ := io.ReadAll(r2)
+	<-doneRead2
 	os.Stdout = rescueStdout
 
 	if !strings.Contains(string(outBytes2), "sec-agent Secrets Management Integration") {

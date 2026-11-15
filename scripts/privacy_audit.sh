@@ -50,6 +50,26 @@ else
     echo "✅ No SSH private key blocks found."
 fi
 
+echo "🔍 5. Checking for personal backup volume / folder / host identifiers..."
+FOUND_BCK_ID=$(grep -rnE "OneDrive - NN|BCKArFI|192\.168\.31\.125" "$TARGET_DIR" --exclude-dir=".git" --exclude="privacy_audit.sh" --binary-files=without-match || true)
+if [ -n "$FOUND_BCK_ID" ]; then
+    echo "❌ PRIVACY VIOLATION: Found personal backup identifier in publish files:"
+    echo "$FOUND_BCK_ID"
+    ERRORS=$((ERRORS + 1))
+else
+    echo "✅ No personal backup identifiers found."
+fi
+
+echo "🔍 6. Checking for GitHub Push Protection token prefixes (sk_live_, ghp_[A-Za-z0-9]{20,})..."
+FOUND_GH_PP=$(grep -rnE "sk_live_[A-Za-z0-9]{10,}|ghp_[A-Za-z0-9]{20,}" "$TARGET_DIR" --exclude-dir=".git" --exclude="privacy_audit.sh" --binary-files=without-match || true)
+if [ -n "$FOUND_GH_PP" ]; then
+    echo "❌ PRIVACY VIOLATION: Found GitHub Push Protection token prefix in publish files:"
+    echo "$FOUND_GH_PP"
+    ERRORS=$((ERRORS + 1))
+else
+    echo "✅ No GitHub Push Protection token prefixes found."
+fi
+
 echo "========================================================================"
 if [ "$ERRORS" -gt 0 ]; then
     echo "❌ AUDIT FAILED: $ERRORS privacy violation(s) detected. Release blocked!"

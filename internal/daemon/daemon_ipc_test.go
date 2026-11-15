@@ -575,4 +575,116 @@ func TestIPCDescriptionAndNotes(t *testing.T) {
 	}
 }
 
+func TestNoTraceGetSuppressesAuditLog(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("SEC_CONFIG_DIR", tmpDir)
+
+	d := &Daemon{
+		profile:        "notrace-test",
+		version:        "v2.15.0",
+		masterKey:      make([]byte, 32),
+		sessionToken:   "valid-token",
+		sessionStart:   time.Now(),
+		sessionTTL:     2 * time.Hour,
+		graceTTL:       30 * time.Minute,
+		lastUsed:       time.Now(),
+		lastActivity:   time.Now(),
+		IsTestInstance: true,
+	}
+	d.ensureStoreInitialized()
+
+	sendReq := func(req IPCRequest) IPCResponse {
+		clientConn, serverConn := net.Pipe()
+		defer clientConn.Close()
+
+		var resp IPCResponse
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			_ = json.NewDecoder(clientConn).Decode(&resp)
+		}()
+
+		d.processRequest(serverConn, req, 1234)
+		_ = serverConn.Close()
+		<-done
+		return resp
+	}
+
+	// Store secret exec/my-stealth-job
+	setResp := sendReq(IPCRequest{
+		Action: IPCActionSet,
+		Path:   "exec/my-stealth-job",
+		Value:  "echo stealth-secret-output",
+	})
+	if !setResp.Success {
+		t.Fatalf("IPCActionSet failed: %v", setResp.Error)
+	}
+
+	auditLogPath := filepath.Join(tmpDir, "audit.log")
+	// Clear audit.log from the initial SET event so we cleanly inspect GET behavior
+	_ = os.Remove(auditLogPath)
+
+	// 1. Perform IPCActionGet with NoTrace: true
+	getStealth := sendReq(IPCRequest{
+		Action:  IPCActionGet,
+		Path:    "exec/my-stealth-job",
+		NoTrace: true,
+	})
+	if !getStealth.Success {
+		t.Fatalf("stealth IPCActionGet failed: %v", getStealth.Error)
+	}
+	if getStealth.Value != "echo stealth-secret-output" {
+		t.Errorf("expected value %q, got %q", "echo stealth-secret-output", getStealth.Value)
+	}
+	if getStealth.AccessCount != 0 {
+		t.Errorf("expected AccessCount to remain 0 for NoTrace GET, got %d", getStealth.AccessCount)
+	}
+
+	// Verify audit.log was NOT created or does NOT contain exec/my-stealth-job
+	if data, err := os.ReadFile(auditLogPath); err == nil {
+		if strings.Contains(string(data), "exec/my-stealth-job") {
+			t.Fatalf("expected audit.log NOT to contain exec/my-stealth-job on NoTrace GET, got: %s", string(data))
+		}
+	}
+
+	// Also verify missing secret with NoTrace: true does not write to audit.log
+	getMissingStealth := sendReq(IPCRequest{
+		Action:  IPCActionGet,
+		Path:    "exec/missing-job",
+		NoTrace: true,
+	})
+	if getMissingStealth.Success {
+		t.Fatalf("expected missing secret to fail")
+	}
+	if data, err := os.ReadFile(auditLogPath); err == nil && len(strings.TrimSpace(string(data))) > 0 {
+		t.Fatalf("expected audit.log to remain empty after NoTrace missing secret GET, got: %s", string(data))
+	}
+
+	// 2. Perform IPCActionGet with NoTrace: false
+	getTraced := sendReq(IPCRequest{
+		Action:  IPCActionGet,
+		Path:    "exec/my-stealth-job",
+		NoTrace: false,
+	})
+	if !getTraced.Success {
+		t.Fatalf("traced IPCActionGet failed: %v", getTraced.Error)
+	}
+	if getTraced.AccessCount != 1 {
+		t.Errorf("expected AccessCount=1 on traced GET, got %d", getTraced.AccessCount)
+	}
+
+	data, err := os.ReadFile(auditLogPath)
+	if err != nil {
+		t.Fatalf("expected audit.log to exist after traced GET, got error: %v", err)
+	}
+	var auditEntry AuditLogEntry
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(data))), &auditEntry); err != nil {
+		t.Fatalf("failed to parse audit.log entry: %v", err)
+	}
+	if auditEntry.Action != AuditEventGet || auditEntry.Path != "exec/my-stealth-job" || !auditEntry.Success {
+		t.Errorf("unexpected audit entry after traced GET: %+v", auditEntry)
+	}
+}
+
+
 

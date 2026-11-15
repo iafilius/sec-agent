@@ -5,6 +5,52 @@ All notable changes to `sec-agent` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v2.19.1] - 2026-11-15
+
+### Added & Enhanced
+- **Stealth Multi-Folder `rsync` Backup Runner (`sec backup init / add-folder / remove-folder / show / jobs / run`)**:
+  - **Encrypted Multi-Folder Backup Manifests (`backup/<name>`)**: Store multi-folder `rsync` backup configurations (`SSHTarget`, `LocalBase`, `RemoteBase`, `RemoteRsync`, `ModifyWindow`, and folder lists with exclude rules) inside the encrypted vault.
+  - **Zero Local `ps aux` Path & Host Leakage (`sec ssh-stdio` Bridge)**: Executes local `rsync` with `cmd.Dir` set to the source folder (`.`), exclude rules piped over `--exclude-from=/dev/fd/3`, and `-e "<sec-bin> ssh-stdio" . sync:target`. The parent `sec-agent` process bridges an ephemeral `0600` Unix socket over an in-memory Go SSH session (`golang.org/x/crypto/ssh`) and rewrites the remote `rsync --server` command inside the encrypted SSH channel.
+  - **Automatic "One Level Higher" History & Log Derivation**: Automatically derives `<remote_base>/<folder>/`, `<remote_base>/<Prefix>-History/<YYYY-MM-DD>`, and `<remote_base>/rsync_<slug>_<YYYY-MM-DD_HHMM>.log` one level higher inside `remote_base` (with optional `--history-name` and `--log-prefix` overrides).
+  - **Diskless Vault SSH Authentication**: Supports both vault-stored SSH passwords (`ssh/<target>/password`) and vault-stored SSH private keys (`ssh/<target>/private_key` or shared keys) with vault-pinned host key fingerprints (`ssh/<target>/host_fingerprint`), leaving zero keys or `~/.ssh/known_hosts` entries on the host.
+- **Zero-Trace Command & Script Runner (`sec exec`)**:
+  - **Vault-Stored Executable Scripts (`exec/<name>`)**: Added `sec exec save <name> [--stdin]`, `sec exec show <name>`, `sec exec list`, `sec exec rm <name>`, and `sec exec <name> [-- <args...>]`.
+  - **In-Memory Stdin Pipe Execution**: Feeds script bodies over an in-memory `stdin` pipe to `/bin/sh -s -- <args...>` with active stdout/stderr secret redaction and zero temporary `.sh` files or command-line script arguments in `ps aux`.
+- **Daemon `NoTrace` Audit & Access-Count Suppression**:
+  - Added `NoTrace bool` to `daemon.IPCRequest` (and wired it into `sec exec`, `sec backup`, and `vaultHostKeyCallback`) to suppress `audit.log` `GET` entries and `AccessCount`/`LastAccessed` disk writes during stealth operations.
+- **Hybrid Workspace Security Scanner (`sec scan`)**:
+  - **Multi-Engine Plaintext Credential Detection**: Combines `sec-native` recursive AST/config/entropy scanning with optional Homebrew `gitleaks` and `trufflehog` engines (`--git-history`, `--deep`, `--verify-live`, `--install-tools`).
+  - **3-Tier Integration Feasibility Advisor & Action List**: Classifies every finding into `DIRECT_READY` (`sec migrate-local` / `sec run`), `NEEDS_TOOL_CONFIG_REFACTOR` (env-var/template refactoring guidance), or `NEEDS_SEC_AGENT_EXTENSION`, and exports machine-readable reports via `--json` or `--output <file>`.
+- **Accessible Dual-Format Architecture Diagrams**:
+  - Upgraded architecture diagrams in `README.md` and `docs/` with WCAG-accessible Mermaid `flowchart` blocks (`accTitle`, `accDescr`, high-contrast dark/light classes) paired with collapsible `<details>` plain-text walkthroughs and ASCII diagrams.
+
+## [v2.19.0] - 2026-10-18
+
+### Added & Enhanced
+- **Companion Public Key Shredding (`sec ssh import-key --shred`, `sec ssh init --shred`)**:
+  - **Automatic Companion Discovery & Overwrite**: When `--shred` is active, `sec-agent` inspects `<path>.pub` and `<path>-cert.pub`. If present, companion public keys are multi-pass overwritten with random and zero bytes, synced, and unlinked alongside the private key to leave zero forensic metadata (usernames, comments, fingerprints) on disk.
+  - **`--keep-pub` Override**: Added `--keep-pub` across `sec ssh import-key` and `sec ssh init` to allow operators to preserve companion `.pub` files on disk when required for external portals or consoles.
+  - **Vault Write Safety Invariant**: Ingestion preserves both private and companion public keys on disk if format parsing, passphrase decryption, or vault write fails.
+- **Shared Vault Key References & Single-Point Rotation (`--key-secret`, `--shared`)**:
+  - **Fabric-Wide Shared Key Ingestion (`--shared <name>`)**: Added `sec ssh import-key --shared <name> <file>` to ingest administrative deployment keys directly into `ssh/shared/<name>/private_key` with key algorithm and fingerprint metadata, decoupled from single-host targets.
+  - **Shared Key Secret Pointers in Target Init**: Added `--key-secret <vault-path>` (and alias `--ssh-key-secret`) to `sec ssh init`. Bare names (e.g. `sonic_fabric`) automatically expand to `ssh/shared/sonic_fabric/private_key`. Target definitions store pointer references instead of duplicating private key bytes.
+  - **$O(1)$ Runtime Dereferencing**: `sec ssh <target>` dynamically resolves key secret pointers at runtime, fetching and parsing the shared key directly in RAM to achieve instant key rotation across multi-node fabrics without target re-initialization.
+
+## [v2.18.0] - 2026-10-18
+
+### Added & Enhanced
+- **Automated Key Ingestion Shredder (`sec ssh import-key --shred`)**:
+  - **In-Memory PEM & OpenSSH Validation**: Added `sec ssh import-key <target> <file_path>` supporting direct ingestion of OpenSSH and standard PEM private keys (ED25519, RSA, ECDSA) into `ssh/<target>/private_key` with key type and fingerprint extraction. Supports `--passphrase-key` for encrypted private keys.
+  - **Cryptographic Multi-Pass File Shredder (`--shred`)**: Implemented `shredFile(path)` executing multi-pass overwrite with cryptographically secure random bytes (`crypto/rand`) and zero bytes (`0x00`), each followed by `f.Sync()` before file truncation and unlinking.
+  - **Vault Write Confirmation Safety Invariant**: The shredding operation is strictly executed only upon verified vault write confirmation over IPC; corrupt, unparseable, or invalid keys leave the source file on disk intact.
+  - **`sec ssh init` Integration**: Added `--import-key <file>` and `--shred` flags to `sec ssh init` to import private keys into the vault during onboarding without leaving plaintext paths in `.secrc`.
+- **Zero-Trace Host Sanitizer (`sec ssh sanitize`)**:
+  - **Dual-Format `known_hosts` Scrubbing**: Implemented `sec ssh sanitize [<target>] [--all]` to purge target hostnames, IPs, and custom ports from `~/.ssh/known_hosts`. Supports both cleartext entries and standard OpenSSH HMAC-SHA1 hashed hosts (`|1|<salt>|<hash>`).
+  - **Atomic Replacement & Backup Unlinking**: Sanitization updates the known hosts file atomically with `0600` permissions and automatically removes `~/.ssh/known_hosts.old` to prevent forensic leakage of target hosts.
+  - **Automated Sanitization on Key Import**: `sec ssh import-key` automatically sanitizes the target host from `~/.ssh/known_hosts` by default, configurable via `--sanitize` / `--no-sanitize`.
+- **Autocompletion & Registry Parity**:
+  - Full bidirectional registry and autocompletion synchronization across Zsh, Bash, and Fish with zero command drift.
+
 ## [v2.17.0] - 2026-10-18
 
 ### Added & Enhanced

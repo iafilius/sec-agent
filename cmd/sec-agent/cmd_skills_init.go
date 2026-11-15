@@ -1263,6 +1263,7 @@ func handleBackupList(profile string) {
 			fmt.Println("  No .kdbx backup files in current directory.")
 		}
 	}
+	printStealthBackupJobsSection(profile)
 }
 
 func handleUniversalDedupe(activeProfile string, args []string) {

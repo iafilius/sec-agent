@@ -80,6 +80,7 @@ type IPCRequest struct {
 	ShowTrash      bool                         `json:"show_trash,omitempty"`
 	Permanent      bool                         `json:"permanent,omitempty"`
 	ClearAlias     bool                         `json:"clear_alias,omitempty"`
+	NoTrace        bool                         `json:"no_trace,omitempty"`
 }
 
 // Validate checks whether the IPCRequest action is supported.
@@ -594,40 +595,50 @@ func (d *Daemon) processRequest(c net.Conn, req IPCRequest, peerPID int) {
 
 	case IPCActionGet:
 		if d.masterKey == nil {
-			d.logAudit(AuditEventGet, req.Path, peerPID, false, "session_locked")
+			if !req.NoTrace {
+				d.logAudit(AuditEventGet, req.Path, peerPID, false, "session_locked")
+			}
 			d.sendError(c, "Session locked. Please unlock first.")
 			return
 		}
 		entry, exists := d.resolveSecret(req.Path, req.ExtendsProfile)
 		if !exists {
-			d.logAudit(AuditEventGet, req.Path, peerPID, false, "secret_not_found")
+			if !req.NoTrace {
+				d.logAudit(AuditEventGet, req.Path, peerPID, false, "secret_not_found")
+			}
 			d.sendError(c, fmt.Sprintf("secret %q not found", req.Path))
 			return
 		}
 
 		if !entry.Expires.IsZero() && time.Now().After(entry.Expires) {
 			if !req.ShowExpired {
-				d.logAudit(AuditEventGet, req.Path, peerPID, false, "secret_expired")
+				if !req.NoTrace {
+					d.logAudit(AuditEventGet, req.Path, peerPID, false, "secret_expired")
+				}
 				d.sendError(c, "Secret has expired")
 				return
 			}
 		}
 
-		now := time.Now()
-		entry.LastAccessed = now
-		entry.AccessCount++
+		if !req.NoTrace {
+			now := time.Now()
+			entry.LastAccessed = now
+			entry.AccessCount++
 
-		if d.secretsStore != nil && d.secretsStore.Secrets != nil {
-			if localEntry, ok := d.secretsStore.Secrets[store.SecretKey(req.Path)]; ok {
-				localEntry.LastAccessed = now
-				localEntry.AccessCount++
-				d.secretsStore.Secrets[store.SecretKey(req.Path)] = localEntry
-				_ = store.SaveStore(d.profile, d.secretsStore, d.masterKey)
+			if d.secretsStore != nil && d.secretsStore.Secrets != nil {
+				if localEntry, ok := d.secretsStore.Secrets[store.SecretKey(req.Path)]; ok {
+					localEntry.LastAccessed = now
+					localEntry.AccessCount++
+					d.secretsStore.Secrets[store.SecretKey(req.Path)] = localEntry
+					_ = store.SaveStore(d.profile, d.secretsStore, d.masterKey)
+				}
 			}
 		}
 
 		d.lastUsed = time.Now()
-		d.logAudit(AuditEventGet, req.Path, peerPID, true, "")
+		if !req.NoTrace {
+			d.logAudit(AuditEventGet, req.Path, peerPID, true, "")
+		}
 		d.sendResponse(c, IPCResponse{
 			Success:      true,
 			Value:        entry.Value,
@@ -945,7 +956,9 @@ func (d *Daemon) processRequest(c net.Conn, req IPCRequest, peerPID int) {
 
 	case IPCActionGetGroup:
 		if d.masterKey == nil {
-			d.logAudit(AuditEventGetGroup, req.Path, peerPID, false, "session_locked")
+			if !req.NoTrace {
+				d.logAudit(AuditEventGetGroup, req.Path, peerPID, false, "session_locked")
+			}
 			d.sendError(c, "Session locked. Please unlock first.")
 			return
 		}
@@ -967,7 +980,9 @@ func (d *Daemon) processRequest(c net.Conn, req IPCRequest, peerPID int) {
 			}
 		}
 		d.lastUsed = time.Now()
-		d.logAudit(AuditEventGetGroup, req.Path, peerPID, true, "")
+		if !req.NoTrace {
+			d.logAudit(AuditEventGetGroup, req.Path, peerPID, true, "")
+		}
 		d.sendResponse(c, IPCResponse{
 			Success: true,
 			Secrets: res,
