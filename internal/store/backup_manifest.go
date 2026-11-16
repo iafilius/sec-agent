@@ -19,6 +19,10 @@ const (
 	DefaultRemoteRsyncBin = "/opt/homebrew/bin/rsync"
 	DefaultModifyWindow   = 2
 	DefaultPartialDir     = ".rsync-partial"
+	// DefaultRsyncIOTimeoutSeconds makes rsync abort (exit 30) when no data moves for this long.
+	DefaultRsyncIOTimeoutSeconds = 600
+	// DefaultSSHKeepalive keeps ssh sessions alive and drops them after ~2 minutes without a reply.
+	DefaultSSHKeepalive = "-o ServerAliveInterval=30 -o ServerAliveCountMax=4"
 )
 
 // DefaultBackupExcludes returns a fresh slice of default rsync exclude patterns.

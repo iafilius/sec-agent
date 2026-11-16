@@ -428,6 +428,7 @@ func buildBatchRsyncArgs(batch store.BackupBatch, job store.BackupBatchJob, when
 		"--partial-dir=" + store.DefaultPartialDir,
 		"-b", "--backup-dir=" + expand(job.BackupDir),
 		"--modify-window=" + fmt.Sprint(store.DefaultModifyWindow),
+		"--timeout=" + fmt.Sprint(store.DefaultRsyncIOTimeoutSeconds),
 		"--rsync-path=" + store.DefaultRemoteRsyncBin + " --log-file=" + shellQuotePOSIX(expand(job.LogFile)),
 	}
 	if job.Sparse {
@@ -436,7 +437,7 @@ func buildBatchRsyncArgs(batch store.BackupBatch, job store.BackupBatchJob, when
 	for _, ex := range excludes {
 		args = append(args, "--exclude="+ex)
 	}
-	args = append(args, "-e", "ssh", source, batch.SSHTarget+":"+shellQuotePOSIX(job.Dest))
+	args = append(args, "-e", "ssh "+store.DefaultSSHKeepalive, source, batch.SSHTarget+":"+shellQuotePOSIX(job.Dest))
 	return args
 }
 

@@ -116,6 +116,19 @@ func TestBuildBatchRsyncArgsAlwaysExcludesAppleDouble(t *testing.T) {
 	}
 }
 
+func TestBuildBatchRsyncArgsDetectsStalls(t *testing.T) {
+	when := time.Date(2026, 3, 14, 9, 5, 0, 0, time.Local)
+	batch := testBatch(5)
+	args := buildBatchRsyncArgs(batch, batch.Jobs[0], when)
+	if !slices.Contains(args, "--timeout=600") {
+		t.Fatalf("rsync I/O timeout missing: %v", args)
+	}
+	idx := slices.Index(args, "-e")
+	if idx < 0 || !strings.Contains(args[idx+1], "ServerAliveInterval=30") {
+		t.Fatalf("ssh keepalive missing from -e: %v", args)
+	}
+}
+
 func TestBuildBatchRsyncArgsSparseOnlyWhenEnabled(t *testing.T) {
 	when := time.Date(2026, 3, 14, 9, 5, 0, 0, time.Local)
 	batch := testBatch(5)
