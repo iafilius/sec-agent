@@ -589,8 +589,8 @@ func initRegistry() {
 			Name:        "backup",
 			Category:    "Backup & Migration",
 			Description: "Manage stealth multi-folder rsync backups or export/import KeePassXC (.kdbx) backups",
-			Usage:       "sec backup <init|add-folder|remove-folder|show|jobs|run|export|import|list> [<name>|<file.kdbx>] [--target <user@host>] [--local-base <path>] [--remote-base <path>] [--ssh-key-secret <key>] [--ssh-password-key <key>] [--port <p>] [--remote-rsync <bin>] [--modify-window <sec>] [--partial-dir <dir>] [--exclude <pat>] [--folder <src>] [--dest <dst>] [--history-prefix <pfx>] [--slug <s>] [--dry-run] [--no-trace] [--trace] [--tofu] [--insecure] [--json] [--password <p> | --custom-password] [--merge | --overwrite] [--full-metadata]",
-			Flags:       []string{"--target", "--local-base", "--remote-base", "--ssh-key-secret", "--key-secret", "--ssh-password-key", "--port", "-p", "--remote-rsync", "--modify-window", "--partial-dir", "--exclude", "--folder", "--dest", "--history-prefix", "--slug", "--dry-run", "-n", "--no-trace", "--trace", "--tofu", "--trust-first-use", "--insecure", "--no-verify", "--update-host-key", "--json", "--password", "--custom-password", "--merge", "-m", "--overwrite", "--full-metadata"},
+			Usage:       "sec backup <init|add-folder|remove-folder|show|jobs|run|batch|export|import|list> [<name>|<file.kdbx>] [--target <user@host>] [--local-base <path>] [--remote-base <path>] [--ssh-key-secret <key>] [--ssh-password-key <key>] [--port <p>] [--remote-rsync <bin>] [--modify-window <sec>] [--partial-dir <dir>] [--exclude <pat>] [--folder <src>] [--dest <dst>] [--history-prefix <pfx>] [--slug <s>] [--file <json>] [--dry-run] [--no-trace] [--trace] [--tofu] [--insecure] [--json] [--password <p> | --custom-password] [--merge | --overwrite] [--full-metadata]",
+			Flags:       []string{"--target", "--local-base", "--remote-base", "--ssh-key-secret", "--key-secret", "--ssh-password-key", "--port", "-p", "--remote-rsync", "--modify-window", "--partial-dir", "--exclude", "--folder", "--dest", "--history-prefix", "--slug", "--dry-run", "-n", "--no-trace", "--trace", "--tofu", "--trust-first-use", "--insecure", "--no-verify", "--update-host-key", "--json", "--password", "--custom-password", "--merge", "-m", "--overwrite", "--full-metadata", "--file"},
 			Subcommands: []SubcommandSpec{
 				{Name: "init", Description: "Initialize stealth multi-folder rsync backup job in vault", Flags: []string{"--target", "--local-base", "--remote-base", "--ssh-key-secret", "--key-secret", "--ssh-password-key", "--port", "-p", "--remote-rsync", "--modify-window", "--partial-dir", "--exclude", "--folder"}},
 				{Name: "add-folder", Description: "Add or update a folder in a stealth backup job", Flags: []string{"--dest", "--history-prefix", "--slug"}},
@@ -601,6 +601,7 @@ func initRegistry() {
 				{Name: "export", Description: "Export secrets to KeePassXC (.kdbx) file", Flags: []string{"--password", "-p", "--custom-password"}},
 				{Name: "import", Description: "Import secrets from KeePassXC (.kdbx) file", Flags: []string{"--password", "-p", "--merge", "-m", "--overwrite", "--full-metadata"}},
 				{Name: "list", Description: "List automatic KeePassXC backups and stealth backup jobs in vault"},
+				{Name: "batch", Description: "Define, list, or run a named batch of rsync-over-ssh backup jobs (retried with backoff)", Flags: []string{"--file", "--dry-run", "-n"}},
 			},
 			Handler: func(profile string, args []string) {
 				if len(args) < 1 {

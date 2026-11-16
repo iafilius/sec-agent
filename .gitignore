@@ -22,5 +22,9 @@ sec_migration_test_bin2
 # Internal private documentation
 docs/internal/
 
+# Locally generated OpenSpec skills (not shared with the project)
+.github/skills/openspec-*/
+.agents/skills/openspec-*/
+
 .logs/resumer-debug.log
 .logs/resumer-history.md

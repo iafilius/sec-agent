@@ -37,7 +37,7 @@ type remoteCommandRunner func(remoteCmd string, stdin io.Reader, stdout, stderr 
 // multi-folder rsync backup subsystem (`sec backup <subcommand>`).
 func isStealthBackupSubcommand(sub string) bool {
 	switch sub {
-	case "init", "add-folder", "remove-folder", "show", "jobs", "run", "ssh-stdio":
+	case "init", "add-folder", "remove-folder", "show", "jobs", "run", "ssh-stdio", "batch":
 		return true
 	default:
 		return false
@@ -57,6 +57,7 @@ func printStealthBackupUsage() {
 	fmt.Println("  sec backup show <name>")
 	fmt.Println("  sec backup jobs")
 	fmt.Println("  sec backup run <name> [<folder-filter>] [--dry-run] [--no-trace] [--trace] [--tofu] [--insecure]")
+	fmt.Println("  sec backup batch <define|list|run> ... (see `sec backup batch --help`)")
 	fmt.Println("  sec backup <export|import|list> [<file.kdbx>]")
 }
 
@@ -79,6 +80,8 @@ func handleStealthBackup(profile string, args []string) {
 		handleStealthBackupJobs(profile, args[1:])
 	case "run":
 		handleStealthBackupRun(profile, args[1:])
+	case "batch":
+		handleBackupBatch(profile, args[1:])
 	case "ssh-stdio":
 		os.Exit(runInternalSSHStdio(args[1:]))
 	default:
