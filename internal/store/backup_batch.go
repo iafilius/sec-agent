@@ -35,6 +35,10 @@ type BackupBatchJob struct {
 	Sparse    bool   `json:"sparse,omitempty"`
 	BackupDir string `json:"backup_dir"`
 	LogFile   string `json:"log_file"`
+	// RsyncTimeout aborts an rsync attempt (exit 30) after this many seconds without data moving.
+	RsyncTimeout int `json:"rsync_timeout"`
+	// SSHOptions are extra ssh options for rsync's transport, e.g. "-o ServerAliveInterval=30".
+	SSHOptions string `json:"ssh_options"`
 }
 
 // VaultKey returns the vault key under which the batch is stored. The prefix is distinct from
@@ -98,6 +102,12 @@ func (j BackupBatchJob) Validate() error {
 	}
 	if strings.TrimSpace(j.LogFile) == "" {
 		return fmt.Errorf("%w: job %q log_file cannot be empty", ErrInvalidBackupManifest, j.Name)
+	}
+	if j.RsyncTimeout < 1 {
+		return fmt.Errorf("%w: job %q rsync_timeout must be at least 1 second", ErrInvalidBackupManifest, j.Name)
+	}
+	if strings.TrimSpace(j.SSHOptions) == "" || strings.ContainsAny(j.SSHOptions, "\r\n") {
+		return fmt.Errorf("%w: job %q ssh_options must be a single non-empty line", ErrInvalidBackupManifest, j.Name)
 	}
 	return nil
 }

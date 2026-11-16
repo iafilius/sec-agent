@@ -32,11 +32,13 @@ func testBatch(maxAttempts int) store.BackupBatch {
 		SSHTarget:   "user@backup.example",
 		MaxAttempts: maxAttempts,
 		Jobs: []store.BackupBatchJob{{
-			Name:      "docs",
-			Source:    "/src/docs",
-			Dest:      "/dst/docs",
-			BackupDir: "/bak/{date}",
-			LogFile:   "/log/docs_{datetime}.log",
+			Name:         "docs",
+			Source:       "/src/docs",
+			Dest:         "/dst/docs",
+			BackupDir:    "/bak/{date}",
+			LogFile:      "/log/docs_{datetime}.log",
+			RsyncTimeout: 600,
+			SSHOptions:   "-o ServerAliveInterval=30 -o ServerAliveCountMax=4",
 		}},
 	}
 }
