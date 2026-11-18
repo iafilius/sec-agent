@@ -376,7 +376,7 @@ func Set(service, account string, secret []byte) error {
 	return nil
 }
 
-var currentVersion = "v2.19.3"
+var currentVersion = "v2.19.4"
 
 // SetVersion sets the active binary version string used in Keychain operation prompts.
 func SetVersion(v string) {

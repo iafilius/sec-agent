@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -13,6 +15,33 @@ import (
 	"secure_secrets/internal/crypto"
 	"secure_secrets/internal/store"
 )
+
+func TestMain(m *testing.M) {
+	for i, arg := range os.Args {
+		if arg == "daemon" {
+			if os.Getenv("SEC_TEST_REEXEC_HANG") == "1" {
+				time.Sleep(10 * time.Second)
+				os.Exit(0)
+			}
+			prof := os.Getenv("SEC_PROFILE")
+			for j := 0; j < i; j++ {
+				if os.Args[j] == "--profile" && j+1 < len(os.Args) {
+					prof = os.Args[j+1]
+				}
+			}
+			if prof == "" {
+				prof = "default"
+			}
+			d, err := NewDaemon(prof, 5*time.Minute, "v2.19.4-reexec")
+			if err != nil {
+				os.Exit(1)
+			}
+			_ = d.Start()
+			return
+		}
+	}
+	os.Exit(m.Run())
+}
 
 func TestDaemonConcurrency(t *testing.T) {
 	profile := "concurrency-test"
@@ -415,5 +444,207 @@ func TestDaemonRelabel(t *testing.T) {
 	conn.Close()
 	if errResp.Success {
 		t.Errorf("expected error for non-existent secret, got success")
+	}
+}
+
+func TestHotReloadLargePayloadOver64KBAndConcurrentStatus(t *testing.T) {
+	tmpCfgDir, err := os.MkdirTemp("/tmp", "sec_hr64_*")
+	if err != nil {
+		t.Fatalf("MkdirTemp failed: %v", err)
+	}
+	defer os.RemoveAll(tmpCfgDir)
+	t.Setenv("SEC_CONFIG_DIR", tmpCfgDir)
+	t.Setenv("SEC_TEST_MODE", "1")
+
+	profile := "hr64"
+	sockPath, _ := config.GetSocketPath(profile)
+	masterKey := []byte("01234567890123456789012345678901")
+
+	// Seed > 100 KB of secrets (> 64 KB macOS pipe buffer)
+	largeSecrets := make(map[string]store.SecretEntry)
+	chunk := strings.Repeat("A", 8192)
+	for i := 0; i < 15; i++ {
+		largeSecrets[fmt.Sprintf("bulk/secret_%02d", i)] = store.SecretEntry{
+			Value:       fmt.Sprintf("%d-%s", i, chunk),
+			Comment:     "large payload secret",
+			Description: "exceeds 64 KB pipe buffer when combined",
+		}
+	}
+
+	d, err := NewDaemon(profile, 5*time.Minute, "v2.19.3-initial")
+	if err != nil {
+		t.Fatalf("NewDaemon failed: %v", err)
+	}
+	d.IsTestInstance = true
+	d.SetMasterKeyForTest(masterKey)
+	d.SetSessionTokenForTest("hr64-token")
+	d.SetSecretsForTest(largeSecrets)
+
+	go func() {
+		_ = d.Start()
+	}()
+	defer d.Stop()
+
+	for i := 0; i < 40; i++ {
+		if _, sErr := os.Stat(sockPath); sErr == nil {
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+
+	sendIPC := func(req IPCRequest) (IPCResponse, error) {
+		c, dialErr := net.DialTimeout("unix", sockPath, 1*time.Second)
+		if dialErr != nil {
+			return IPCResponse{}, dialErr
+		}
+		defer c.Close()
+		_ = c.SetDeadline(time.Now().Add(2 * time.Second))
+		if encErr := json.NewEncoder(c).Encode(req); encErr != nil {
+			return IPCResponse{}, encErr
+		}
+		var resp IPCResponse
+		if decErr := json.NewDecoder(c).Decode(&resp); decErr != nil {
+			return IPCResponse{}, decErr
+		}
+		return resp, nil
+	}
+
+	// Concurrently fire status requests while hot-reload is running
+	statusDone := make(chan error, 1)
+	go func() {
+		for i := 0; i < 5; i++ {
+			time.Sleep(10 * time.Millisecond)
+			resp, sErr := sendIPC(IPCRequest{Action: IPCActionStatus, Token: "hr64-token"})
+			if sErr == nil && !resp.Success {
+				statusDone <- fmt.Errorf("concurrent status returned Success=false: %s", resp.Error)
+				return
+			}
+		}
+		statusDone <- nil
+	}()
+
+	reexecResp, reexecErr := sendIPC(IPCRequest{Action: IPCActionReexec, Token: "hr64-token"})
+	if reexecErr != nil || !reexecResp.Success {
+		t.Fatalf("expected >64KB hot-reload to succeed without deadlock, got err=%v resp=%+v", reexecErr, reexecResp)
+	}
+
+	if sErr := <-statusDone; sErr != nil {
+		t.Errorf("concurrent status check failed during hot-reload: %v", sErr)
+	}
+
+	// Verify replacement daemon is serving the >100 KB state and reports the new version
+	var postResp IPCResponse
+	var postErr error
+	for i := 0; i < 30; i++ {
+		postResp, postErr = sendIPC(IPCRequest{Action: IPCActionStatus, Token: "hr64-token"})
+		if postErr == nil && postResp.Success && postResp.StatusInfo != nil && postResp.StatusInfo.Version == "v2.19.4-reexec" {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if postErr != nil || !postResp.Success || postResp.StatusInfo == nil {
+		t.Fatalf("post-reload status failed: err=%v resp=%+v", postErr, postResp)
+	}
+	if postResp.StatusInfo.Version != "v2.19.4-reexec" {
+		t.Errorf("expected replacement daemon version 'v2.19.4-reexec', got %q", postResp.StatusInfo.Version)
+	}
+	if postResp.StatusInfo.TotalSecrets != 15 {
+		t.Errorf("expected replacement daemon to preserve all 15 secrets, got %d", postResp.StatusInfo.TotalSecrets)
+	}
+
+	// Stop the replacement child daemon cleanly by sending Clear
+	_, _ = sendIPC(IPCRequest{Action: IPCActionClear, Token: "hr64-token"})
+}
+
+func TestHotReloadStuckReplacementProcessAbortsAndKeepsDaemonServing(t *testing.T) {
+	tmpCfgDir, err := os.MkdirTemp("/tmp", "sec_hrhang_*")
+	if err != nil {
+		t.Fatalf("MkdirTemp failed: %v", err)
+	}
+	defer os.RemoveAll(tmpCfgDir)
+	t.Setenv("SEC_CONFIG_DIR", tmpCfgDir)
+	t.Setenv("SEC_TEST_MODE", "1")
+	t.Setenv("SEC_TEST_REEXEC_HANG", "1")
+
+	profile := "hrhang"
+	sockPath, _ := config.GetSocketPath(profile)
+	masterKey := []byte("01234567890123456789012345678901")
+
+	// Seed > 100 KB of secrets so pipe write itself would block without deadline
+	largeSecrets := make(map[string]store.SecretEntry)
+	chunk := strings.Repeat("B", 8192)
+	for i := 0; i < 15; i++ {
+		largeSecrets[fmt.Sprintf("bulk/hang_%02d", i)] = store.SecretEntry{
+			Value: fmt.Sprintf("%d-%s", i, chunk),
+		}
+	}
+
+	d, err := NewDaemon(profile, 5*time.Minute, "v2.19.3-stay-alive")
+	if err != nil {
+		t.Fatalf("NewDaemon failed: %v", err)
+	}
+	d.IsTestInstance = true
+	d.ReexecTimeout = 250 * time.Millisecond
+	d.SetMasterKeyForTest(masterKey)
+	d.SetSessionTokenForTest("hrhang-token")
+	d.SetSecretsForTest(largeSecrets)
+
+	go func() {
+		_ = d.Start()
+	}()
+	defer d.Stop()
+
+	for i := 0; i < 40; i++ {
+		if _, sErr := os.Stat(sockPath); sErr == nil {
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+
+	sendIPC := func(req IPCRequest) (IPCResponse, error) {
+		c, dialErr := net.DialTimeout("unix", sockPath, 1*time.Second)
+		if dialErr != nil {
+			return IPCResponse{}, dialErr
+		}
+		defer c.Close()
+		_ = c.SetDeadline(time.Now().Add(2 * time.Second))
+		if encErr := json.NewEncoder(c).Encode(req); encErr != nil {
+			return IPCResponse{}, encErr
+		}
+		var resp IPCResponse
+		if decErr := json.NewDecoder(c).Decode(&resp); decErr != nil {
+			return IPCResponse{}, decErr
+		}
+		return resp, nil
+	}
+
+	reexecResp, reexecErr := sendIPC(IPCRequest{Action: IPCActionReexec, Token: "hrhang-token"})
+	if reexecErr != nil {
+		t.Fatalf("expected structured error response from aborted reexec, got transport error: %v", reexecErr)
+	}
+	if reexecResp.Success {
+		t.Fatalf("expected reexecResp.Success == false when replacement process never reads pipe")
+	}
+	if !strings.Contains(reexecResp.Error, "hot-reload handoff failed") {
+		t.Errorf("expected error message to mention 'hot-reload handoff failed', got %q", reexecResp.Error)
+	}
+
+	// Verify current daemon is STILL alive and serving requests with its full state
+	statusResp, statusErr := sendIPC(IPCRequest{Action: IPCActionStatus, Token: "hrhang-token"})
+	if statusErr != nil || !statusResp.Success || statusResp.StatusInfo == nil {
+		t.Fatalf("expected original daemon to keep serving after aborted reexec, got err=%v resp=%+v", statusErr, statusResp)
+	}
+	if statusResp.StatusInfo.Version != "v2.19.3-stay-alive" || statusResp.StatusInfo.TotalSecrets != 15 {
+		t.Errorf("unexpected status after aborted reexec: %+v", statusResp.StatusInfo)
+	}
+
+	// Verify audit log recorded a failed REEXEC entry
+	auditPath := filepath.Join(tmpCfgDir, "audit.log")
+	auditBytes, aErr := os.ReadFile(auditPath)
+	if aErr != nil {
+		t.Fatalf("expected audit log to be written at %s: %v", auditPath, aErr)
+	}
+	if !strings.Contains(string(auditBytes), `"action":"REEXEC"`) || !strings.Contains(string(auditBytes), `"success":false`) {
+		t.Errorf("expected failed REEXEC audit entry in audit.log, got:\n%s", string(auditBytes))
 	}
 }

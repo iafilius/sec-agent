@@ -1132,4 +1132,76 @@ func TestLoadStealthBackupManifestFallbackToBackupBatchPrefix(t *testing.T) {
 	if len(manifests) != 1 || manifests[0].Name != "example-batch" {
 		t.Errorf("expected collectStealthBackupManifests to include 'example-batch', got %+v", manifests)
 	}
+
+	// Also verify the scenario where backup/example-batch was saved prior to v2.19.3 (with Timeout=0)
+	// while backup-batch/example-batch has rsync_timeout=600 and ssh/<target>/server_alive_* is set in vault:
+	staleManifestJSON := `{
+		"name": "example-batch",
+		"ssh_target": "home-nas",
+		"local_base": "/Users/backupuser",
+		"remote_base": "/Volumes/MediaArchive/Backups",
+		"folders": [
+			{
+				"name": "example-home",
+				"src": "~/",
+				"dest": "/Volumes/MediaArchive/Backups/home-archive/",
+				"sparse": true,
+				"excludes": ["Library", "Example"]
+			}
+		]
+	}`
+	_, _ = queryDaemon(profile, daemon.IPCRequest{
+		Action:  daemon.IPCActionSet,
+		Path:    "backup/example-batch",
+		Value:   staleManifestJSON,
+		NoTrace: true,
+	})
+	_, _ = queryDaemon(profile, daemon.IPCRequest{
+		Action:  daemon.IPCActionSet,
+		Path:    "ssh/home-nas/host",
+		Value:   "10.0.0.50",
+		NoTrace: true,
+	})
+	_, _ = queryDaemon(profile, daemon.IPCRequest{
+		Action:  daemon.IPCActionSet,
+		Path:    "ssh/home-nas/server_alive_interval",
+		Value:   "30",
+		NoTrace: true,
+	})
+	_, _ = queryDaemon(profile, daemon.IPCRequest{
+		Action:  daemon.IPCActionSet,
+		Path:    "ssh/home-nas/server_alive_count_max",
+		Value:   "4",
+		NoTrace: true,
+	})
+
+	// Capture handleStealthBackupShow output
+	rPipe, wPipe, _ := os.Pipe()
+	oldStdout := os.Stdout
+	os.Stdout = wPipe
+	var showBuf bytes.Buffer
+	readDone := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(&showBuf, rPipe)
+		close(readDone)
+	}()
+
+	handleStealthBackupShow(profile, []string{"example-batch"})
+
+	_ = wPipe.Close()
+	os.Stdout = oldStdout
+	<-readDone
+	_ = rPipe.Close()
+
+	showOut := showBuf.String()
+	for _, wantSub := range []string{
+		"Timeout:     600s",
+		"SSH Alive:   interval=30s count_max=4",
+		"Sparse:      true",
+		"Excludes:    Library, Example, ._*",
+	} {
+		if !strings.Contains(showOut, wantSub) {
+			t.Errorf("expected sec backup show output to contain %q, got:\n%s", wantSub, showOut)
+		}
+	}
 }

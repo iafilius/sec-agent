@@ -290,7 +290,10 @@ func (f BackupFolderSpec) ResolveLocalDir(localBase string) string {
 	if src == "~" || src == "~/" || src == "." || src == "./" {
 		return filepath.Clean(localBase)
 	}
-	if strings.HasPrefix(src, "~/") && strings.TrimSpace(localBase) != "" && localBase != "~" {
+	if strings.HasPrefix(src, "~/") {
+		if strings.TrimSpace(localBase) == "" || localBase == "~" {
+			return src
+		}
 		return filepath.Join(localBase, strings.TrimPrefix(src, "~/"))
 	}
 	if filepath.IsAbs(src) {

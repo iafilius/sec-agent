@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1723,6 +1724,61 @@ func TestPrintRecoveryMnemonicSingleLineAndOptOut(t *testing.T) {
 	}
 	if strings.Contains(outOptOut, "   "+mnemonic) {
 		t.Errorf("expected single-line raw mnemonic to be omitted when noSingleLine=true, got:\n%s", outOptOut)
+	}
+}
+
+func TestQueryDaemonReadTimeoutAndHandleRestartError(t *testing.T) {
+	tmpCfgDir, err := os.MkdirTemp("/tmp", "sec_qd_to_*")
+	if err != nil {
+		t.Fatalf("MkdirTemp failed: %v", err)
+	}
+	defer os.RemoveAll(tmpCfgDir)
+	t.Setenv("SEC_CONFIG_DIR", tmpCfgDir)
+	t.Setenv("SEC_TEST_MODE", "1")
+
+	origDeadline := daemonIPCDeadline
+	daemonIPCDeadline = 120 * time.Millisecond
+	defer func() {
+		daemonIPCDeadline = origDeadline
+	}()
+
+	profile := "qdtimeout"
+	sockPath, err := config.GetSocketPath(profile)
+	if err != nil {
+		t.Fatalf("GetSocketPath failed: %v", err)
+	}
+
+	// Start a dummy Unix socket listener that accepts connections and never replies
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("net.Listen failed: %v", err)
+	}
+	defer listener.Close()
+
+	doneCh := make(chan struct{})
+	defer close(doneCh)
+	go func() {
+		for {
+			conn, aErr := listener.Accept()
+			if aErr != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				<-doneCh
+			}(conn)
+		}
+	}()
+
+	_, qErr := queryDaemon(profile, daemon.IPCRequest{Action: daemon.IPCActionStatus})
+	if qErr == nil {
+		t.Fatalf("expected queryDaemon to time out when daemon never responds")
+	}
+	if !strings.Contains(qErr.Error(), "daemon did not respond") {
+		t.Errorf("expected timeout error to state 'daemon did not respond', got: %v", qErr)
+	}
+	if isDaemonNotRunningError(qErr) {
+		t.Errorf("expected timeout error NOT to be classified as isDaemonNotRunningError")
 	}
 }
 

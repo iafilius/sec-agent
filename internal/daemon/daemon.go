@@ -217,10 +217,13 @@ type Daemon struct {
 	version        string
 	prodConfirmed  bool
 	lockFile       *os.File
-	lastActivity   time.Time
-	idleTimeout    time.Duration
-	socketFileInfo os.FileInfo
-	IsTestInstance bool
+	lastActivity    time.Time
+	idleTimeout     time.Duration
+	socketFileInfo  os.FileInfo
+	IsTestInstance  bool
+	ReexecTimeout   time.Duration
+	reexecCompleted bool
+	reexecDoneCh    chan struct{}
 }
 
 // NewDaemon creates a new daemon instance.
@@ -239,27 +242,42 @@ func NewDaemon(profile string, ttl time.Duration, version string) (*Daemon, erro
 	}, nil
 }
 
-func (d *Daemon) checkAndRestoreReexecState() error {
+func (d *Daemon) checkAndRestoreReexecState() (bool, error) {
 	fdStr := os.Getenv("SEC_REEXEC_FD")
 	if fdStr == "" {
-		return nil
+		return false, nil
 	}
 	fd, err := strconv.Atoi(fdStr)
 	if err != nil {
-		return nil
+		return false, nil
 	}
 	_ = os.Unsetenv("SEC_REEXEC_FD")
+
+	ackFdStr := os.Getenv("SEC_REEXEC_ACK_FD")
+	_ = os.Unsetenv("SEC_REEXEC_ACK_FD")
+	var ackFile *os.File
+	if ackFdStr != "" {
+		if ackFd, aErr := strconv.Atoi(ackFdStr); aErr == nil && ackFd > 0 {
+			// #nosec G115
+			ackFile = os.NewFile(uintptr(ackFd), "reexec_ack_pipe")
+		}
+	}
+	defer func() {
+		if ackFile != nil {
+			_ = ackFile.Close()
+		}
+	}()
 
 	// #nosec G115
 	file := os.NewFile(uintptr(fd), "reexec_pipe")
 	if file == nil {
-		return fmt.Errorf("invalid reexec pipe file descriptor")
+		return true, fmt.Errorf("invalid reexec pipe file descriptor")
 	}
 	defer file.Close()
 
 	var payload DaemonStatePayload
 	if err := json.NewDecoder(file).Decode(&payload); err != nil {
-		return fmt.Errorf("failed to decode reexec payload: %w", err)
+		return true, fmt.Errorf("failed to decode reexec payload: %w", err)
 	}
 
 	if len(payload.MasterKey) > 0 {
@@ -287,12 +305,18 @@ func (d *Daemon) checkAndRestoreReexecState() error {
 		d.mu.Unlock()
 		d.logAudit(AuditEventReexec, d.profile, 0, true, "")
 	}
-	return nil
+
+	if ackFile != nil {
+		_, _ = ackFile.Write([]byte("1"))
+		_ = ackFile.Close()
+		ackFile = nil
+	}
+	return true, nil
 }
 
 // Start runs the IPC Unix socket server.
 func (d *Daemon) Start() error {
-	_ = d.checkAndRestoreReexecState()
+	wasReexec, _ := d.checkAndRestoreReexecState()
 
 	lockPath, err := config.GetLockFilePath(d.profile)
 	if err != nil {
@@ -310,8 +334,8 @@ func (d *Daemon) Start() error {
 	// If this is a reexec child, wait briefly for parent to hand over lock.
 	var lockErr error
 	maxAttempts := 1
-	if os.Getenv("SEC_REEXEC_FD") != "" {
-		maxAttempts = 20
+	if wasReexec {
+		maxAttempts = 40
 	}
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		lockErr = unix.Flock(int(lockFile.Fd()), unix.LOCK_EX|unix.LOCK_NB)
@@ -348,13 +372,26 @@ func (d *Daemon) Start() error {
 	d.mu.Unlock()
 
 	d.writePIDLockfile()
-	defer d.removePIDLockfile()
+	defer func() {
+		d.mu.Lock()
+		reexecDone := d.reexecCompleted
+		d.mu.Unlock()
+		if !reexecDone {
+			d.removePIDLockfile()
+		}
+	}()
 
 	go d.expiryTicker()
 
 	for {
 		conn, err := l.Accept()
 		if err != nil {
+			d.mu.Lock()
+			waitCh := d.reexecDoneCh
+			d.mu.Unlock()
+			if waitCh != nil {
+				<-waitCh
+			}
 			return nil
 		}
 		go d.handleConnection(conn)
@@ -397,7 +434,14 @@ func (d *Daemon) ShouldAutoTerminate() bool {
 
 func (d *Daemon) processRequest(c net.Conn, req IPCRequest, peerPID int) {
 	d.mu.Lock()
-	defer d.mu.Unlock()
+	locked := true
+	unlock := func() {
+		if locked {
+			locked = false
+			d.mu.Unlock()
+		}
+	}
+	defer unlock()
 
 	d.lastActivity = time.Now()
 
@@ -470,23 +514,22 @@ func (d *Daemon) processRequest(c net.Conn, req IPCRequest, peerPID int) {
 			return
 		}
 
-		r, w, err := os.Pipe()
-		if err != nil {
-			d.sendError(c, fmt.Sprintf("failed to create hot-reload state pipe: %v", err))
-			return
-		}
-
-		var activeSecrets map[store.SecretKey]store.SecretEntry
-		if d.secretsStore != nil && d.secretsStore.Secrets != nil {
-			activeSecrets = d.secretsStore.Secrets
-		}
-
 		if d.sessionToken == "" {
 			d.sessionToken = "reexec-active-token"
 		}
 
+		keyCopy := make([]byte, len(d.masterKey))
+		copy(keyCopy, d.masterKey)
+
+		activeSecrets := make(map[store.SecretKey]store.SecretEntry)
+		if d.secretsStore != nil && d.secretsStore.Secrets != nil {
+			for k, v := range d.secretsStore.Secrets {
+				activeSecrets[k] = v
+			}
+		}
+
 		payload := DaemonStatePayload{
-			MasterKey:           d.masterKey,
+			MasterKey:           keyCopy,
 			Profile:             d.profile,
 			SessionStart:        d.sessionStart,
 			SessionTTL:          d.sessionTTL,
@@ -497,52 +540,148 @@ func (d *Daemon) processRequest(c net.Conn, req IPCRequest, peerPID int) {
 			Secrets:             activeSecrets,
 		}
 
+		wipeBytes := func(b []byte) {
+			for i := range b {
+				b[i] = 0
+			}
+		}
+
+		// Serialize under d.mu, then immediately release d.mu before any pipe or process I/O
+		// so payloads > 64 KB never block d.mu or concurrent status/expiry checks.
 		// #nosec G117
-		if err := json.NewEncoder(w).Encode(payload); err != nil {
-			_ = r.Close()
-			_ = w.Close()
+		payloadBytes, err := json.Marshal(payload)
+		wipeBytes(keyCopy)
+		if err != nil {
+			wipeBytes(payloadBytes)
 			d.sendError(c, fmt.Sprintf("failed to encode hot-reload payload: %v", err))
 			return
 		}
-		_ = w.Close()
+		payloadBytes = append(payloadBytes, '\n')
+
+		profile := d.profile
+		version := d.version
+		sockPath := d.socketPath
+		isTest := d.IsTestInstance
+		reexecTimeout := d.ReexecTimeout
+		if reexecTimeout <= 0 {
+			reexecTimeout = 5 * time.Second
+		}
+
+		unlock()
+		defer wipeBytes(payloadBytes)
 
 		execPath, err := os.Executable()
 		if err != nil {
-			_ = r.Close()
+			d.logAudit(AuditEventReexec, profile, peerPID, false, err.Error())
 			d.sendError(c, fmt.Sprintf("failed to resolve executable path: %v", err))
 			return
 		}
 
-		d.sendResponse(c, IPCResponse{
-			Success: true,
-			Value:   "Daemon hot-reloading in memory via pipe handoff...",
-			Version: d.version,
-		})
+		r, w, err := os.Pipe()
+		if err != nil {
+			d.logAudit(AuditEventReexec, profile, peerPID, false, err.Error())
+			d.sendError(c, fmt.Sprintf("failed to create hot-reload state pipe: %v", err))
+			return
+		}
 
+		ackR, ackW, err := os.Pipe()
+		if err != nil {
+			_ = r.Close()
+			_ = w.Close()
+			d.logAudit(AuditEventReexec, profile, peerPID, false, err.Error())
+			d.sendError(c, fmt.Sprintf("failed to create hot-reload ack pipe: %v", err))
+			return
+		}
+
+		// Start the replacement process BEFORE writing the state payload so it drains the pipe concurrently.
+		// #nosec G204
+		cmd := exec.Command(execPath, "--profile", profile, "daemon")
+		cmd.Env = append(os.Environ(), "SEC_REEXEC_FD=3", "SEC_REEXEC_ACK_FD=4", fmt.Sprintf("SEC_PROFILE=%s", profile))
+		cmd.ExtraFiles = []*os.File{r, ackW}
+		cmd.Stdout = nil
+		cmd.Stderr = nil
+
+		if err := cmd.Start(); err != nil {
+			_ = r.Close()
+			_ = w.Close()
+			_ = ackR.Close()
+			_ = ackW.Close()
+			d.logAudit(AuditEventReexec, profile, peerPID, false, err.Error())
+			d.sendError(c, fmt.Sprintf("failed to start replacement daemon: %v", err))
+			return
+		}
+		_ = r.Close()
+		_ = ackW.Close()
+
+		deadline := time.Now().Add(reexecTimeout)
+		_ = w.SetWriteDeadline(deadline)
+		_ = ackR.SetReadDeadline(deadline)
+
+		_, writeErr := w.Write(payloadBytes)
+		closeErr := w.Close()
+		if writeErr == nil && closeErr != nil {
+			writeErr = closeErr
+		}
+
+		var ackBuf [1]byte
+		var ackErr error
+		if writeErr == nil {
+			n, rErr := ackR.Read(ackBuf[:])
+			if rErr != nil {
+				ackErr = fmt.Errorf("replacement daemon did not consume state handoff before deadline: %w", rErr)
+			} else if n == 0 || ackBuf[0] != '1' {
+				ackErr = fmt.Errorf("replacement daemon exited without acknowledging state handoff")
+			}
+		}
+		_ = ackR.Close()
+
+		handoffErr := writeErr
+		if handoffErr == nil {
+			handoffErr = ackErr
+		}
+		if handoffErr != nil {
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+				_, _ = cmd.Process.Wait()
+			}
+			d.logAudit(AuditEventReexec, profile, peerPID, false, handoffErr.Error())
+			d.sendError(c, fmt.Sprintf("hot-reload handoff failed (current daemon kept running): %v", handoffErr))
+			return
+		}
+
+		reexecDoneCh := make(chan struct{})
+		d.mu.Lock()
+		d.reexecCompleted = true
+		d.reexecDoneCh = reexecDoneCh
 		if d.listener != nil {
 			_ = d.listener.Close()
 		}
 		if d.lockFile != nil {
 			_ = unix.Flock(int(d.lockFile.Fd()), unix.LOCK_UN)
 		}
+		d.mu.Unlock()
 
-		// #nosec G204
-		cmd := exec.Command(execPath, "--profile", d.profile, "daemon")
-		cmd.Env = append(os.Environ(), "SEC_REEXEC_FD=3", fmt.Sprintf("SEC_PROFILE=%s", d.profile))
-		cmd.ExtraFiles = []*os.File{r}
-		cmd.Stdout = nil
-		cmd.Stderr = nil
-
-		if err := cmd.Start(); err != nil {
-			_ = r.Close()
-			d.logAudit(AuditEventReexec, d.profile, peerPID, false, err.Error())
-			return
+		// Wait briefly for replacement daemon to remove old socket and bind the new socket
+		// so immediate follow-up CLI requests connect to the replacement daemon.
+		time.Sleep(40 * time.Millisecond)
+		for i := 0; i < 30; i++ {
+			if _, sErr := os.Stat(sockPath); sErr == nil {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
 		}
-		_ = r.Close()
-		d.logAudit(AuditEventReexec, d.profile, peerPID, true, "")
+
+		d.logAudit(AuditEventReexec, profile, peerPID, true, "")
+		d.sendResponse(c, IPCResponse{
+			Success: true,
+			Value:   "Daemon hot-reloading in memory via pipe handoff...",
+			Version: version,
+		})
+		close(reexecDoneCh)
+
 		go func() {
 			time.Sleep(50 * time.Millisecond)
-			if !d.IsTestInstance && os.Getenv("SEC_TEST_MODE") != "1" {
+			if !isTest && os.Getenv("SEC_TEST_MODE") != "1" {
 				os.Exit(0)
 			}
 		}()

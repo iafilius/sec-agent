@@ -5,6 +5,19 @@ All notable changes to `sec-agent` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v2.19.4] - 2026-11-18
+
+### Fixed & Enhanced
+- **Non-Blocking Daemon Hot-Reload Pipe Handoff for >64 KB Profiles (`sec restart --hot-reload`)**:
+  - Snapshots and marshals `DaemonStatePayload` under `d.mu`, then immediately releases `d.mu` before any pipe or child process I/O so payloads exceeding the 64 KB macOS pipe buffer never deadlock the daemon or block concurrent `sec status` / `expiryTicker` calls.
+  - Starts the replacement child process (`cmd.Start()`) before writing the serialized payload to the pipe with a bounded write/ack deadline (`5s`) and zeroes the payload buffer in memory immediately after handoff.
+  - Aborts cleanly (killing the stuck replacement process, keeping the current daemon serving on its existing socket/lockfile, and recording a failed `REEXEC` audit entry) if the replacement process fails to consume and acknowledge the handoff before the deadline.
+  - Fixes `Start()` lockfile retry (`maxAttempts = 40`) on `wasReexec` and coordinates parent listener close (`reexecDoneCh` / `reexecCompleted`) so the parent never exits or deletes the PID file before the IPC response is delivered.
+- **Bounded CLI `queryDaemon` Deadlines & Accurate `sec restart` Error Reporting**:
+  - Applies a socket deadline (`daemonIPCDeadline`, default `10s`) in `queryDaemon`, surfacing timeouts with `"daemon did not respond"`, and updates `handleRestart` to report real failure reasons instead of printing `"is not currently running"` on non-connection errors.
+- **`sec backup show` / `sec backup batch show` Legacy Backfill, Target Keepalive Resolution & `--json`**:
+  - Backfills missing `Timeout` and `ServerAlive*` values from `backup-batch/<name>` when `backup/<name>` was saved prior to `v2.19.3`, resolves target-level `ssh/<target>/server_alive_*` values in `show`, displays per-folder `Sparse` and `Excludes`, supports `--json`, and prevents `~/~/...` path duplication when `local_base` is `"~"`.
+
 ## [v2.19.3] - 2026-11-18
 
 ### Added & Enhanced

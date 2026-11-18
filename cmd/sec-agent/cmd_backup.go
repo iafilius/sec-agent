@@ -228,6 +228,52 @@ func loadStealthBackupManifest(profile string, rawName string, noTrace bool) (st
 		manifest.Name = jobName
 	}
 	manifest.ApplyDefaults()
+
+	// If this manifest was loaded from backup/<name> (e.g. imported prior to v2.19.3 before
+	// rsync_timeout / ssh_options normalization existed), backfill any zero timeout or
+	// server_alive_* values from a companion backup-batch/<name> entry if present.
+	if vaultPath == string(jobName.VaultKey()) {
+		legacyBatchPath := "backup-batch/" + jobName.String()
+		if altResp, altErr := queryDaemon(profile, daemon.IPCRequest{
+			Action:  daemon.IPCActionGet,
+			Path:    legacyBatchPath,
+			NoTrace: noTrace,
+		}); altErr == nil && altResp != nil && altResp.Success && altResp.Value != "" {
+			var legacyManifest store.BackupManifest
+			if json.Unmarshal([]byte(altResp.Value), &legacyManifest) == nil {
+				legacyManifest.ApplyDefaults()
+				if manifest.Timeout == 0 && legacyManifest.Timeout > 0 {
+					manifest.Timeout = legacyManifest.Timeout
+				}
+				if manifest.ServerAliveInterval == 0 && legacyManifest.ServerAliveInterval > 0 {
+					manifest.ServerAliveInterval = legacyManifest.ServerAliveInterval
+				}
+				if manifest.ServerAliveCountMax == 0 && legacyManifest.ServerAliveCountMax > 0 {
+					manifest.ServerAliveCountMax = legacyManifest.ServerAliveCountMax
+				}
+				for i := range manifest.Folders {
+					mf := &manifest.Folders[i]
+					for _, lf := range legacyManifest.Folders {
+						if (mf.Name != "" && mf.Name == lf.Name) ||
+							mf.Source == lf.Source ||
+							mf.EffectiveDestName() == lf.EffectiveDestName() {
+							if mf.Timeout == 0 && lf.Timeout > 0 {
+								mf.Timeout = lf.Timeout
+							}
+							if mf.ServerAliveInterval == 0 && lf.ServerAliveInterval > 0 {
+								mf.ServerAliveInterval = lf.ServerAliveInterval
+							}
+							if mf.ServerAliveCountMax == 0 && lf.ServerAliveCountMax > 0 {
+								mf.ServerAliveCountMax = lf.ServerAliveCountMax
+							}
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+
 	if err := manifest.Validate(); err != nil {
 		return store.BackupManifest{}, err
 	}
@@ -755,17 +801,22 @@ func handleStealthBackupRemoveFolder(profile string, args []string) {
 
 func handleStealthBackupShow(profile string, args []string) {
 	var rawName string
+	jsonOutput := jsonErrors
 	for _, a := range args {
 		if a == "--help" || a == "-h" {
-			fmt.Println("Usage: sec backup show <name>")
+			fmt.Println("Usage: sec backup show <name> [--json]")
 			return
+		}
+		if a == "--json" {
+			jsonOutput = true
+			continue
 		}
 		if !strings.HasPrefix(a, "-") && rawName == "" {
 			rawName = a
 		}
 	}
 	if rawName == "" {
-		fail("MISSING_ARGUMENT", fmt.Errorf("backup job <name> is required"), "Usage: sec backup show <name>")
+		fail("MISSING_ARGUMENT", fmt.Errorf("backup job <name> is required"), "Usage: sec backup show <name> [--json]")
 	}
 
 	manifest, err := loadStealthBackupManifest(profile, rawName, true)
@@ -775,6 +826,28 @@ func handleStealthBackupShow(profile string, args []string) {
 			code = "SECRET_NOT_FOUND"
 		}
 		fail(code, err, "")
+	}
+
+	var targetInterval, targetCountMax int
+	if sshCfg, sErr := resolveStealthSSHTarget(profile, manifest, true); sErr == nil && sshCfg != nil {
+		targetInterval = sshCfg.ServerAliveInterval
+		targetCountMax = sshCfg.ServerAliveCountMax
+	}
+
+	if jsonOutput {
+		outManifest := manifest
+		if outManifest.ServerAliveInterval == 0 && targetInterval > 0 {
+			outManifest.ServerAliveInterval = targetInterval
+		}
+		if outManifest.ServerAliveCountMax == 0 && targetCountMax > 0 {
+			outManifest.ServerAliveCountMax = targetCountMax
+		}
+		data, jErr := json.MarshalIndent(outManifest, "", "  ")
+		if jErr != nil {
+			fail("SERIALIZATION_FAILED", jErr, "")
+		}
+		fmt.Println(string(data))
+		return
 	}
 
 	now := time.Now()
@@ -800,8 +873,16 @@ func handleStealthBackupShow(profile string, args []string) {
 	if manifest.Timeout > 0 {
 		fmt.Printf("  Rsync Timeout:  %ds\n", manifest.Timeout)
 	}
-	if manifest.ServerAliveInterval > 0 {
-		fmt.Printf("  SSH Keepalive:  interval=%ds count_max=%d\n", manifest.ServerAliveInterval, manifest.ServerAliveCountMax)
+	jobSAI := manifest.ServerAliveInterval
+	if jobSAI == 0 {
+		jobSAI = targetInterval
+	}
+	jobSAC := manifest.ServerAliveCountMax
+	if jobSAC == 0 {
+		jobSAC = targetCountMax
+	}
+	if jobSAI > 0 {
+		fmt.Printf("  SSH Keepalive:  interval=%ds count_max=%d\n", jobSAI, jobSAC)
 	}
 	fmt.Printf("  Excludes:       %s\n", strings.Join(manifest.Excludes, ", "))
 	fmt.Printf("  Folders (%d):\n", len(manifest.Folders))
@@ -809,18 +890,23 @@ func handleStealthBackupShow(profile string, args []string) {
 		fmt.Println("    (none configured — add with 'sec backup add-folder <name> <folder>')")
 		return
 	}
+	expandedLocalBase := expandLocalBasePath(manifest.LocalBase)
 	for i, f := range manifest.Folders {
 		fmt.Printf("    [%d] %s (slug: %s, prefix: %s)\n", i+1, f.Source, f.DeriveSlug(), f.DeriveHistoryPrefix())
-		fmt.Printf("        Local Path:  %s\n", f.ResolveLocalDir(manifest.LocalBase))
+		fmt.Printf("        Local Path:  %s\n", f.ResolveLocalDir(expandedLocalBase))
 		fmt.Printf("        Destination: %s\n", f.DeriveRemoteDest(manifest.RemoteBase))
 		fmt.Printf("        History Dir: %s\n", f.DeriveHistoryDir(manifest.RemoteBase, dateStr))
 		fmt.Printf("        Remote Log:  %s\n", f.DeriveRemoteLogPath(manifest.RemoteBase, datetimeStr))
+		if f.Sparse {
+			fmt.Printf("        Sparse:      true\n")
+		}
 		if effTo := f.EffectiveTimeout(manifest.Timeout); effTo > 0 {
 			fmt.Printf("        Timeout:     %ds\n", effTo)
 		}
-		if effSAI := f.EffectiveServerAliveInterval(manifest.ServerAliveInterval, 0); effSAI > 0 {
-			fmt.Printf("        SSH Alive:   interval=%ds count_max=%d\n", effSAI, f.EffectiveServerAliveCountMax(manifest.ServerAliveCountMax, 0))
+		if effSAI := f.EffectiveServerAliveInterval(manifest.ServerAliveInterval, targetInterval); effSAI > 0 {
+			fmt.Printf("        SSH Alive:   interval=%ds count_max=%d\n", effSAI, f.EffectiveServerAliveCountMax(manifest.ServerAliveCountMax, targetCountMax))
 		}
+		fmt.Printf("        Excludes:    %s\n", strings.Join(f.EffectiveExcludes(manifest.Excludes), ", "))
 	}
 }
 

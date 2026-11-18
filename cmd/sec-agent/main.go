@@ -33,15 +33,16 @@ import (
 var embeddedSkillBytes []byte
 
 var (
-	jsonErrors      bool
-	Verbose         bool
-	activeEnvAlias  string
-	activeEnvTier   config.EnvironmentTier = config.TierUnset
-	activeProfile   string
-	confirmProdFlag bool
+	jsonErrors        bool
+	Verbose           bool
+	activeEnvAlias    string
+	activeEnvTier     config.EnvironmentTier = config.TierUnset
+	activeProfile     string
+	confirmProdFlag   bool
+	daemonIPCDeadline = 10 * time.Second
 )
 var (
-	Version   = "v2.19.3"
+	Version   = "v2.19.4"
 	BuildDate = "unknown"
 )
 
@@ -813,10 +814,16 @@ func queryDaemonRaw(profile string, req daemon.IPCRequest) (*daemon.IPCResponse,
 		}
 	}
 	defer conn.Close()
+	if daemonIPCDeadline > 0 {
+		_ = conn.SetDeadline(time.Now().Add(daemonIPCDeadline))
+	}
 
 	if err := json.NewEncoder(conn).Encode(req); err != nil {
 		if Verbose {
 			fmt.Fprintf(os.Stderr, "[VERBOSE] Daemon IPC encode error: %v\n", err)
+		}
+		if isDaemonTimeoutError(err) {
+			return nil, fmt.Errorf("daemon did not respond within %s: %w", daemonIPCDeadline, err)
 		}
 		return nil, err
 	}
@@ -825,6 +832,9 @@ func queryDaemonRaw(profile string, req daemon.IPCRequest) (*daemon.IPCResponse,
 	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
 		if Verbose {
 			fmt.Fprintf(os.Stderr, "[VERBOSE] Daemon IPC decode error: %v\n", err)
+		}
+		if isDaemonTimeoutError(err) {
+			return nil, fmt.Errorf("daemon did not respond within %s: %w", daemonIPCDeadline, err)
 		}
 		return nil, err
 	}
@@ -1426,6 +1436,37 @@ func handleGen(profile string, path string, args []string) {
 	}
 }
 
+func isDaemonTimeoutError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "daemon did not respond")
+}
+
+func isDaemonNotRunningError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if isDaemonTimeoutError(err) {
+		return false
+	}
+	if errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ECONNREFUSED) || os.IsNotExist(err) {
+		return true
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Op == "dial" {
+		return true
+	}
+	return false
+}
+
 func handleRestart(profile string, args []string) {
 	hotReload := false
 	for _, arg := range args {
@@ -1443,6 +1484,20 @@ func handleRestart(profile string, args []string) {
 		if err == nil && resp != nil && resp.Success {
 			fmt.Printf("[✓] sec-agent daemon (%s) hot-reloaded in memory via kernel pipe handoff (Zero Touch ID required).\n", profile)
 			return
+		}
+		if err != nil {
+			if isDaemonNotRunningError(err) {
+				fmt.Printf("[INFO] sec-agent daemon (%s) is not currently running; nothing to hot-reload.\n", profile)
+				return
+			}
+			fail("DAEMON_HOT_RELOAD_FAILED", fmt.Errorf("failed to hot-reload sec-agent daemon (%s): %w", profile, err), "")
+		}
+		if resp != nil && !resp.Success {
+			if strings.Contains(strings.ToLower(resp.Error), "locked") {
+				fmt.Printf("[INFO] sec-agent daemon (%s) is locked; nothing to hot-reload.\n", profile)
+				return
+			}
+			fail("DAEMON_HOT_RELOAD_FAILED", fmt.Errorf("failed to hot-reload sec-agent daemon (%s): %s", profile, resp.Error), "")
 		}
 		fmt.Printf("[INFO] sec-agent daemon (%s) is not currently running; nothing to hot-reload.\n", profile)
 		return
