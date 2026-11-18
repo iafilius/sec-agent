@@ -5,6 +5,17 @@ All notable changes to `sec-agent` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v2.19.2] - 2026-11-18
+
+### Added & Enhanced
+- **Stealth Multi-Folder Backup Resilience & Vault-Driven Transport Tuning (`sec backup`, `sec backup batch`)**:
+  - **Per-Folder Retry with Exponential Backoff (`max_attempts`)**: Automatically retries failed folder transfers up to `max_attempts` (default `5`), doubling backoff from `5s` up to a `30m` cap and re-establishing the in-memory Go SSH session on transient connection drops. Continues to remaining folders if one exhausts retries, prints a summary, and exits `1`.
+  - **In-Flight Session Keepalive & Auto-Extension (`NoTrace: true`)**: Verifies the target vault profile is unlocked upfront and runs a `10m` background keepalive ticker that automatically extends the active daemon session (`8h`) whenever remaining TTL drops below `30m`.
+  - **Vault-Driven `rsync --timeout` & In-Memory SSH `ServerAliveInterval` / `ServerAliveCountMax`**: Added `--timeout <sec>`, `--server-alive-interval <sec>`, and `--server-alive-count-max <count>` (configurable per folder, per job, or at `ssh/<target>/server_alive_*` in the vault, with zero hardcoded values in source code). Sends encrypted OpenSSH `keepalive@openssh.com` probes over the in-memory Go SSH connection without spawning `/usr/bin/ssh` or exposing `-o ServerAliveInterval` in `ps aux`.
+  - **Sparse File Support (`--sparse`), Default AppleDouble (`._*`) Exclusion, `~/` Source Resolution & Declarative JSON Import (`--file` / `sec backup batch`)**: Added `--sparse` (`-S`), automatic macOS AppleDouble (`._*`) exclusion via `/dev/fd/3`, first-class `"~/"` / `"~"` home-directory source resolution with `--dest <remote-folder>`, `{date}` / `{datetime}` path templates, and `sec backup init <name> --file <json>` / `sec backup batch <define|list|show|run>`.
+- **Unified Single-Line & Grid Recovery Mnemonic Output (`--no-single-line`)**:
+  - Standardized `sec migrate-v2`, `sec enroll-recovery`, `sec session rotate-seed`, and `sec profile new` to print both the 4-column numbered grid and the single-line `📋 Raw Mnemonic` by default, added `--no-single-line` opt-out, and updated disaster recovery documentation.
+
 ## [v2.19.1] - 2026-11-15
 
 ### Added & Enhanced

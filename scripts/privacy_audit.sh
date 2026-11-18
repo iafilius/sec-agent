@@ -51,7 +51,7 @@ else
 fi
 
 echo "🔍 5. Checking for personal backup volume / folder / host identifiers..."
-FOUND_BCK_ID=$(grep -rnE "OneDrive - NN|BCKArFI|192\.168\.31\.125" "$TARGET_DIR" --exclude-dir=".git" --exclude="privacy_audit.sh" --binary-files=without-match || true)
+FOUND_BCK_ID=$(grep -rnE "OneDrive - NN|BCKArFI|192\.168\.31\.125|CloudFolder - Work|BackupDrive/Work" "$TARGET_DIR" --exclude-dir=".git" --exclude="privacy_audit.sh" --binary-files=without-match || true)
 if [ -n "$FOUND_BCK_ID" ]; then
     echo "❌ PRIVACY VIOLATION: Found personal backup identifier in publish files:"
     echo "$FOUND_BCK_ID"

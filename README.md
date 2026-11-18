@@ -589,28 +589,51 @@ sec exec daily-sync -- --dry-run --verbose
 ```
 
 ### 15. Stealth Multi-Folder `rsync` Backups (`sec backup`)
-Configure and run multi-folder `rsync` backups over `sec-agent`'s pure-Go SSH transport without exposing folder names, remote volume paths, usernames, or IP addresses on the local host:
+Configure and run multi-folder `rsync` backups over `sec-agent`'s pure-Go SSH transport without exposing folder names, remote volume paths, usernames, IP addresses, or SSH keepalive options on the local host:
 ```bash
 # Initialize a stealth backup job stored in backup/<name> inside the vault
-sec backup init work --target backup@10.0.0.50 --local-base ~ --remote-base /Volumes/BackupDrive/Work
+# (optional --timeout, --server-alive-interval, and --server-alive-count-max are stored in the vault, never hardcoded in code)
+sec backup init home-nas \
+  --target backup@10.0.0.50 \
+  --local-base ~ \
+  --remote-base /Volumes/MediaArchive/Backups \
+  --timeout 120 \
+  --server-alive-interval 30 \
+  --server-alive-count-max 4
 
-# Add one or more relative folders (supporting spaces and custom excludes)
-sec backup add-folder work "CloudFolder - Work"
+# Or import a declarative multi-folder JSON manifest directly from a file or stdin (also via `sec backup batch`)
+sec backup init home-nas --file batch.json
+sec backup batch define home-nas --file batch.json
+
+# Add one or more relative folders (supporting spaces, --sparse, custom --backup-dir / --log-file templates, and per-folder timeout/keepalive)
+sec backup add-folder home-nas "Photos - 2026" --sparse
+
+# Or back up your entire home directory (~/) into a custom remote folder name with per-folder timeout & SSH keepalive in the vault
+sec backup add-folder home-nas "~/" \
+  --dest "home-archive" \
+  --timeout 180 \
+  --server-alive-interval 30 \
+  --server-alive-count-max 4
 
 # View backup job configuration or list all backup jobs
-sec backup show work
+sec backup show home-nas
 sec backup jobs
 
-# Run all folders in the backup job (or filter to a specific folder, with optional --tofu)
-sec backup run work
-sec backup run work "CloudFolder - Work" --tofu
+# Run all folders in the backup job (or filter to a specific folder, with optional --max-attempts and --tofu)
+sec backup run home-nas
+sec backup run home-nas "Photos - 2026" --max-attempts 5 --tofu
+sec backup batch run home-nas
 ```
 * **5 Zero-Trace Guarantees**:
   1. **Zero `.zsh_history` Exposure**: Only `sec backup run <name>` is typed in the shell.
-  2. **Zero Local `ps aux` Exposure**: Local `rsync` runs in working directory `.` with `--exclude-from=/dev/fd/3` and `-e "sec ssh-stdio" . sync:target`, while `sec-agent` rewrites the remote `rsync --server` command over the encrypted Go SSH channel.
-  3. **Automatic "One Level Higher" Naming Derivation**: Inside `remote_base`, `sec-agent` automatically derives `<remote_base>/<folder>/`, `<remote_base>/<Prefix>-History/<YYYY-MM-DD>`, and `<remote_base>/rsync_<slug>_<YYYY-MM-DD_HHMM>.log`.
-  4. **Diskless SSH Authentication**: Uses `golang.org/x/crypto/ssh` in Go memory with `ssh/<target>/password` or `ssh/<target>/private_key` and vault-pinned host fingerprints (zero `~/.ssh/known_hosts` or disk key files).
+  2. **Zero Local `ps aux` Exposure**: Local `rsync` runs in working directory `.` with `--exclude-from=/dev/fd/3` (including default `.DS_Store`, `.Trash*`, and macOS AppleDouble `._*` exclusions) and `-e "sec ssh-stdio" . sync:target`, while `sec-agent` rewrites the remote `rsync --server` command over the encrypted Go SSH channel.
+  3. **Automatic "One Level Higher" Naming Derivation & Template Overrides**: Inside `remote_base`, `sec-agent` automatically derives `<remote_base>/<folder>/`, `<remote_base>/<Prefix>-History/<YYYY-MM-DD>`, and `<remote_base>/rsync_<slug>_<YYYY-MM-DD_HHMM>.log` (or expands custom `--backup-dir` / `--log-file` `{date}` and `{datetime}` templates).
+  4. **Diskless SSH Authentication & In-Memory SSH Keepalive**: Uses `golang.org/x/crypto/ssh` in Go memory with `ssh/<target>/password` or `ssh/<target>/private_key`, vault-pinned host fingerprints (zero `~/.ssh/known_hosts` or disk key files), and optional vault-driven `keepalive@openssh.com` probing (`server_alive_interval` / `server_alive_count_max` at the folder, job, or `ssh/<target>/*` vault level) and `rsync --timeout`—with zero hardcoded values in source code and zero `-o ServerAliveInterval` flags in `ps aux`.
   5. **Daemon `NoTrace` Audit Suppression**: `~/.config/sec-agent/audit.log` and `secrets.enc` `mtime` remain untouched during execution.
+* **Built-In Multi-Folder Resilience & Long-Run Keepalive**:
+  * **Per-Folder Retry with Exponential Backoff (`max_attempts`)**: Automatically retries failed folder transfers up to `max_attempts` (default `5`), doubling wait times from `5s` up to a `30m` cap and re-establishing the in-memory SSH session on transient drops. If a folder still fails after exhausting retries, `sec-agent` records the failure, continues synchronizing remaining folders, prints a summary, and exits `1`.
+  * **Automatic 10m Background Session Keepalive**: Verifies the vault profile is unlocked upfront and runs a `10m` background keepalive ticker (`NoTrace: true`) that automatically extends the daemon session TTL (`8h`) whenever remaining time drops below `30m`.
+  * **Sparse File Support & Declarative Batch Alias**: Pass `--sparse` for VM/container disk images, and use `--file <batch.json>` or `sec backup batch <define|list|run>` for declarative batch workflows over the same zero-trace transport.
 
 ---
 
@@ -749,17 +772,23 @@ sec version
 ### Single 24-Word Recovery Seed Migration
 Upgrade all active vault profile stores (`default`, `dev`, `prod`, `router-ax3600-prod`, etc.) to v2.0 bound to a single 24-word recovery seed:
 ```bash
-# Interactive migration (generates & displays 24-word seed on physical screen)
+# Interactive migration (displays 4-column grid + single-line raw mnemonic on physical screen)
 sec migrate-v2
+sec enroll-recovery
+
+# Suppress the single-line raw mnemonic for strict paper-only transcription
+sec migrate-v2 --no-single-line
+sec profile new router-ax3600-prod --no-single-line
 
 # Bind existing vaults to a pre-existing 24-word seed phrase across all profile stores
 sec migrate-v2 --seed "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
 ```
+* **Dual-Format Mnemonic Display & Security Guidance**: By default, `sec migrate-v2`, `sec enroll-recovery`, `sec profile new`, and `sec session rotate-seed` display both the **4-column numbered grid** (`1..24`) and a **single space-separated line** (`📋 Raw Mnemonic`) for direct copying into a password manager vault. Store the phrase directly in an encrypted password manager vault or on offline paper—avoid leaving it in general OS clipboard history tools or screenshots. Pass `--no-single-line` to suppress the single-line output for paper-only workflows.
 
 ### Rotating 24-Word Recovery Seed Phrase
 Rotate the BIP39 recovery seed across all v2.0 vault envelopes without altering Keychain Touch ID bindings or secret data:
 ```bash
-sec session rotate-seed
+sec session rotate-seed [--no-single-line]
 ```
 
 ### Un-bricking / Recovering Session Vaults

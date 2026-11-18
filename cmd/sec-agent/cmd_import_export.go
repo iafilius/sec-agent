@@ -378,6 +378,23 @@ func readMnemonicFromTTY() string {
 	return mnemonic
 }
 
+func printRecoveryMnemonic(mnemonic string, header string, noSingleLine bool) {
+	words := strings.Fields(mnemonic)
+	fmt.Println(recoverySeedWarningBanner)
+	fmt.Println(header)
+	for i, w := range words {
+		fmt.Printf("  %2d. %-12s", i+1, w)
+		if (i+1)%4 == 0 {
+			fmt.Println()
+		}
+	}
+	fmt.Println()
+	if !noSingleLine {
+		fmt.Println("📋 Raw Mnemonic (triple-click to copy directly into password manager — avoid OS clipboard history):")
+		fmt.Printf("   %s\n\n", mnemonic)
+	}
+}
+
 // handleEnrollRecovery enrolls or re-wraps Slot 1 (BIP39 recovery key) for one or all profiles.
 func handleEnrollRecovery(profile string, args []string) {
 	for _, a := range args {
@@ -385,7 +402,7 @@ func handleEnrollRecovery(profile string, args []string) {
 			if spec, ok := findCommandSpec("enroll-recovery"); ok {
 				printCommandHelp(spec)
 			} else {
-				fmt.Println("Usage: sec enroll-recovery [--profile <name>] [--seed <mnemonic>] [--force] [--all-profiles]")
+				fmt.Println("Usage: sec enroll-recovery [--profile <name>] [--seed <mnemonic>] [--force] [--all-profiles] [--dry-run] [--no-single-line]")
 			}
 			return
 		}
@@ -397,6 +414,7 @@ func handleMigrateV2(profile string, args []string) {
 	dryRun := false
 	forceReroll := false
 	allProfiles := false
+	noSingleLine := false
 	seedInput := ""
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -414,6 +432,9 @@ func handleMigrateV2(profile string, args []string) {
 		}
 		if a == "--force" || a == "--reroll" || a == "-f" {
 			forceReroll = true
+		}
+		if a == "--no-single-line" {
+			noSingleLine = true
 		}
 		if a == "--seed" && i+1 < len(args) {
 			seedInput = strings.Trim(args[i+1], `"'`)
@@ -508,15 +529,7 @@ func handleMigrateV2(profile string, args []string) {
 	}
 
 	words := strings.Fields(mnemonic)
-	fmt.Println(recoverySeedWarningBanner)
-	fmt.Println("\n🔑 Your 24-word recovery mnemonic (WRITE THIS DOWN NOW):")
-	for i, w := range words {
-		fmt.Printf("  %2d. %-12s", i+1, w)
-		if (i+1)%4 == 0 {
-			fmt.Println()
-		}
-	}
-	fmt.Println()
+	printRecoveryMnemonic(mnemonic, "\n🔑 Your 24-word recovery mnemonic (WRITE THIS DOWN NOW):", noSingleLine)
 
 	if seedInput == "" {
 		fmt.Println("To confirm you have written down the mnemonic, please enter:")
@@ -731,7 +744,11 @@ func handleSession(profile string, args []string) {
 		handleSessionRecover(profile)
 		return
 	}
-	fmt.Fprintln(os.Stderr, "Usage: sec session recover")
+	if len(args) > 0 && args[0] == "rotate-seed" {
+		handleMigrateV2(profile, append([]string{"--force", "--all-profiles"}, args[1:]...))
+		return
+	}
+	fmt.Fprintln(os.Stderr, "Usage: sec session <recover|rotate-seed> [--profile <name>] [--seed <mnemonic>] [--no-single-line]")
 	os.Exit(1)
 }
 

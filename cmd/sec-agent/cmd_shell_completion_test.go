@@ -170,12 +170,15 @@ func TestShellCompletionOutput(t *testing.T) {
 		if !strings.Contains(out, "env") {
 			t.Errorf("expected shell completion for %s to contain 'env', got:\n%s", shell, out)
 		}
-		for _, cmd := range []string{"pipe", "describe", "edit-notes", "which", "enroll-recovery", "scan", "exec", "backup", "add-folder"} {
+		for _, cmd := range []string{"pipe", "describe", "edit-notes", "which", "enroll-recovery", "scan", "exec", "backup", "add-folder", "batch", "rotate-seed"} {
 			if !strings.Contains(out, cmd) {
 				t.Errorf("expected shell completion for %s to contain command %q, got:\n%s", shell, cmd, out)
 			}
 		}
 		if shell == "fish" {
+			if !strings.Contains(out, "-l no-single-line") || !strings.Contains(out, "-l max-attempts") || !strings.Contains(out, "-l sparse") {
+				t.Errorf("expected shell completion for fish to contain '-l no-single-line', '-l max-attempts', and '-l sparse', got:\n%s", out)
+			}
 			if !strings.Contains(out, "-l remote-base") {
 				t.Errorf("expected shell completion for fish to contain '-l remote-base', got:\n%s", out)
 			}
@@ -260,6 +263,9 @@ func TestShellCompletionOutput(t *testing.T) {
 			}
 			if !strings.Contains(out, "--tofu") {
 				t.Errorf("expected shell completion for %s to contain '--tofu', got:\n%s", shell, out)
+			}
+			if !strings.Contains(out, "--no-single-line") || !strings.Contains(out, "--max-attempts") || !strings.Contains(out, "--sparse") {
+				t.Errorf("expected shell completion for %s to contain '--no-single-line', '--max-attempts', and '--sparse', got:\n%s", shell, out)
 			}
 		}
 	}

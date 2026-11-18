@@ -16,14 +16,35 @@ var (
 )
 
 const (
-	DefaultRemoteRsyncBin = "/opt/homebrew/bin/rsync"
-	DefaultModifyWindow   = 2
-	DefaultPartialDir     = ".rsync-partial"
+	DefaultRemoteRsyncBin    = "/opt/homebrew/bin/rsync"
+	DefaultModifyWindow      = 2
+	DefaultPartialDir        = ".rsync-partial"
+	DefaultBackupMaxAttempts = 5
 )
 
-// DefaultBackupExcludes returns a fresh slice of default rsync exclude patterns.
+// DefaultBackupExcludes returns a fresh slice of default rsync exclude patterns,
+// including macOS Finder metadata (.DS_Store), trash folders (.Trash*), and AppleDouble files (._*).
 func DefaultBackupExcludes() []string {
-	return []string{".DS_Store", ".Trash*"}
+	return []string{".DS_Store", ".Trash*", "._*"}
+}
+
+func ensureAppleDoubleExclude(patterns []string) []string {
+	out := make([]string, 0, len(patterns)+1)
+	hasAppleDouble := false
+	for _, p := range patterns {
+		trimmed := strings.TrimSpace(p)
+		if trimmed == "" {
+			continue
+		}
+		if trimmed == "._*" {
+			hasAppleDouble = true
+		}
+		out = append(out, trimmed)
+	}
+	if !hasAppleDouble {
+		out = append(out, "._*")
+	}
+	return out
 }
 
 // BackupJobName represents a strongly-typed backup job identifier.
@@ -67,15 +88,38 @@ func (n BackupJobName) VaultKey() SecretKey {
 
 // BackupFolderSpec defines a single folder synchronization specification inside a BackupManifest.
 type BackupFolderSpec struct {
-	Source        string `json:"src"`
-	Dest          string `json:"dest,omitempty"`
-	HistoryPrefix string `json:"history_prefix,omitempty"`
-	Slug          string `json:"slug,omitempty"`
+	Name                string   `json:"name,omitempty"`
+	Source              string   `json:"src"`
+	LegacySource        string   `json:"source,omitempty"`
+	Dest                string   `json:"dest,omitempty"`
+	HistoryPrefix       string   `json:"history_prefix,omitempty"`
+	Slug                string   `json:"slug,omitempty"`
+	Sparse              bool     `json:"sparse,omitempty"`
+	BackupDir           string   `json:"backup_dir,omitempty"`
+	LogFile             string   `json:"log_file,omitempty"`
+	Timeout             int      `json:"timeout,omitempty"`
+	ServerAliveInterval int      `json:"server_alive_interval,omitempty"`
+	ServerAliveCountMax int      `json:"server_alive_count_max,omitempty"`
+	Excludes            []string `json:"excludes,omitempty"`
+}
+
+// Normalize migrates legacy JSON fields (such as "source") into canonical fields.
+func (f *BackupFolderSpec) Normalize() {
+	if f == nil {
+		return
+	}
+	if strings.TrimSpace(f.Source) == "" && strings.TrimSpace(f.LegacySource) != "" {
+		f.Source = strings.TrimSpace(f.LegacySource)
+	}
+	f.LegacySource = ""
 }
 
 // Validate checks that the folder specification has a valid, non-empty Source without path traversal or control characters.
 func (f BackupFolderSpec) Validate() error {
 	src := strings.TrimSpace(f.Source)
+	if src == "" {
+		src = strings.TrimSpace(f.LegacySource)
+	}
 	if src == "" {
 		return fmt.Errorf("%w: folder source cannot be empty", ErrInvalidBackupManifest)
 	}
@@ -92,6 +136,9 @@ func (f BackupFolderSpec) Validate() error {
 			return fmt.Errorf("%w: folder source contains control characters", ErrInvalidBackupManifest)
 		}
 	}
+	if f.Timeout < 0 || f.ServerAliveInterval < 0 || f.ServerAliveCountMax < 0 {
+		return fmt.Errorf("%w: timeout and server_alive_* cannot be negative", ErrInvalidBackupManifest)
+	}
 	return nil
 }
 
@@ -100,7 +147,55 @@ func (f BackupFolderSpec) EffectiveDestName() string {
 	if f.Dest != "" {
 		return strings.Trim(f.Dest, "/")
 	}
-	return filepath.Base(strings.TrimRight(f.Source, "/"))
+	src := strings.TrimSpace(f.Source)
+	if src == "" {
+		src = strings.TrimSpace(f.LegacySource)
+	}
+	if src == "~" || src == "~/" || src == "." || src == "./" {
+		return "home-backup"
+	}
+	return filepath.Base(strings.TrimRight(src, "/"))
+}
+
+// EffectiveTimeout returns the folder-level rsync timeout if > 0, falling back to manifestTimeout, or 0 if unset.
+func (f BackupFolderSpec) EffectiveTimeout(manifestTimeout int) int {
+	if f.Timeout > 0 {
+		return f.Timeout
+	}
+	if manifestTimeout > 0 {
+		return manifestTimeout
+	}
+	return 0
+}
+
+// EffectiveServerAliveInterval returns the folder-level SSH keepalive interval if > 0,
+// falling back to manifestInterval or targetInterval, or 0 if unset.
+func (f BackupFolderSpec) EffectiveServerAliveInterval(manifestInterval, targetInterval int) int {
+	if f.ServerAliveInterval > 0 {
+		return f.ServerAliveInterval
+	}
+	if manifestInterval > 0 {
+		return manifestInterval
+	}
+	if targetInterval > 0 {
+		return targetInterval
+	}
+	return 0
+}
+
+// EffectiveServerAliveCountMax returns the folder-level SSH keepalive count max if > 0,
+// falling back to manifestCountMax or targetCountMax, or 0 if unset.
+func (f BackupFolderSpec) EffectiveServerAliveCountMax(manifestCountMax, targetCountMax int) int {
+	if f.ServerAliveCountMax > 0 {
+		return f.ServerAliveCountMax
+	}
+	if manifestCountMax > 0 {
+		return manifestCountMax
+	}
+	if targetCountMax > 0 {
+		return targetCountMax
+	}
+	return 0
 }
 
 // DeriveHistoryPrefix returns HistoryPrefix if explicitly provided, or strips any trailing " - ..." suffix from EffectiveDestName().
@@ -108,7 +203,7 @@ func (f BackupFolderSpec) DeriveHistoryPrefix() string {
 	if hp := strings.TrimSpace(f.HistoryPrefix); hp != "" {
 		return hp
 	}
-	dest := f.EffectiveDestName()
+	dest := filepath.Base(f.EffectiveDestName())
 	if idx := strings.Index(dest, " - "); idx != -1 {
 		if prefix := strings.TrimSpace(dest[:idx]); prefix != "" {
 			return prefix
@@ -143,47 +238,142 @@ func (f BackupFolderSpec) DeriveSlug() string {
 
 // ResolveLocalDir resolves the local directory path for this folder against localBase.
 func (f BackupFolderSpec) ResolveLocalDir(localBase string) string {
-	if filepath.IsAbs(f.Source) {
-		return filepath.Clean(f.Source)
+	src := strings.TrimSpace(f.Source)
+	if src == "" {
+		src = strings.TrimSpace(f.LegacySource)
 	}
-	return filepath.Join(localBase, f.Source)
+	if src == "~" || src == "~/" || src == "." || src == "./" {
+		return filepath.Clean(localBase)
+	}
+	if strings.HasPrefix(src, "~/") && strings.TrimSpace(localBase) != "" && localBase != "~" {
+		return filepath.Join(localBase, strings.TrimPrefix(src, "~/"))
+	}
+	if filepath.IsAbs(src) {
+		return filepath.Clean(src)
+	}
+	return filepath.Join(localBase, src)
+}
+
+func expandDatePlaceholders(s, dateStr, datetimeStr string) string {
+	if dateStr == "" && len(datetimeStr) >= 10 {
+		dateStr = strings.SplitN(datetimeStr, "_", 2)[0]
+	}
+	if datetimeStr == "" {
+		datetimeStr = dateStr
+	}
+	out := strings.ReplaceAll(s, "{datetime}", datetimeStr)
+	out = strings.ReplaceAll(out, "{date}", dateStr)
+	return out
 }
 
 // DeriveRemoteDest returns the remote destination directory path (with trailing slash) inside remoteBase.
 func (f BackupFolderSpec) DeriveRemoteDest(remoteBase string) string {
+	dest := strings.TrimSpace(f.Dest)
+	if strings.HasPrefix(dest, "/") {
+		return strings.TrimRight(dest, "/") + "/"
+	}
 	return strings.TrimRight(remoteBase, "/") + "/" + f.EffectiveDestName() + "/"
 }
 
-// DeriveHistoryDir returns the remote history backup directory one level higher inside remoteBase.
+// DeriveHistoryDir returns the remote history backup directory (either from a custom BackupDir template
+// or one level higher inside remoteBase).
 func (f BackupFolderSpec) DeriveHistoryDir(remoteBase, dateStr string) string {
+	if custom := strings.TrimSpace(f.BackupDir); custom != "" {
+		expanded := expandDatePlaceholders(custom, dateStr, dateStr)
+		if strings.HasPrefix(expanded, "/") {
+			return strings.TrimRight(expanded, "/")
+		}
+		return strings.TrimRight(remoteBase, "/") + "/" + strings.Trim(expanded, "/")
+	}
 	return strings.TrimRight(remoteBase, "/") + "/" + f.DeriveHistoryPrefix() + "-History/" + dateStr
 }
 
-// DeriveRemoteLogPath returns the remote rsync log file path one level higher inside remoteBase.
+// DeriveRemoteLogPath returns the remote rsync log file path (either from a custom LogFile template
+// or one level higher inside remoteBase).
 func (f BackupFolderSpec) DeriveRemoteLogPath(remoteBase, datetimeStr string) string {
+	if custom := strings.TrimSpace(f.LogFile); custom != "" {
+		datePart := strings.SplitN(datetimeStr, "_", 2)[0]
+		expanded := expandDatePlaceholders(custom, datePart, datetimeStr)
+		if strings.HasPrefix(expanded, "/") {
+			return expanded
+		}
+		return strings.TrimRight(remoteBase, "/") + "/" + strings.TrimLeft(expanded, "/")
+	}
 	return strings.TrimRight(remoteBase, "/") + "/rsync_" + f.DeriveSlug() + "_" + datetimeStr + ".log"
+}
+
+// EffectiveExcludes returns the folder-specific exclude list (falling back to manifestExcludes or defaults),
+// always ensuring macOS AppleDouble files ("._*") are excluded.
+func (f BackupFolderSpec) EffectiveExcludes(manifestExcludes []string) []string {
+	base := f.Excludes
+	if len(base) == 0 {
+		base = manifestExcludes
+	}
+	if len(base) == 0 {
+		base = DefaultBackupExcludes()
+	}
+	return ensureAppleDoubleExclude(base)
 }
 
 // BackupManifest defines a complete vault-stored backup job configuration.
 type BackupManifest struct {
-	Name           BackupJobName      `json:"name"`
-	SSHTarget      string             `json:"ssh_target"`
-	SSHKeySecret   string             `json:"ssh_key_secret,omitempty"`
-	SSHPasswordKey string             `json:"ssh_password_key,omitempty"`
-	SSHPort        int                `json:"ssh_port,omitempty"`
-	LocalBase      string             `json:"local_base"`
-	RemoteBase     string             `json:"remote_base"`
-	RemoteRsyncBin string             `json:"remote_rsync_bin,omitempty"`
-	ModifyWindow   int                `json:"modify_window,omitempty"`
-	PartialDir     string             `json:"partial_dir,omitempty"`
-	Excludes       []string           `json:"excludes,omitempty"`
-	Folders        []BackupFolderSpec `json:"folders"`
+	Name                BackupJobName      `json:"name"`
+	SSHTarget           string             `json:"ssh_target"`
+	SSHKeySecret        string             `json:"ssh_key_secret,omitempty"`
+	SSHPasswordKey      string             `json:"ssh_password_key,omitempty"`
+	SSHPort             int                `json:"ssh_port,omitempty"`
+	LocalBase           string             `json:"local_base"`
+	RemoteBase          string             `json:"remote_base"`
+	RemoteRsyncBin      string             `json:"remote_rsync_bin,omitempty"`
+	ModifyWindow        int                `json:"modify_window,omitempty"`
+	PartialDir          string             `json:"partial_dir,omitempty"`
+	MaxAttempts         int                `json:"max_attempts,omitempty"`
+	Timeout             int                `json:"timeout,omitempty"`
+	ServerAliveInterval int                `json:"server_alive_interval,omitempty"`
+	ServerAliveCountMax int                `json:"server_alive_count_max,omitempty"`
+	Excludes            []string           `json:"excludes,omitempty"`
+	Folders             []BackupFolderSpec `json:"folders"`
+	LegacyJobs          []BackupFolderSpec `json:"jobs,omitempty"`
 }
 
 // ApplyDefaults populates default rsync settings on the manifest when unset.
 func (m *BackupManifest) ApplyDefaults() {
 	if m == nil {
 		return
+	}
+	if len(m.Folders) == 0 && len(m.LegacyJobs) > 0 {
+		m.Folders = m.LegacyJobs
+		m.LegacyJobs = nil
+	}
+	for i := range m.Folders {
+		m.Folders[i].Normalize()
+	}
+	if strings.TrimSpace(m.LocalBase) == "" && len(m.Folders) > 0 {
+		allAbsOrTilde := true
+		for _, f := range m.Folders {
+			s := strings.TrimSpace(f.Source)
+			if !filepath.IsAbs(s) && !strings.HasPrefix(s, "~/") && s != "~" && s != "." {
+				allAbsOrTilde = false
+				break
+			}
+		}
+		if allAbsOrTilde {
+			m.LocalBase = "~"
+		}
+	}
+	if strings.TrimSpace(m.RemoteBase) == "" && len(m.Folders) > 0 {
+		allAbsRemote := true
+		for _, f := range m.Folders {
+			if !strings.HasPrefix(strings.TrimSpace(f.Dest), "/") ||
+				(strings.TrimSpace(f.BackupDir) != "" && !strings.HasPrefix(strings.TrimSpace(f.BackupDir), "/")) ||
+				(strings.TrimSpace(f.LogFile) != "" && !strings.HasPrefix(strings.TrimSpace(f.LogFile), "/")) {
+				allAbsRemote = false
+				break
+			}
+		}
+		if allAbsRemote {
+			m.RemoteBase = "/"
+		}
 	}
 	if strings.TrimSpace(m.RemoteRsyncBin) == "" {
 		m.RemoteRsyncBin = DefaultRemoteRsyncBin
@@ -194,8 +384,13 @@ func (m *BackupManifest) ApplyDefaults() {
 	if strings.TrimSpace(m.PartialDir) == "" {
 		m.PartialDir = DefaultPartialDir
 	}
+	if m.MaxAttempts <= 0 {
+		m.MaxAttempts = DefaultBackupMaxAttempts
+	}
 	if len(m.Excludes) == 0 {
 		m.Excludes = DefaultBackupExcludes()
+	} else {
+		m.Excludes = ensureAppleDoubleExclude(m.Excludes)
 	}
 }
 
@@ -212,6 +407,9 @@ func (m BackupManifest) Validate() error {
 	}
 	if strings.TrimSpace(m.RemoteBase) == "" {
 		return fmt.Errorf("%w: remote_base cannot be empty", ErrInvalidBackupManifest)
+	}
+	if m.Timeout < 0 || m.ServerAliveInterval < 0 || m.ServerAliveCountMax < 0 {
+		return fmt.Errorf("%w: timeout and server_alive_* cannot be negative", ErrInvalidBackupManifest)
 	}
 	for i, folder := range m.Folders {
 		if err := folder.Validate(); err != nil {

@@ -279,12 +279,15 @@ If the background daemon becomes unreachable or needs an emergency reset:
 
 **Prerequisite**: An interactive terminal (not a script, not an AI agent context).
 
-1. Run the migration command:
+1. Run the migration or recovery enrollment command:
    ```bash
    sec migrate-v2
+   # Or: sec enroll-recovery
+   # Pass --no-single-line for strict paper-only output (omits single-line raw mnemonic)
    ```
-2. Read the 24 words displayed on screen and write them on paper. Do NOT photograph or copy them.
-3. Pass the 3-word verification challenge when prompted.
+2. Record the 24 words displayed on screen. By default, `sec migrate-v2`, `sec enroll-recovery`, `sec profile new`, and `sec session rotate-seed` display both a **4-column numbered grid** (`1..24`) and a **single-line space-separated string** (`📋 Raw Mnemonic`) for direct copying into a password manager vault.
+   * **Security Guidance**: Store the recovery phrase directly inside an encrypted password manager vault or on offline paper. Avoid leaving the phrase in general OS clipboard history tools or taking screenshots. Pass `--no-single-line` if you want strictly the 4-column grid for paper-only transcription.
+3. Pass the 3-word verification challenge (#4, #12, #20) when prompted.
 4. Vault is atomically upgraded — no data loss is possible.
 5. Create a KDBX backup immediately:
    ```bash
@@ -320,16 +323,17 @@ Use when Touch ID stops working (hardware failure, new fingerprints enrolled, OS
 
 ## 2. New Commands Reference (v2.0+)
 
-### `sec migrate-v2 [--dry-run]`
+### `sec migrate-v2 [--dry-run] [--all-profiles] [--seed <mnemonic>] [--force] [--no-single-line]` (alias: `sec enroll-recovery`)
 Upgrades vault to v2.0 Dual-Slot format with BIP39 recovery key enrollment.
 - `--dry-run`: Shows what would happen without making any changes.
+- `--no-single-line`: Suppresses the single-line `📋 Raw Mnemonic` output and prints only the 4-column numbered grid (also supported on `sec enroll-recovery`, `sec profile new`, and `sec session rotate-seed`).
 - **Requires**: Interactive TTY. Exits 78 (EX_CONFIG) if non-interactive.
 - **Safety**: Uses two-phase atomic commit. Safe to retry after interruption.
 
-### `sec session recover`
-Recovers vault access using the 24-word BIP39 mnemonic (Slot 1).
+### `sec session <recover|rotate-seed> [--profile <name>] [--no-single-line]`
+Recovers vault access using the 24-word BIP39 mnemonic (Slot 1) or rotates the 24-word recovery seed across active v2.0 profile vaults (`rotate-seed`).
 - **Requires**: Interactive TTY. Exits 78 (EX_CONFIG) if non-interactive.
-- **Result**: Re-enrolls master key in macOS Keychain. Does NOT change the mnemonic.
+- **Result**: `recover` re-enrolls the master key in macOS Keychain without changing the mnemonic; `rotate-seed` generates and wraps a new 24-word mnemonic across profiles.
 
 ### `sec backup <file.kdbx> [--custom-password | -p <password>]`
 Exports secrets to a KeePassXC file.

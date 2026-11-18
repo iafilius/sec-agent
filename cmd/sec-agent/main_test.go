@@ -1673,4 +1673,58 @@ func TestScanCommandAndActionListOutput(t *testing.T) {
 	}
 }
 
+func TestPrintRecoveryMnemonicSingleLineAndOptOut(t *testing.T) {
+	mnemonic := "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art"
+	header := "\n🔑 Your 24-word recovery mnemonic (WRITE THIS DOWN NOW):"
+
+	captureMnemonicOutput := func(noSingleLine bool) string {
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatalf("failed to create pipe: %v", err)
+		}
+		oldStdout := os.Stdout
+		os.Stdout = w
+
+		var buf bytes.Buffer
+		done := make(chan struct{})
+		go func() {
+			_, _ = io.Copy(&buf, r)
+			close(done)
+		}()
+
+		printRecoveryMnemonic(mnemonic, header, noSingleLine)
+
+		_ = w.Close()
+		os.Stdout = oldStdout
+		<-done
+		_ = r.Close()
+		return buf.String()
+	}
+
+	// 1. Default (noSingleLine == false): must output both 4-column grid and single-line raw mnemonic
+	outDefault := captureMnemonicOutput(false)
+	if !strings.Contains(outDefault, "1. abandon") || !strings.Contains(outDefault, "24. art") {
+		t.Errorf("expected 4-column numbered grid (1..24) in default output, got:\n%s", outDefault)
+	}
+	if !strings.Contains(outDefault, "📋 Raw Mnemonic") {
+		t.Errorf("expected '📋 Raw Mnemonic' section in default output, got:\n%s", outDefault)
+	}
+	if !strings.Contains(outDefault, "   "+mnemonic) {
+		t.Errorf("expected single-line raw mnemonic in default output, got:\n%s", outDefault)
+	}
+
+	// 2. Opt-out (noSingleLine == true): must output 4-column grid and omit single-line raw mnemonic
+	outOptOut := captureMnemonicOutput(true)
+	if !strings.Contains(outOptOut, "1. abandon") || !strings.Contains(outOptOut, "24. art") {
+		t.Errorf("expected 4-column numbered grid (1..24) when noSingleLine=true, got:\n%s", outOptOut)
+	}
+	if strings.Contains(outOptOut, "📋 Raw Mnemonic") {
+		t.Errorf("expected '📋 Raw Mnemonic' section to be omitted when noSingleLine=true, got:\n%s", outOptOut)
+	}
+	if strings.Contains(outOptOut, "   "+mnemonic) {
+		t.Errorf("expected single-line raw mnemonic to be omitted when noSingleLine=true, got:\n%s", outOptOut)
+	}
+}
+
+
 

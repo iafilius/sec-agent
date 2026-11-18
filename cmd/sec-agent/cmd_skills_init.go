@@ -469,6 +469,7 @@ func handleInit(profile string, args []string) {
 
 	nonInteractive := false
 	initVault := false
+	noSingleLine := false
 	skillTarget := ""
 	skillScope := "global"
 	for i := 0; i < len(args); i++ {
@@ -476,6 +477,8 @@ func handleInit(profile string, args []string) {
 			nonInteractive = true
 		} else if args[i] == "--vault" {
 			initVault = true
+		} else if args[i] == "--no-single-line" {
+			noSingleLine = true
 		} else if args[i] == "--skill" && i+1 < len(args) {
 			skillTarget = args[i+1]
 			i++
@@ -499,7 +502,11 @@ func handleInit(profile string, args []string) {
 				os.Exit(1)
 			}
 		}
-		handleMigrateV2(profile, []string{"--reroll"})
+		migrateArgs := []string{"--reroll"}
+		if noSingleLine {
+			migrateArgs = append(migrateArgs, "--no-single-line")
+		}
+		handleMigrateV2(profile, migrateArgs)
 	}
 
 	if skillTarget != "" {

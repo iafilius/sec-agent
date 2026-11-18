@@ -534,11 +534,12 @@ func handleProfileNew(args []string) {
 	autoSecrc := false
 	noSecrc := false
 	reuseSeed := false
+	noSingleLine := false
 
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if a == "--help" || a == "-h" || a == "help" {
-			fmt.Println("Usage: sec profile new <name> [--summary <text>] [--comment <text>] [--description <text>] [--seed <mnemonic>] [--reuse-seed|--existing-seed] [--secrc|--no-secrc]")
+			fmt.Println("Usage: sec profile new <name> [--summary <text>] [--comment <text>] [--description <text>] [--seed <mnemonic>] [--reuse-seed|--existing-seed] [--secrc|--no-secrc] [--no-single-line]")
 			fmt.Println("\nCreate a new named profile with Dual-Slot Touch ID (Slot 0) and BIP39 recovery seed (Slot 1).")
 			return
 		}
@@ -562,13 +563,15 @@ func handleProfileNew(args []string) {
 			autoSecrc = true
 		} else if a == "--no-secrc" {
 			noSecrc = true
+		} else if a == "--no-single-line" {
+			noSingleLine = true
 		} else if !strings.HasPrefix(a, "-") && name == "" {
 			name = a
 		}
 	}
 
 	if name == "" {
-		fmt.Fprintln(os.Stderr, "Usage: sec profile new <name> [--summary <text>] [--seed <mnemonic>] [--reuse-seed|--existing-seed] [--secrc|--no-secrc]")
+		fmt.Fprintln(os.Stderr, "Usage: sec profile new <name> [--summary <text>] [--seed <mnemonic>] [--reuse-seed|--existing-seed] [--secrc|--no-secrc] [--no-single-line]")
 		os.Exit(1)
 	}
 
@@ -638,18 +641,7 @@ func handleProfileNew(args []string) {
 			}
 			mnemonic = m
 			words := strings.Fields(mnemonic)
-			fmt.Println(recoverySeedWarningBanner)
-			fmt.Printf("\n🔑 Your 24-word recovery mnemonic for profile %q (WRITE THIS DOWN NOW):\n", pName.String())
-			for i, w := range words {
-				fmt.Printf("  %2d. %-12s", i+1, w)
-				if (i+1)%4 == 0 {
-					fmt.Println()
-				}
-			}
-			fmt.Println()
-
-			fmt.Println("📋 Raw Mnemonic (triple-click to copy into password manager):")
-			fmt.Printf("   %s\n\n", mnemonic)
+			printRecoveryMnemonic(mnemonic, fmt.Sprintf("\n🔑 Your 24-word recovery mnemonic for profile %q (WRITE THIS DOWN NOW):", pName.String()), noSingleLine)
 
 			fmt.Println("To confirm you have saved the mnemonic, enter verification words (or enter 'r' to reuse an existing seed phrase instead):")
 			verificationWords := []int{4, 12, 20}

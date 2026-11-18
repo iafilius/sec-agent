@@ -146,13 +146,20 @@ eval $(sec open)
 If your vault is still on v1.0 (no BIP39 recovery key enrolled):
 
 ```bash
-# Requires interactive TTY — will generate and display 24 words
+# Requires interactive TTY — displays 4-column grid + single-line raw mnemonic
 sec migrate-v2
+# Or use the first-class recovery enrollment alias:
+sec enroll-recovery
+
+# Suppress the single-line raw mnemonic for strict paper-only workflows:
+sec migrate-v2 --no-single-line
+sec enroll-recovery --no-single-line
 ```
 
 What happens:
-1. 24 words are displayed — write them on paper NOW
-2. You verify 3 random words before the upgrade proceeds
+1. 24 words are displayed in both a **numbered 4-column grid** (`1..24`) and a **single space-separated line** (`📋 Raw Mnemonic`, unless `--no-single-line` is passed) — write them on paper or copy directly into an encrypted password manager vault NOW.
+   - **Security Guidance**: Store the recovery phrase directly in a dedicated password manager vault or on offline paper. Avoid leaving the phrase in general OS clipboard history tools, plain-text notes, or screenshots. Pass `--no-single-line` across `sec migrate-v2`, `sec enroll-recovery`, `sec profile new`, or `sec session rotate-seed` to omit the single-line output when writing strictly to paper.
+2. You verify 3 words (#4, #12, #20) before the upgrade proceeds
 3. Vault is atomically rewritten to v2.0 JSON envelope format
 4. If interrupted (Ctrl+C, power loss), re-run `sec migrate-v2` — it's safe to retry
 
