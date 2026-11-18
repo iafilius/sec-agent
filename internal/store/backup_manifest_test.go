@@ -313,3 +313,49 @@ func TestBackupFolderSpecTemplateOverridesAndSparse(t *testing.T) {
 		t.Errorf("expected EffectiveExcludes to include '._*', got %v", excludes)
 	}
 }
+
+func TestBackupManifestLegacyRsyncTimeoutAndSSHOptionsNormalization(t *testing.T) {
+	rawJSON := `{
+		"name": "example-batch",
+		"ssh_target": "backupuser@10.0.0.50",
+		"rsync_timeout": 300,
+		"ssh_options": "-o ServerAliveInterval=45 -o ServerAliveCountMax=3",
+		"jobs": [
+			{
+				"name": "example-home",
+				"source": "~/",
+				"dest": "/Volumes/MediaArchive/Backups/home-archive/",
+				"backup_dir": "/Volumes/MediaArchive/Backups/home-archive-History/{date}",
+				"log_file": "/Volumes/MediaArchive/Backups/rsync_home_archive_{datetime}.log",
+				"rsync_timeout": 600,
+				"ssh_options": "-o ServerAliveInterval=30 -o ServerAliveCountMax=4"
+			}
+		]
+	}`
+
+	var m BackupManifest
+	if err := json.Unmarshal([]byte(rawJSON), &m); err != nil {
+		t.Fatalf("json.Unmarshal failed: %v", err)
+	}
+	m.ApplyDefaults()
+	if err := m.Validate(); err != nil {
+		t.Fatalf("Validate() after ApplyDefaults failed: %v", err)
+	}
+
+	if m.Timeout != 300 || m.ServerAliveInterval != 45 || m.ServerAliveCountMax != 3 {
+		t.Errorf("expected manifest Timeout=300, ServerAliveInterval=45, ServerAliveCountMax=3, got %d/%d/%d", m.Timeout, m.ServerAliveInterval, m.ServerAliveCountMax)
+	}
+	if m.LegacyRsyncTimeout != 0 || m.LegacySSHOptions != "" {
+		t.Errorf("expected manifest legacy fields cleared after ApplyDefaults(), got %d / %q", m.LegacyRsyncTimeout, m.LegacySSHOptions)
+	}
+	if len(m.Folders) != 1 {
+		t.Fatalf("expected 1 folder migrated from jobs, got %d", len(m.Folders))
+	}
+	f := m.Folders[0]
+	if f.Timeout != 600 || f.ServerAliveInterval != 30 || f.ServerAliveCountMax != 4 {
+		t.Errorf("expected folder Timeout=600, ServerAliveInterval=30, ServerAliveCountMax=4, got %d/%d/%d", f.Timeout, f.ServerAliveInterval, f.ServerAliveCountMax)
+	}
+	if f.LegacyRsyncTimeout != 0 || f.LegacySSHOptions != "" {
+		t.Errorf("expected folder legacy fields cleared after Normalize(), got %d / %q", f.LegacyRsyncTimeout, f.LegacySSHOptions)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 )
 
 type CommandHandler func(profile string, args []string)
@@ -605,7 +606,7 @@ func initRegistry() {
 			},
 			Handler: func(profile string, args []string) {
 				if len(args) < 1 {
-					fmt.Fprintln(os.Stderr, "Usage: sec backup <file.kdbx> [--custom-password] | sec backup <init|add-folder|remove-folder|show|jobs|run|export|import|list> [<name>|<file.kdbx>]")
+					fmt.Fprintln(os.Stderr, "Usage: sec backup <file.kdbx> [--custom-password] | sec backup <init|add-folder|remove-folder|show|jobs|run|batch|export|import|list> [<name>|<file.kdbx>]")
 					os.Exit(1)
 				}
 				if isStealthBackupSubcommand(args[0]) {
@@ -638,6 +639,16 @@ func initRegistry() {
 					}
 					handleBackup(profile, args[1], explicitPassword)
 					return
+				}
+				for _, tok := range args {
+					if !strings.HasPrefix(tok, "-") && isStealthBackupSubcommand(tok) {
+						handleStealthBackup(profile, args)
+						return
+					}
+				}
+				if !strings.HasSuffix(strings.ToLower(args[0]), ".kdbx") {
+					printStealthBackupUsage()
+					os.Exit(2)
 				}
 				explicitPassword := ""
 				for i := 1; i < len(args); i++ {

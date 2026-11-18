@@ -309,6 +309,10 @@ func TestCommandRegistryParity(t *testing.T) {
 func TestShellPromptAndInitDirenv(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	origWd, _ := os.Getwd()
+	if err := os.Chdir(tmpDir); err == nil {
+		defer func() { _ = os.Chdir(origWd) }()
+	}
 
 	// 1. Test handlePrompt (idle/locked state when daemon not running)
 	oldStdout := os.Stdout

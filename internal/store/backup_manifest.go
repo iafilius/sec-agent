@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"unicode"
 )
@@ -98,12 +99,42 @@ type BackupFolderSpec struct {
 	BackupDir           string   `json:"backup_dir,omitempty"`
 	LogFile             string   `json:"log_file,omitempty"`
 	Timeout             int      `json:"timeout,omitempty"`
+	LegacyRsyncTimeout  int      `json:"rsync_timeout,omitempty"`
 	ServerAliveInterval int      `json:"server_alive_interval,omitempty"`
 	ServerAliveCountMax int      `json:"server_alive_count_max,omitempty"`
+	LegacySSHOptions    string   `json:"ssh_options,omitempty"`
 	Excludes            []string `json:"excludes,omitempty"`
 }
 
-// Normalize migrates legacy JSON fields (such as "source") into canonical fields.
+// parseSSHAliveOptions extracts ServerAliveInterval and ServerAliveCountMax integer values
+// from an OpenSSH options string (such as "-o ServerAliveInterval=30 -o ServerAliveCountMax=4").
+func parseSSHAliveOptions(sshOpts string) (interval int, countMax int) {
+	fields := strings.Fields(sshOpts)
+	for i := 0; i < len(fields); i++ {
+		tok := strings.TrimSpace(fields[i])
+		if tok == "-o" && i+1 < len(fields) {
+			i++
+			tok = strings.TrimSpace(fields[i])
+		} else if strings.HasPrefix(tok, "-o") && len(tok) > 2 {
+			tok = strings.TrimSpace(tok[2:])
+		}
+		lower := strings.ToLower(tok)
+		if strings.HasPrefix(lower, "serveraliveinterval=") {
+			valStr := strings.TrimSpace(tok[len("serveraliveinterval="):])
+			if v, err := strconv.Atoi(valStr); err == nil && v > 0 {
+				interval = v
+			}
+		} else if strings.HasPrefix(lower, "serveralivecountmax=") {
+			valStr := strings.TrimSpace(tok[len("serveralivecountmax="):])
+			if v, err := strconv.Atoi(valStr); err == nil && v > 0 {
+				countMax = v
+			}
+		}
+	}
+	return interval, countMax
+}
+
+// Normalize migrates legacy JSON fields (such as "source", "rsync_timeout", and "ssh_options") into canonical fields.
 func (f *BackupFolderSpec) Normalize() {
 	if f == nil {
 		return
@@ -112,6 +143,20 @@ func (f *BackupFolderSpec) Normalize() {
 		f.Source = strings.TrimSpace(f.LegacySource)
 	}
 	f.LegacySource = ""
+	if f.Timeout == 0 && f.LegacyRsyncTimeout > 0 {
+		f.Timeout = f.LegacyRsyncTimeout
+	}
+	f.LegacyRsyncTimeout = 0
+	if strings.TrimSpace(f.LegacySSHOptions) != "" {
+		sai, sac := parseSSHAliveOptions(f.LegacySSHOptions)
+		if f.ServerAliveInterval == 0 && sai > 0 {
+			f.ServerAliveInterval = sai
+		}
+		if f.ServerAliveCountMax == 0 && sac > 0 {
+			f.ServerAliveCountMax = sac
+		}
+		f.LegacySSHOptions = ""
+	}
 }
 
 // Validate checks that the folder specification has a valid, non-empty Source without path traversal or control characters.
@@ -329,8 +374,10 @@ type BackupManifest struct {
 	PartialDir          string             `json:"partial_dir,omitempty"`
 	MaxAttempts         int                `json:"max_attempts,omitempty"`
 	Timeout             int                `json:"timeout,omitempty"`
+	LegacyRsyncTimeout  int                `json:"rsync_timeout,omitempty"`
 	ServerAliveInterval int                `json:"server_alive_interval,omitempty"`
 	ServerAliveCountMax int                `json:"server_alive_count_max,omitempty"`
+	LegacySSHOptions    string             `json:"ssh_options,omitempty"`
 	Excludes            []string           `json:"excludes,omitempty"`
 	Folders             []BackupFolderSpec `json:"folders"`
 	LegacyJobs          []BackupFolderSpec `json:"jobs,omitempty"`
@@ -340,6 +387,20 @@ type BackupManifest struct {
 func (m *BackupManifest) ApplyDefaults() {
 	if m == nil {
 		return
+	}
+	if m.Timeout == 0 && m.LegacyRsyncTimeout > 0 {
+		m.Timeout = m.LegacyRsyncTimeout
+	}
+	m.LegacyRsyncTimeout = 0
+	if strings.TrimSpace(m.LegacySSHOptions) != "" {
+		sai, sac := parseSSHAliveOptions(m.LegacySSHOptions)
+		if m.ServerAliveInterval == 0 && sai > 0 {
+			m.ServerAliveInterval = sai
+		}
+		if m.ServerAliveCountMax == 0 && sac > 0 {
+			m.ServerAliveCountMax = sac
+		}
+		m.LegacySSHOptions = ""
 	}
 	if len(m.Folders) == 0 && len(m.LegacyJobs) > 0 {
 		m.Folders = m.LegacyJobs

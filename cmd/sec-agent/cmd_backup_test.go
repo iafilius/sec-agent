@@ -600,7 +600,7 @@ func TestStealthBackupRunRealRsyncOverGoSSH(t *testing.T) {
 			break
 		}
 	}
-	if !foundRemoteLog {
+	if !foundRemoteLog && !rsyncIsOpenrsync(rsyncBin) {
 		t.Errorf("expected remote log file matching rsync_photos_*.log one level higher in %s", remoteBase)
 	}
 
@@ -944,5 +944,192 @@ func TestTimeoutInLocalAndRemoteRsyncArgs(t *testing.T) {
 	remoteCmd := rewriteRemoteRsyncServerCommand([]string{"rsync", "--server", "-vlogDtprze.iLsfxCIvu", ".", "target"}, manifest, folder, time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC))
 	if !strings.Contains(remoteCmd, "--timeout=180") {
 		t.Errorf("expected --timeout=180 in rewritten remote rsync command, got: %s", remoteCmd)
+	}
+}
+
+func TestRsyncIsOpenrsyncDetection(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	openrsyncScript := filepath.Join(tmpDir, "fake_openrsync")
+	if err := os.WriteFile(openrsyncScript, []byte("#!/bin/sh\necho 'openrsync: protocol version 29'\n"), 0755); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+	if !rsyncIsOpenrsync(openrsyncScript) {
+		t.Errorf("expected rsyncIsOpenrsync(%q) = true", openrsyncScript)
+	}
+
+	gnuRsyncScript := filepath.Join(tmpDir, "fake_gnursync")
+	if err := os.WriteFile(gnuRsyncScript, []byte("#!/bin/sh\necho 'rsync  version 3.4.1  protocol version 32'\n"), 0755); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+	if rsyncIsOpenrsync(gnuRsyncScript) {
+		t.Errorf("expected rsyncIsOpenrsync(%q) = false", gnuRsyncScript)
+	}
+}
+
+func TestStealthBackupExit23StopsRetryingAndExit24Succeeds(t *testing.T) {
+	origBase := backupRetryBaseDelay
+	origMax := backupRetryMaxDelay
+	defer func() {
+		backupRetryBaseDelay = origBase
+		backupRetryMaxDelay = origMax
+	}()
+	backupRetryBaseDelay = 1 * time.Millisecond
+	backupRetryMaxDelay = 5 * time.Millisecond
+
+	// Simulate real *exec.ExitError instances for exit 24, exit 23, and exit 12
+	errExit24 := exec.Command("sh", "-c", "exit 24").Run()
+	errExit23 := exec.Command("sh", "-c", "exit 23").Run()
+	errExit12 := exec.Command("sh", "-c", "exit 12").Run()
+
+	if got := classifyRsyncRunError(errExit24, nil, "VanishedFolder"); got != nil {
+		t.Fatalf("expected exit 24 (vanished source files) to classify as nil (non-fatal), got: %v", got)
+	}
+	classified23 := classifyRsyncRunError(errExit23, nil, "PermissionBlockedFolder")
+	if classified23 == nil || !isNonRetryableBackupError(classified23) {
+		t.Fatalf("expected exit 23 (permission denied) to classify as nonRetryableBackupError, got: %v", classified23)
+	}
+	classified12 := classifyRsyncRunError(errExit12, nil, "TransientNetFolder")
+	if classified12 == nil || isNonRetryableBackupError(classified12) {
+		t.Fatalf("expected exit 12 (protocol data stream error) to remain retryable, got: %v", classified12)
+	}
+
+	manifest := store.BackupManifest{
+		Name:        "example-batch",
+		SSHTarget:   "backupuser@10.0.0.50",
+		LocalBase:   "/Users/backupuser",
+		RemoteBase:  "/Volumes/MediaArchive/Backups",
+		MaxAttempts: 4,
+		Folders: []store.BackupFolderSpec{
+			{Name: "vanished-folder", Source: "VanishedFolder"},
+			{Name: "tcc-blocked-folder", Source: "PermissionBlockedFolder"},
+			{Name: "transient-net-folder", Source: "TransientNetFolder"},
+		},
+	}
+
+	attemptCounts := make(map[string]int)
+	failedFolders, runErr := runStealthBackupFolders(
+		manifest,
+		manifest.Folders,
+		nil,
+		func(folder store.BackupFolderSpec, attempt int) error {
+			attemptCounts[folder.Source]++
+			switch folder.Source {
+			case "VanishedFolder":
+				return classifyRsyncRunError(errExit24, nil, folder.Source)
+			case "PermissionBlockedFolder":
+				return classifyRsyncRunError(errExit23, nil, folder.Source)
+			case "TransientNetFolder":
+				if attempt < 3 {
+					return classifyRsyncRunError(errExit12, nil, folder.Source)
+				}
+				return nil
+			default:
+				return nil
+			}
+		},
+		nil,
+	)
+
+	if runErr == nil {
+		t.Fatalf("expected overall error due to tcc-blocked-folder failing")
+	}
+	if len(failedFolders) != 1 || failedFolders[0] != "tcc-blocked-folder" {
+		t.Fatalf("expected failedFolders = ['tcc-blocked-folder'], got %v", failedFolders)
+	}
+	if attemptCounts["VanishedFolder"] != 1 {
+		t.Errorf("expected VanishedFolder (exit 24) to succeed in 1 attempt, got %d", attemptCounts["VanishedFolder"])
+	}
+	if attemptCounts["PermissionBlockedFolder"] != 1 {
+		t.Errorf("expected PermissionBlockedFolder (exit 23) to stop immediately after 1 attempt without retrying, got %d", attemptCounts["PermissionBlockedFolder"])
+	}
+	if attemptCounts["TransientNetFolder"] != 3 {
+		t.Errorf("expected TransientNetFolder (exit 12) to retry and succeed on attempt 3, got %d", attemptCounts["TransientNetFolder"])
+	}
+}
+
+func TestLoadStealthBackupManifestFallbackToBackupBatchPrefix(t *testing.T) {
+	tmpCfgDir, err := os.MkdirTemp("/tmp", "sec_batch_fb_*")
+	if err != nil {
+		t.Fatalf("MkdirTemp failed: %v", err)
+	}
+	defer os.RemoveAll(tmpCfgDir)
+
+	profile := "batchfb"
+	t.Setenv("SEC_CONFIG_DIR", tmpCfgDir)
+	t.Setenv("SEC_TEST_MODE", "1")
+
+	d, err := daemon.NewDaemon(profile, 5*time.Minute, Version)
+	if err != nil {
+		t.Fatalf("NewDaemon failed: %v", err)
+	}
+	d.IsTestInstance = true
+	go func() {
+		_ = d.Start()
+	}()
+	defer d.Stop()
+
+	sockPath, _ := config.GetSocketPath(profile)
+	for i := 0; i < 40; i++ {
+		if _, sErr := os.Stat(sockPath); sErr == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	openResp, err := queryDaemon(profile, daemon.IPCRequest{
+		Action: daemon.IPCActionOpen,
+		Key:    []byte("01234567890123456789012345678901"),
+		TTL:    "5m",
+	})
+	if err != nil || openResp == nil || !openResp.Success {
+		t.Fatalf("failed to open daemon session: %v", err)
+	}
+	t.Setenv("SEC_SESSION_TOKEN", openResp.Token)
+
+	legacyBatchJSON := `{
+		"name": "example-batch",
+		"ssh_target": "backupuser@10.0.0.50",
+		"jobs": [
+			{
+				"name": "example-home",
+				"source": "~/",
+				"dest": "/Volumes/MediaArchive/Backups/home-archive/",
+				"backup_dir": "/Volumes/MediaArchive/Backups/home-archive-History/{date}",
+				"log_file": "/Volumes/MediaArchive/Backups/rsync_home_archive_{datetime}.log",
+				"rsync_timeout": 600,
+				"ssh_options": "-o ServerAliveInterval=30 -o ServerAliveCountMax=4"
+			}
+		]
+	}`
+
+	setResp, err := queryDaemon(profile, daemon.IPCRequest{
+		Action:  daemon.IPCActionSet,
+		Path:    "backup-batch/example-batch",
+		Value:   legacyBatchJSON,
+		NoTrace: true,
+	})
+	if err != nil || setResp == nil || !setResp.Success {
+		t.Fatalf("failed to store legacy backup-batch secret: %v", err)
+	}
+
+	manifest, err := loadStealthBackupManifest(profile, "example-batch", true)
+	if err != nil {
+		t.Fatalf("loadStealthBackupManifest fallback to backup-batch/example-batch failed: %v", err)
+	}
+	if len(manifest.Folders) != 1 {
+		t.Fatalf("expected 1 folder in loaded manifest, got %d", len(manifest.Folders))
+	}
+	f := manifest.Folders[0]
+	if f.Timeout != 600 || f.ServerAliveInterval != 30 || f.ServerAliveCountMax != 4 {
+		t.Errorf("expected normalized folder Timeout=600, ServerAliveInterval=30, ServerAliveCountMax=4, got %d/%d/%d", f.Timeout, f.ServerAliveInterval, f.ServerAliveCountMax)
+	}
+
+	manifests, err := collectStealthBackupManifests(profile)
+	if err != nil {
+		t.Fatalf("collectStealthBackupManifests failed: %v", err)
+	}
+	if len(manifests) != 1 || manifests[0].Name != "example-batch" {
+		t.Errorf("expected collectStealthBackupManifests to include 'example-batch', got %+v", manifests)
 	}
 }

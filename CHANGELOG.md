@@ -5,6 +5,20 @@ All notable changes to `sec-agent` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v2.19.3] - 2026-11-18
+
+### Added & Enhanced
+- **Exit-Code-Aware `rsync` Retry Classification (`sec backup run` / `sec backup batch run`)**:
+  - Treats `rsync` exit code `24` (partial transfer due to vanished source files) as non-fatal without retry.
+  - Stops retrying immediately after Attempt 1 on `rsync` exit code `23` (partial transfer due to local permission/TCC error) and syntax/configuration exit codes (`1..6, 11, 13, 14`), avoiding multi-attempt directory tree re-walks on TCC-protected folders and continuing immediately to the next folder.
+  - Continues retrying transient network, socket, SSH, and timeout failures (`10, 12, 30, 35, 255`) up to `max_attempts` with exponential backoff.
+- **macOS `openrsync` Detection & Advisory Warning (`rsyncIsOpenrsync`)**:
+  - Detects when local `rsync` is Apple's `openrsync` (protocol 29, `/usr/bin/rsync`) and emits a non-fatal hint recommending `brew install rsync`.
+- **Legacy Batch JSON Key Normalization (`rsync_timeout`, `ssh_options`, `backup-batch/<name>`)**:
+  - Automatically normalizes `"rsync_timeout"` into `Timeout` and parses `-o ServerAliveInterval=<N>` and `-o ServerAliveCountMax=<M>` from `"ssh_options"` into `ServerAliveInterval` and `ServerAliveCountMax`, and falls back to `backup-batch/<name>` when `backup/<name>` is not found in the vault.
+- **Strict Non-Interactive `sec backup` Subcommand Routing & Test Isolation**:
+  - Ensures `sec backup` subcommands (even with leading flags such as `--dry-run`) never fall through to the interactive KeePassXC `.kdbx` BIP39 mnemonic prompt unless `export` or a `.kdbx` filename is explicitly specified, and isolates `TestShellPromptAndInitDirenv` from host `~/.secrc` files.
+
 ## [v2.19.2] - 2026-11-18
 
 ### Added & Enhanced

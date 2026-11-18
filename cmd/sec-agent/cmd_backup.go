@@ -97,6 +97,21 @@ func handleStealthBackup(profile string, args []string) {
 		return
 	}
 
+	// If leading flags precede the subcommand (e.g. "sec backup --dry-run run home-nas"),
+	// move the subcommand token to position 0 while preserving all flags for the subcommand parser.
+	if !isStealthBackupSubcommand(args[0]) && args[0] != "list" {
+		for i, tok := range args {
+			if isStealthBackupSubcommand(tok) {
+				reordered := make([]string, 0, len(args))
+				reordered = append(reordered, tok)
+				reordered = append(reordered, args[:i]...)
+				reordered = append(reordered, args[i+1:]...)
+				args = reordered
+				break
+			}
+		}
+	}
+
 	switch args[0] {
 	case "init":
 		handleStealthBackupInit(profile, args[1:])
@@ -178,13 +193,25 @@ func loadStealthBackupManifest(profile string, rawName string, noTrace bool) (st
 		return store.BackupManifest{}, err
 	}
 
+	vaultPath := string(jobName.VaultKey())
 	resp, err := queryDaemon(profile, daemon.IPCRequest{
 		Action:  daemon.IPCActionGet,
-		Path:    string(jobName.VaultKey()),
+		Path:    vaultPath,
 		NoTrace: noTrace,
 	})
 	if err != nil {
 		failDaemonNotRunning(profile)
+	}
+	if !resp.Success && strings.Contains(strings.ToLower(resp.Error), "not found") {
+		legacyBatchPath := "backup-batch/" + jobName.String()
+		if altResp, altErr := queryDaemon(profile, daemon.IPCRequest{
+			Action:  daemon.IPCActionGet,
+			Path:    legacyBatchPath,
+			NoTrace: noTrace,
+		}); altErr == nil && altResp != nil && altResp.Success {
+			resp = altResp
+			vaultPath = legacyBatchPath
+		}
 	}
 	if !resp.Success {
 		if strings.Contains(strings.ToLower(resp.Error), "not found") {
@@ -195,7 +222,7 @@ func loadStealthBackupManifest(profile string, rawName string, noTrace bool) (st
 
 	var manifest store.BackupManifest
 	if err := json.Unmarshal([]byte(resp.Value), &manifest); err != nil {
-		return store.BackupManifest{}, fmt.Errorf("%w: failed to parse manifest JSON at %s: %v", store.ErrInvalidBackupManifest, jobName.VaultKey(), err)
+		return store.BackupManifest{}, fmt.Errorf("%w: failed to parse manifest JSON at %s: %v", store.ErrInvalidBackupManifest, vaultPath, err)
 	}
 	if manifest.Name == "" {
 		manifest.Name = jobName
@@ -804,19 +831,25 @@ func collectStealthBackupManifests(profile string) ([]store.BackupManifest, erro
 	if err == nil && resp != nil && resp.Success && len(resp.Secrets) > 0 {
 		var keys []string
 		for k := range resp.Secrets {
-			if strings.HasPrefix(k, "backup/") {
+			if strings.HasPrefix(k, "backup/") || strings.HasPrefix(k, "backup-batch/") {
 				keys = append(keys, k)
 			}
 		}
 		sort.Strings(keys)
 		var manifests []store.BackupManifest
+		seenNames := make(map[store.BackupJobName]bool)
 		for _, k := range keys {
 			entry := resp.Secrets[k]
 			var m store.BackupManifest
 			if json.Unmarshal([]byte(entry.Value), &m) == nil {
 				if m.Name == "" {
-					m.Name = store.BackupJobName(strings.TrimPrefix(k, "backup/"))
+					raw := strings.TrimPrefix(strings.TrimPrefix(k, "backup-batch/"), "backup/")
+					m.Name = store.BackupJobName(raw)
 				}
+				if seenNames[m.Name] {
+					continue
+				}
+				seenNames[m.Name] = true
 				m.ApplyDefaults()
 				manifests = append(manifests, m)
 			}
@@ -824,7 +857,7 @@ func collectStealthBackupManifests(profile string) ([]store.BackupManifest, erro
 		return manifests, nil
 	}
 
-	// Fallback to IPCActionList with Path: "backup/"
+	// Fallback to IPCActionList with Path: "backup/" and "backup-batch/"
 	listResp, listErr := queryDaemon(profile, daemon.IPCRequest{
 		Action:   daemon.IPCActionList,
 		Path:     "backup/",
@@ -845,13 +878,30 @@ func collectStealthBackupManifests(profile string) ([]store.BackupManifest, erro
 			keys = append(keys, trimmed)
 		}
 	}
+	if batchResp, batchErr := queryDaemon(profile, daemon.IPCRequest{
+		Action:   daemon.IPCActionList,
+		Path:     "backup-batch/",
+		IsPrefix: true,
+		NoTrace:  true,
+	}); batchErr == nil && batchResp != nil && batchResp.Success {
+		for _, line := range strings.Split(batchResp.Value, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "backup-batch/") {
+				keys = append(keys, trimmed)
+			}
+		}
+	}
 	sort.Strings(keys)
 
 	var manifests []store.BackupManifest
+	seenNames := make(map[store.BackupJobName]bool)
 	for _, k := range keys {
-		rawName := strings.TrimPrefix(k, "backup/")
+		rawName := strings.TrimPrefix(strings.TrimPrefix(k, "backup-batch/"), "backup/")
 		if m, mErr := loadStealthBackupManifest(profile, rawName, true); mErr == nil {
-			manifests = append(manifests, m)
+			if !seenNames[m.Name] {
+				seenNames[m.Name] = true
+				manifests = append(manifests, m)
+			}
 		}
 	}
 	return manifests, nil
@@ -1434,6 +1484,58 @@ func startSSHServerAliveMonitor(client sshKeepaliveSender, interval time.Duratio
 	}
 }
 
+// nonRetryableBackupError wraps a folder backup error that should fail immediately
+// without re-walking the directory tree for additional retry attempts (e.g., rsync exit code 23 permission/TCC errors).
+type nonRetryableBackupError struct {
+	Err error
+}
+
+func (e *nonRetryableBackupError) Error() string {
+	return e.Err.Error()
+}
+
+func (e *nonRetryableBackupError) Unwrap() error {
+	return e.Err
+}
+
+func isNonRetryableBackupError(err error) bool {
+	var nr *nonRetryableBackupError
+	return errors.As(err, &nr)
+}
+
+// classifyRsyncRunError inspects the exit status of local rsync:
+//   - Exit code 24 (partial transfer due to vanished source files): logs a non-fatal warning and returns nil.
+//   - Exit code 23 (partial transfer due to permission/TCC errors) or syntax/config exit codes (1..6, 11, 13, 14):
+//     returns a *nonRetryableBackupError so the runner does not waste 4 retries re-walking a TCC-blocked directory tree.
+//   - Transient network, socket, SSH, or timeout exit codes (10, 12, 30, 35, 255, etc.): returns a retryable error.
+func classifyRsyncRunError(runErr, bridgeErr error, folderSource string) error {
+	if runErr == nil {
+		return nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(runErr, &exitErr) {
+		code := exitErr.ExitCode()
+		if code == 24 {
+			fmt.Fprintf(os.Stderr, "[!] Note: rsync exit 24 for folder %q (some source files vanished during transfer); treating as non-fatal.\n", folderSource)
+			return nil
+		}
+		switch code {
+		case 1, 2, 3, 4, 5, 6, 11, 13, 14, 23:
+			var baseErr error
+			if bridgeErr != nil {
+				baseErr = fmt.Errorf("rsync failed for folder %q (exit %d, non-retryable): %v (remote: %v)", folderSource, code, runErr, bridgeErr)
+			} else {
+				baseErr = fmt.Errorf("rsync failed for folder %q (exit %d, non-retryable): %w", folderSource, code, runErr)
+			}
+			return &nonRetryableBackupError{Err: baseErr}
+		}
+	}
+	if bridgeErr != nil {
+		return fmt.Errorf("rsync failed for folder %q: %v (remote: %v)", folderSource, runErr, bridgeErr)
+	}
+	return fmt.Errorf("rsync failed for folder %q: %w", folderSource, runErr)
+}
+
 // runStealthBackupFolders executes each folder in selectedFolders with up to manifest.MaxAttempts
 // attempts, exponential backoff (backupBackoff), optional SSH reconnect between attempts, and
 // continue-on-failure semantics so an exhausted folder does not block subsequent folders.
@@ -1459,6 +1561,7 @@ func runStealthBackupFolders(
 
 		var lastErr error
 		succeeded := false
+		attemptsRun := 0
 		for attempt := 1; attempt <= maxAttempts; attempt++ {
 			if lost != nil {
 				select {
@@ -1468,9 +1571,13 @@ func runStealthBackupFolders(
 				}
 			}
 
+			attemptsRun = attempt
 			lastErr = attemptFn(folder, attempt)
 			if lastErr == nil {
 				succeeded = true
+				break
+			}
+			if isNonRetryableBackupError(lastErr) {
 				break
 			}
 
@@ -1493,7 +1600,7 @@ func runStealthBackupFolders(
 		}
 
 		if !succeeded {
-			fmt.Fprintf(os.Stderr, "[✗] Folder %q failed after %d attempt(s): %v\n", folderLabel, maxAttempts, lastErr)
+			fmt.Fprintf(os.Stderr, "[✗] Folder %q failed after %d attempt(s): %v\n", folderLabel, attemptsRun, lastErr)
 			failedFolders = append(failedFolders, folderLabel)
 		}
 	}
@@ -1629,6 +1736,20 @@ func runInternalSSHStdio(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// rsyncIsOpenrsync reports whether bin is Apple's openrsync (protocol 29, shipped at /usr/bin/rsync).
+// openrsync does not support server-side --log-file in the same way as GNU rsync (protocol 31+).
+func rsyncIsOpenrsync(bin string) bool {
+	if strings.TrimSpace(bin) == "" {
+		return false
+	}
+	// #nosec G204 G702
+	out, err := exec.Command(bin, "--version").CombinedOutput()
+	if err != nil && len(out) == 0 {
+		return false
+	}
+	return strings.Contains(strings.ToLower(string(out)), "openrsync")
 }
 
 func findLocalRsyncBinary() (string, error) {
@@ -1857,6 +1978,9 @@ func executeStealthBackupRun(profile string, args []string) error {
 			Remediation: "Install rsync (e.g., 'brew install rsync')",
 		}
 	}
+	if rsyncIsOpenrsync(localRsyncBin) {
+		fmt.Fprintf(os.Stderr, "[!] Note: using macOS openrsync (%s); install GNU rsync ('brew install rsync') for full remote --log-file support.\n", localRsyncBin)
+	}
 
 	selfExe, err := os.Executable()
 	if err != nil {
@@ -1930,7 +2054,9 @@ func executeStealthBackupRun(profile string, args []string) error {
 
 		// #nosec G703
 		if fi, statErr := os.Stat(localDir); statErr != nil || !fi.IsDir() {
-			return fmt.Errorf("local source directory does not exist for folder %q: %s", folder.Source, localDir)
+			return &nonRetryableBackupError{
+				Err: fmt.Errorf("local source directory does not exist for folder %q: %s", folder.Source, localDir),
+			}
 		}
 
 		if Verbose {
@@ -1993,13 +2119,7 @@ func executeStealthBackupRun(profile string, args []string) error {
 		bridgeErr := waitBridgeErr()
 		cleanupBridge()
 
-		if runErr != nil {
-			if bridgeErr != nil {
-				return fmt.Errorf("rsync failed for folder %q: %v (remote: %v)", folder.Source, runErr, bridgeErr)
-			}
-			return fmt.Errorf("rsync failed for folder %q: %w", folder.Source, runErr)
-		}
-		return nil
+		return classifyRsyncRunError(runErr, bridgeErr, folder.Source)
 	}
 
 	if _, err := runStealthBackupFolders(manifest, selectedFolders, lostCh, attemptFn, reconnectFn); err != nil {

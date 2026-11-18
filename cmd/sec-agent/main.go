@@ -41,7 +41,7 @@ var (
 	confirmProdFlag bool
 )
 var (
-	Version   = "v2.19.2"
+	Version   = "v2.19.3"
 	BuildDate = "unknown"
 )
 
