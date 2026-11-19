@@ -5,6 +5,14 @@ All notable changes to `sec-agent` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v2.19.7] - 2026-11-19
+
+### Enhanced & Tested
+- **Minimal Local `rsync` `ps aux` Footprint (`RSYNC_RSH`, `RSYNC_PARTIAL_DIR`, Compact Flags & Opaque `. s:t`)**:
+  - Moved stealth transport (`-e "<sec> ssh-stdio"`) and `--partial-dir` out of local `rsync` `argv` into `cmd.Env` (`RSYNC_RSH`, `RSYNC_PARTIAL_DIR`), switched to compact short flags (`-rtvP` / `-rtvPS` / `-rtvPn`) and minimal opaque `. s:t` target (100% compatible with both GNU `rsync` and macOS `openrsync`), and documented unavoidable residual `ps aux` tokens in `README.md` and `SKILL.md`.
+- **Expanded E2E & Regression Test Coverage**:
+  - Added `TestLegacyV2192ManifestBackfillEndToEnd` (real encrypted vault on disk -> `IPCActionOpen` -> `loadStealthBackupManifest` -> `--timeout=600` & `ServerAliveInterval=30/ServerAliveCountMax=4`), `TestEnsureDaemonRunningEvictsOutdatedDaemonOnUpgrade` (version-mismatch daemon eviction & restart on first `sec open` after upgrade), and explicit assertions for the macOS TCC remediation hint on `rsync` exit code `23`.
+
 ## [v2.19.6] - 2026-11-19
 
 ### Fixed & Enhanced
