@@ -1399,11 +1399,13 @@ func shellQuoteIfNeeded(s string) string {
 	return s
 }
 
-// buildLocalStealthRsyncArgs constructs the local `rsync` command-line argument slice.
-// By setting `cmd.Dir = localDir`, passing excludes via `/dev/fd/3`, and routing over
-// `-e "<selfExe> ssh-stdio" . sync:target`, zero folder names, volume paths, usernames,
-// or IP addresses ever appear in the local host's `ps aux` process table.
+// buildLocalStealthRsyncArgs constructs a minimal local `rsync` command-line argument slice.
+// By setting `cmd.Dir = localDir`, moving transport (`RSYNC_RSH`) and partial-dir (`RSYNC_PARTIAL_DIR`)
+// into `cmd.Env`, passing excludes via `/dev/fd/3`, and using compact flags + opaque `. s:t`,
+// zero folder names, volume paths, usernames, IP addresses, or verbose transport options
+// appear in the local host's `ps aux` process table.
 func buildLocalStealthRsyncArgs(manifest store.BackupManifest, selfExe string, dryRun bool, folders ...store.BackupFolderSpec) []string {
+	_ = selfExe
 	manifest.ApplyDefaults()
 	var activeFolder store.BackupFolderSpec
 	if len(folders) > 0 {
@@ -1412,29 +1414,49 @@ func buildLocalStealthRsyncArgs(manifest store.BackupManifest, selfExe string, d
 		activeFolder = manifest.Folders[0]
 	}
 
-	args := []string{
-		"-rtv",
-		"--progress",
-	}
+	shortFlags := "-rtvP"
 	if activeFolder.Sparse {
-		args = append(args, "--sparse")
+		shortFlags += "S"
 	}
+	if dryRun {
+		shortFlags += "n"
+	}
+	args := []string{shortFlags}
 	if effTimeout := activeFolder.EffectiveTimeout(manifest.Timeout); effTimeout > 0 {
 		args = append(args, fmt.Sprintf("--timeout=%d", effTimeout))
 	}
-	args = append(args,
-		fmt.Sprintf("--partial-dir=%s", manifest.PartialDir),
-		fmt.Sprintf("--modify-window=%d", manifest.ModifyWindow),
-	)
-	if dryRun {
-		args = append(args, "--dry-run")
-	}
+	args = append(args, fmt.Sprintf("--modify-window=%d", manifest.ModifyWindow))
 	if len(activeFolder.EffectiveExcludes(manifest.Excludes)) > 0 {
 		args = append(args, "--exclude-from=/dev/fd/3")
 	}
-	rshCmd := fmt.Sprintf("%s ssh-stdio", shellQuoteIfNeeded(selfExe))
-	args = append(args, "-e", rshCmd, ".", "sync:target")
+	args = append(args, ".", "s:t")
 	return args
+}
+
+// buildLocalStealthRsyncEnv builds the subprocess environment for local `rsync`,
+// passing the stealth transport (`RSYNC_RSH`), partial-dir (`RSYNC_PARTIAL_DIR`),
+// and ephemeral stdio socket (`SEC_STDIO_SOCK`) privately via environment variables
+// rather than process argv.
+func buildLocalStealthRsyncEnv(manifest store.BackupManifest, selfExe string, sockPath string) []string {
+	manifest.ApplyDefaults()
+	rshCmd := fmt.Sprintf("%s ssh-stdio", shellQuoteIfNeeded(selfExe))
+	env := make([]string, 0, len(os.Environ())+3)
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "RSYNC_RSH=") ||
+			strings.HasPrefix(kv, "RSYNC_PARTIAL_DIR=") ||
+			strings.HasPrefix(kv, "SEC_STDIO_SOCK=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	env = append(env,
+		fmt.Sprintf("SEC_STDIO_SOCK=%s", sockPath),
+		fmt.Sprintf("RSYNC_RSH=%s", rshCmd),
+	)
+	if strings.TrimSpace(manifest.PartialDir) != "" {
+		env = append(env, fmt.Sprintf("RSYNC_PARTIAL_DIR=%s", manifest.PartialDir))
+	}
+	return env
 }
 
 // requireUnlockedForStealthBackup verifies that the target daemon profile is running and unlocked
@@ -2262,7 +2284,7 @@ func executeStealthBackupRun(profile string, args []string) error {
 		cmd := exec.Command(localRsyncBin, rsyncArgs...)
 		cmd.Dir = localDir
 		cmd.ExtraFiles = []*os.File{excludePipeRead}
-		cmd.Env = append(os.Environ(), fmt.Sprintf("SEC_STDIO_SOCK=%s", sockPath))
+		cmd.Env = buildLocalStealthRsyncEnv(manifest, selfExe, sockPath)
 		stderrFilter := newRsyncStderrFilterWriter(os.Stderr, Verbose)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = stderrFilter

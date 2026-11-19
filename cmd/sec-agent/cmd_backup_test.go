@@ -97,19 +97,36 @@ func TestBuildLocalStealthRsyncArgsNoLeakage(t *testing.T) {
 		"backupuser",
 		"MediaArchive",
 		"Photos-History",
+		"-e",
+		"ssh-stdio",
+		"--progress",
+		"--sparse",
+		"--partial-dir",
 	}
 
 	for _, secretToken := range forbiddenTokens {
 		if strings.Contains(joined, secretToken) {
-			t.Errorf("local rsync args leaked sensitive token %q in argv: %v", secretToken, args)
+			t.Errorf("local rsync args leaked sensitive or verbose token %q in argv: %v", secretToken, args)
 		}
 	}
 
 	if !strings.Contains(joined, "--exclude-from=/dev/fd/3") {
 		t.Errorf("expected --exclude-from=/dev/fd/3 in local rsync args, got: %v", args)
 	}
-	if args[len(args)-2] != "." || args[len(args)-1] != "sync:target" {
-		t.Errorf("expected trailing args ['.', 'sync:target'], got: %v", args)
+	if args[len(args)-2] != "." || args[len(args)-1] != "s:t" {
+		t.Errorf("expected trailing args ['.', 's:t'], got: %v", args)
+	}
+
+	env := buildLocalStealthRsyncEnv(manifest, "/usr/local/bin/sec-agent", "/tmp/test.sock")
+	envJoined := strings.Join(env, "\n")
+	for _, wantEnv := range []string{
+		"SEC_STDIO_SOCK=/tmp/test.sock",
+		"RSYNC_RSH=/usr/local/bin/sec-agent ssh-stdio",
+		"RSYNC_PARTIAL_DIR=.rsync-partial",
+	} {
+		if !strings.Contains(envJoined, wantEnv) {
+			t.Errorf("expected %q in local rsync env, got:\n%s", wantEnv, envJoined)
+		}
 	}
 }
 
@@ -394,7 +411,7 @@ func TestStealthBackupRunRealRsyncOverGoSSH(t *testing.T) {
 								if psOut, psErr := exec.Command("ps", "-Ao", "command=").Output(); psErr == nil {
 									psSnapshotsMu.Lock()
 									for _, line := range strings.Split(string(psOut), "\n") {
-										if strings.Contains(line, "sync:target") {
+										if strings.Contains(line, " . s:t") {
 											liveClientRsyncLines = append(liveClientRsyncLines, line)
 										}
 									}
@@ -614,12 +631,12 @@ func TestStealthBackupRunRealRsyncOverGoSSH(t *testing.T) {
 	capturedLines := append([]string(nil), liveClientRsyncLines...)
 	psSnapshotsMu.Unlock()
 	if len(capturedLines) == 0 {
-		t.Fatalf("expected live ps snapshot to capture local client rsync process with sync:target")
+		t.Fatalf("expected live ps snapshot to capture local client rsync process with '. s:t'")
 	}
 	for _, line := range capturedLines {
-		for _, forbidden := range []string{"Photos", "MediaArchive", "Photos-History", "backupuser", ".DS_Store"} {
+		for _, forbidden := range []string{"Photos", "MediaArchive", "Photos-History", "backupuser", ".DS_Store", "ssh-stdio", "--partial-dir", "--progress"} {
 			if strings.Contains(line, forbidden) {
-				t.Errorf("SECURITY LEAK IN LIVE PS OUTPUT: %q leaked sensitive token %q", line, forbidden)
+				t.Errorf("SECURITY LEAK IN LIVE PS OUTPUT: %q leaked sensitive/verbose token %q", line, forbidden)
 			}
 		}
 	}
