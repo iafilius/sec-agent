@@ -1205,3 +1205,127 @@ func TestLoadStealthBackupManifestFallbackToBackupBatchPrefix(t *testing.T) {
 		}
 	}
 }
+
+func TestBackupBatchShowBackfillsFromCompanionAndDisplaysUnset(t *testing.T) {
+	tmpCfgDir, err := os.MkdirTemp("/tmp", "sec_bshow_reg_*")
+	if err != nil {
+		t.Fatalf("MkdirTemp failed: %v", err)
+	}
+	defer os.RemoveAll(tmpCfgDir)
+
+	profile := "bshowreg"
+	t.Setenv("SEC_CONFIG_DIR", tmpCfgDir)
+	t.Setenv("SEC_TEST_MODE", "1")
+
+	d, err := daemon.NewDaemon(profile, 5*time.Minute, Version)
+	if err != nil {
+		t.Fatalf("NewDaemon failed: %v", err)
+	}
+	d.IsTestInstance = true
+	go func() {
+		_ = d.Start()
+	}()
+	defer d.Stop()
+
+	sockPath, _ := config.GetSocketPath(profile)
+	for i := 0; i < 40; i++ {
+		if _, sErr := os.Stat(sockPath); sErr == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	openResp, err := queryDaemon(profile, daemon.IPCRequest{
+		Action: daemon.IPCActionOpen,
+		Key:    []byte("01234567890123456789012345678901"),
+		TTL:    "5m",
+	})
+	if err != nil || openResp == nil || !openResp.Success {
+		t.Fatalf("failed to open daemon session: %v", err)
+	}
+	t.Setenv("SEC_SESSION_TOKEN", openResp.Token)
+
+	captureBatchShow := func(name string) string {
+		rPipe, wPipe, _ := os.Pipe()
+		oldStdout := os.Stdout
+		os.Stdout = wPipe
+		var buf bytes.Buffer
+		done := make(chan struct{})
+		go func() {
+			_, _ = io.Copy(&buf, rPipe)
+			close(done)
+		}()
+		handleStealthBackupBatch(profile, []string{"show", name})
+		_ = wPipe.Close()
+		os.Stdout = oldStdout
+		<-done
+		_ = rPipe.Close()
+		return buf.String()
+	}
+
+	// Step 1: Start from a v2.19.2-style backup/<name> with Timeout: 0 and NO companion backup-batch/<name>.
+	// Assert that `sec backup batch show` explicitly prints "(not set, rsync default)" and "(not set)".
+	v2192ManifestJSON := `{
+		"name": "example-batch",
+		"ssh_target": "backupuser@10.0.0.50",
+		"local_base": "/Users/backupuser",
+		"remote_base": "/Volumes/MediaArchive/Backups",
+		"folders": [
+			{
+				"name": "example-home",
+				"src": "~/",
+				"dest": "/Volumes/MediaArchive/Backups/home-archive/",
+				"sparse": true,
+				"excludes": ["Library", "Example"]
+			}
+		]
+	}`
+	if _, sErr := queryDaemon(profile, daemon.IPCRequest{
+		Action:  daemon.IPCActionSet,
+		Path:    "backup/example-batch",
+		Value:   v2192ManifestJSON,
+		NoTrace: true,
+	}); sErr != nil {
+		t.Fatalf("failed to seed backup/example-batch: %v", sErr)
+	}
+
+	outUnset := captureBatchShow("example-batch")
+	if !strings.Contains(outUnset, "Timeout:     (not set, rsync default)") {
+		t.Errorf("expected unset timeout line 'Timeout:     (not set, rsync default)', got:\n%s", outUnset)
+	}
+	if !strings.Contains(outUnset, "SSH Alive:   (not set)") {
+		t.Errorf("expected unset SSH Alive line 'SSH Alive:   (not set)', got:\n%s", outUnset)
+	}
+
+	// Step 2: Add a companion backup-batch/example-batch with non-zero rsync_timeout and ssh_options,
+	// and assert that `sec backup batch show` backfills and prints those non-zero values.
+	companionBatchJSON := `{
+		"name": "example-batch",
+		"ssh_target": "backupuser@10.0.0.50",
+		"jobs": [
+			{
+				"name": "example-home",
+				"source": "~/",
+				"dest": "/Volumes/MediaArchive/Backups/home-archive/",
+				"rsync_timeout": 600,
+				"ssh_options": "-o ServerAliveInterval=30 -o ServerAliveCountMax=4"
+			}
+		]
+	}`
+	if _, sErr := queryDaemon(profile, daemon.IPCRequest{
+		Action:  daemon.IPCActionSet,
+		Path:    "backup-batch/example-batch",
+		Value:   companionBatchJSON,
+		NoTrace: true,
+	}); sErr != nil {
+		t.Fatalf("failed to seed backup-batch/example-batch: %v", sErr)
+	}
+
+	outBackfilled := captureBatchShow("example-batch")
+	if !strings.Contains(outBackfilled, "Timeout:     600s") {
+		t.Errorf("expected backfilled 'Timeout:     600s' in batch show output, got:\n%s", outBackfilled)
+	}
+	if !strings.Contains(outBackfilled, "SSH Alive:   interval=30s count_max=4") {
+		t.Errorf("expected backfilled 'SSH Alive:   interval=30s count_max=4' in batch show output, got:\n%s", outBackfilled)
+	}
+}

@@ -902,9 +902,13 @@ func handleStealthBackupShow(profile string, args []string) {
 		}
 		if effTo := f.EffectiveTimeout(manifest.Timeout); effTo > 0 {
 			fmt.Printf("        Timeout:     %ds\n", effTo)
+		} else {
+			fmt.Printf("        Timeout:     (not set, rsync default)\n")
 		}
 		if effSAI := f.EffectiveServerAliveInterval(manifest.ServerAliveInterval, targetInterval); effSAI > 0 {
 			fmt.Printf("        SSH Alive:   interval=%ds count_max=%d\n", effSAI, f.EffectiveServerAliveCountMax(manifest.ServerAliveCountMax, targetCountMax))
+		} else {
+			fmt.Printf("        SSH Alive:   (not set)\n")
 		}
 		fmt.Printf("        Excludes:    %s\n", strings.Join(f.EffectiveExcludes(manifest.Excludes), ", "))
 	}
@@ -1608,10 +1612,14 @@ func classifyRsyncRunError(runErr, bridgeErr error, folderSource string) error {
 		switch code {
 		case 1, 2, 3, 4, 5, 6, 11, 13, 14, 23:
 			var baseErr error
+			tccHint := ""
+			if code == 23 {
+				tccHint = " — hint: on macOS, exit 23 ('Operation not permitted') usually indicates a TCC-protected subpath (e.g. under ~/Library); exclude the blocked subpath via --exclude or grant Full Disk Access to your terminal"
+			}
 			if bridgeErr != nil {
-				baseErr = fmt.Errorf("rsync failed for folder %q (exit %d, non-retryable): %v (remote: %v)", folderSource, code, runErr, bridgeErr)
+				baseErr = fmt.Errorf("rsync failed for folder %q (exit %d, non-retryable%s): %v (remote: %v)", folderSource, code, tccHint, runErr, bridgeErr)
 			} else {
-				baseErr = fmt.Errorf("rsync failed for folder %q (exit %d, non-retryable): %w", folderSource, code, runErr)
+				baseErr = fmt.Errorf("rsync failed for folder %q (exit %d, non-retryable%s): %w", folderSource, code, tccHint, runErr)
 			}
 			return &nonRetryableBackupError{Err: baseErr}
 		}

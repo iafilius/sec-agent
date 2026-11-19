@@ -5,6 +5,14 @@ All notable changes to `sec-agent` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v2.19.5] - 2026-11-19
+
+### Enhanced
+- **Explicit Unset Indicators in `sec backup show` / `sec backup batch show`**:
+  - Always prints `Timeout:     (not set, rsync default)` and `SSH Alive:   (not set)` when unset in the vault, clearly distinguishing unset values from display issues, and adds regression test `TestBackupBatchShowBackfillsFromCompanionAndDisplaysUnset`.
+- **Actionable macOS TCC Remediation Hint on `rsync` Exit Code `23`**:
+  - Includes a clear hint explaining that macOS exit `23` (`Operation not permitted`) typically indicates a TCC-protected subpath (e.g. under `~/Library`) and can be resolved by excluding the blocked subpath via `--exclude` or granting Full Disk Access.
+
 ## [v2.19.4] - 2026-11-18
 
 ### Fixed & Enhanced
