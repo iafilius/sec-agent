@@ -1782,5 +1782,78 @@ func TestQueryDaemonReadTimeoutAndHandleRestartError(t *testing.T) {
 	}
 }
 
+func TestEnsureDaemonRunningEvictsOutdatedDaemonOnUpgrade(t *testing.T) {
+	tmpCfgDir, err := os.MkdirTemp("/tmp", "sec_upg_ev_*")
+	if err != nil {
+		t.Fatalf("MkdirTemp failed: %v", err)
+	}
+	defer os.RemoveAll(tmpCfgDir)
+
+	profile := "upgevict"
+	t.Setenv("SEC_CONFIG_DIR", tmpCfgDir)
+	t.Setenv("SEC_TEST_MODE", "1")
+	masterKey := []byte("01234567890123456789012345678901")
+
+	if err := store.SaveStore(profile, &store.EncryptedStore{Secrets: map[store.SecretKey]store.SecretEntry{}}, masterKey); err != nil {
+		t.Fatalf("SaveStore failed: %v", err)
+	}
+
+	// Build the current CLI binary
+	tmpBinDir := t.TempDir()
+	binPath := filepath.Join(tmpBinDir, "sec_upgrade_bin")
+	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("go build failed: %v\n%s", err, string(out))
+	}
+
+	// Start an outdated daemon reporting an older version ("v2.19.0-old")
+	oldDaemon, err := daemon.NewDaemon(profile, 5*time.Minute, "v2.19.0-old")
+	if err != nil {
+		t.Fatalf("NewDaemon failed: %v", err)
+	}
+	oldDaemon.IsTestInstance = true
+	go func() {
+		_ = oldDaemon.Start()
+	}()
+	defer oldDaemon.Stop()
+
+	sockPath, _ := config.GetSocketPath(profile)
+	for i := 0; i < 40; i++ {
+		if _, sErr := os.Stat(sockPath); sErr == nil {
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+
+	// Run 'sec open' with the newer CLI binary: ensureDaemonRunning MUST detect version drift,
+	// print the eviction notice, replace the daemon, and unlock on the new CLI version.
+	openCmd := exec.Command(binPath, "open", "--profile", profile)
+	openCmd.Env = append(os.Environ(), "SEC_CONFIG_DIR="+tmpCfgDir, "SEC_TEST_MODE=1")
+	openOut, openErr := openCmd.CombinedOutput()
+	if openErr != nil {
+		t.Fatalf("sec open after version upgrade failed: %v\nOutput:\n%s", openErr, string(openOut))
+	}
+	if !strings.Contains(string(openOut), "Mismatched background daemon detected. Evicting and restarting fresh daemon...") {
+		t.Errorf("expected version-mismatch eviction notice in sec open output, got:\n%s", string(openOut))
+	}
+
+	// Verify the running daemon now reports the new CLI Version
+	statusCmd := exec.Command(binPath, "status", "--profile", profile)
+	statusCmd.Env = append(os.Environ(), "SEC_CONFIG_DIR="+tmpCfgDir, "SEC_TEST_MODE=1")
+	statusOut, statusErr := statusCmd.CombinedOutput()
+	if statusErr != nil {
+		t.Fatalf("sec status after upgrade failed: %v\nOutput:\n%s", statusErr, string(statusOut))
+	}
+	if !strings.Contains(string(statusOut), "Daemon Version:       "+Version) {
+		t.Errorf("expected restarted daemon to report version %s, got:\n%s", Version, string(statusOut))
+	}
+
+	// Clean up the spawned replacement daemon
+	lockCmd := exec.Command(binPath, "lock", "--profile", profile)
+	lockCmd.Env = append(os.Environ(), "SEC_CONFIG_DIR="+tmpCfgDir, "SEC_TEST_MODE=1")
+	_ = lockCmd.Run()
+	_ = exec.Command("pkill", "-f", binPath+" --profile "+profile+" daemon").Run()
+}
+
 
 

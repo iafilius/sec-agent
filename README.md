@@ -801,7 +801,7 @@ sec session recover --profile router-ax3600-prod
 On macOS, ad-hoc signed binaries (`codesign -s -`) accumulate authorizations in the Keychain Access Control List (ACL) whenever the user authorizes an update with their Mac login password. macOS never prunes previous version hashes from the ACL, which could theoretically allow an older, unpatched binary to be executed and request Touch ID without triggering a password alert.
 
 `sec-agent` neutralizes this vector:
-- **Automatic Re-Sealing**: Upon the first `sec open` after an upgrade, `sec-agent` automatically deletes and recreates the Keychain item in memory, resetting the ACL so that only the active binary's `CDHash` is authorized.
+- **Automatic Re-Sealing & Version-Mismatch Daemon Restart**: Upon the first `sec open` after an upgrade, `ensureDaemonRunning` automatically detects any older-version background daemon, evicts and restarts it on the new binary (`[NOTICE] Mismatched background daemon detected. Evicting and restarting fresh daemon...`), and `checkAndAutoReseal` deletes and recreates the Keychain item in memory so only the active binary's `CDHash` is authorized.
 - **Explicit Operator Pruning**:
 ```bash
 # Re-seal Keychain item to active binary, purging stale historical version authorizations

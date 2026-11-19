@@ -989,6 +989,19 @@ func TestStealthBackupExit23StopsRetryingAndExit24Succeeds(t *testing.T) {
 	if classified23 == nil || !isNonRetryableBackupError(classified23) {
 		t.Fatalf("expected exit 23 (permission denied) to classify as nonRetryableBackupError, got: %v", classified23)
 	}
+	for _, wantHint := range []string{"Operation not permitted", "TCC-protected", "--exclude", "Full Disk Access"} {
+		if !strings.Contains(classified23.Error(), wantHint) {
+			t.Errorf("expected exit 23 error to include macOS TCC hint %q, got: %v", wantHint, classified23)
+		}
+	}
+	errExit1 := exec.Command("sh", "-c", "exit 1").Run()
+	classified1 := classifyRsyncRunError(errExit1, nil, "SyntaxFolder")
+	if classified1 == nil || !isNonRetryableBackupError(classified1) {
+		t.Fatalf("expected exit 1 (syntax error) to classify as nonRetryableBackupError, got: %v", classified1)
+	}
+	if strings.Contains(classified1.Error(), "TCC-protected") {
+		t.Errorf("expected exit 1 error NOT to include TCC hint, got: %v", classified1)
+	}
 	classified12 := classifyRsyncRunError(errExit12, nil, "TransientNetFolder")
 	if classified12 == nil || isNonRetryableBackupError(classified12) {
 		t.Fatalf("expected exit 12 (protocol data stream error) to remain retryable, got: %v", classified12)
@@ -1429,5 +1442,109 @@ func TestRsyncStderrFilterDemotesNonRegularFileLines(t *testing.T) {
 	}
 	if !strings.Contains(verboseOut.String(), "skipping non-regular file") {
 		t.Errorf("expected verbose mode to pass through non-regular file lines, got:\n%s", verboseOut.String())
+	}
+}
+
+func TestLegacyV2192ManifestBackfillEndToEnd(t *testing.T) {
+	tmpCfgDir, err := os.MkdirTemp("/tmp", "sec_e2e_bf_*")
+	if err != nil {
+		t.Fatalf("MkdirTemp failed: %v", err)
+	}
+	defer os.RemoveAll(tmpCfgDir)
+
+	profile := "e2ebf"
+	t.Setenv("SEC_CONFIG_DIR", tmpCfgDir)
+	t.Setenv("SEC_TEST_MODE", "1")
+	masterKey := []byte("01234567890123456789012345678901")
+
+	// Persist a real encrypted vault on disk containing a v2.19.2-style backup/<name>
+	// (saved with Timeout=0) alongside a legacy backup-batch/<name> companion.
+	v2192Backup := `{
+		"name": "example-batch",
+		"ssh_target": "backupuser@10.0.0.50",
+		"local_base": "/Users/backupuser",
+		"remote_base": "/Volumes/MediaArchive/Backups",
+		"folders": [
+			{
+				"name": "example-home",
+				"src": "~/",
+				"dest": "/Volumes/MediaArchive/Backups/home-archive/",
+				"timeout": 0
+			}
+		]
+	}`
+	legacyCompanion := `{
+		"name": "example-batch",
+		"ssh_target": "backupuser@10.0.0.50",
+		"jobs": [
+			{
+				"name": "example-home",
+				"source": "~/",
+				"dest": "/Volumes/MediaArchive/Backups/home-archive/",
+				"rsync_timeout": 600,
+				"ssh_options": "-o ServerAliveInterval=30 -o ServerAliveCountMax=4"
+			}
+		]
+	}`
+	diskStore := &store.EncryptedStore{
+		Secrets: map[store.SecretKey]store.SecretEntry{
+			store.SecretKey("backup/example-batch"):       {Value: v2192Backup, Version: 1},
+			store.SecretKey("backup-batch/example-batch"): {Value: legacyCompanion, Version: 1},
+		},
+	}
+	if err := store.SaveStore(profile, diskStore, masterKey); err != nil {
+		t.Fatalf("SaveStore failed: %v", err)
+	}
+
+	d, err := daemon.NewDaemon(profile, 5*time.Minute, Version)
+	if err != nil {
+		t.Fatalf("NewDaemon failed: %v", err)
+	}
+	d.IsTestInstance = true
+	go func() {
+		_ = d.Start()
+	}()
+	defer d.Stop()
+
+	sockPath, _ := config.GetSocketPath(profile)
+	for i := 0; i < 40; i++ {
+		if _, sErr := os.Stat(sockPath); sErr == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// Unlock real encrypted vault through IPCActionOpen
+	openResp, err := queryDaemon(profile, daemon.IPCRequest{
+		Action: daemon.IPCActionOpen,
+		Key:    masterKey,
+		TTL:    "5m",
+	})
+	if err != nil || openResp == nil || !openResp.Success {
+		t.Fatalf("IPCActionOpen failed: %v (resp=%+v)", err, openResp)
+	}
+	t.Setenv("SEC_SESSION_TOKEN", openResp.Token)
+
+	// Exercise the real load -> local rsync args -> remote rsync server rewrite path
+	manifest, err := loadStealthBackupManifest(profile, "example-batch", true)
+	if err != nil {
+		t.Fatalf("loadStealthBackupManifest failed: %v", err)
+	}
+	if len(manifest.Folders) != 1 {
+		t.Fatalf("expected 1 folder, got %d", len(manifest.Folders))
+	}
+	folder := manifest.Folders[0]
+	if folder.Timeout != 600 || folder.ServerAliveInterval != 30 || folder.ServerAliveCountMax != 4 {
+		t.Fatalf("expected backfilled Timeout=600, ServerAliveInterval=30, ServerAliveCountMax=4, got %d/%d/%d",
+			folder.Timeout, folder.ServerAliveInterval, folder.ServerAliveCountMax)
+	}
+
+	localArgs := buildLocalStealthRsyncArgs(manifest, "/usr/local/bin/sec-agent", true, folder)
+	if !strings.Contains(strings.Join(localArgs, " "), "--timeout=600") {
+		t.Errorf("expected --timeout=600 in local rsync args, got %v", localArgs)
+	}
+	remoteCmd := rewriteRemoteRsyncServerCommand([]string{"rsync", "--server", "-vlogDtprze.iLsfxCIvu", ".", "target"}, manifest, folder, time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC))
+	if !strings.Contains(remoteCmd, "--timeout=600") {
+		t.Errorf("expected --timeout=600 in rewritten remote rsync command, got %s", remoteCmd)
 	}
 }

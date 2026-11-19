@@ -720,8 +720,8 @@ sec stream --template "export APP_KEY='{{db/password}}' GLOBAL_CA='{{@global-sha
 ### 5.37. Keychain Biometric Binding & Downgrade Attack Prevention (`sec-agent keychain`) (v2.15.0)
 1. **The Downgrade Attack Vector**:
    On macOS, ad-hoc signed binaries (`codesign -s -`) identify authorized applications in the Keychain item's Access Control List (ACL) via their individual `CDHash`. When an operator upgrades `sec-agent` and clicks "Always Allow", macOS adds the new binary's hash to the ACL, but **never purges older versions**. If an attacker replaces the binary with an older, vulnerable version, macOS prompts for Touch ID without requesting the macOS login password.
-2. **Automatic Re-Sealing on Version Upgrade**:
-   `sec-agent` automatically detects version transitions during `sec open` or master key unlocks. It re-seals the Keychain item in memory (synchronous delete and add under `BiometryCurrentSet`), immediately purging all historical binary authorizations.
+2. **Automatic Re-Sealing & Daemon Restart on Version Upgrade**:
+   Upon the first `sec open` after an upgrade, `ensureDaemonRunning` automatically detects any older-version background daemon, evicts and restarts it on the new binary, and `checkAndAutoReseal` re-seals the Keychain item in memory (synchronous delete and add under `BiometryCurrentSet`) and updates `.last_version`, immediately purging all historical binary authorizations.
 3. **Explicit Operator Pruning & Status**:
    ```bash
    # Re-seal Keychain item to active binary, purging stale historical authorizations
