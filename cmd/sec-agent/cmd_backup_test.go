@@ -1329,3 +1329,105 @@ func TestBackupBatchShowBackfillsFromCompanionAndDisplaysUnset(t *testing.T) {
 		t.Errorf("expected backfilled 'SSH Alive:   interval=30s count_max=4' in batch show output, got:\n%s", outBackfilled)
 	}
 }
+
+func TestResolveStealthSSHTargetUserAtHostKeepaliveLookup(t *testing.T) {
+	tmpCfgDir, err := os.MkdirTemp("/tmp", "sec_ssh_uh_*")
+	if err != nil {
+		t.Fatalf("MkdirTemp failed: %v", err)
+	}
+	defer os.RemoveAll(tmpCfgDir)
+
+	profile := "sshuh"
+	t.Setenv("SEC_CONFIG_DIR", tmpCfgDir)
+	t.Setenv("SEC_TEST_MODE", "1")
+
+	d, err := daemon.NewDaemon(profile, 5*time.Minute, Version)
+	if err != nil {
+		t.Fatalf("NewDaemon failed: %v", err)
+	}
+	d.IsTestInstance = true
+	go func() {
+		_ = d.Start()
+	}()
+	defer d.Stop()
+
+	sockPath, _ := config.GetSocketPath(profile)
+	for i := 0; i < 40; i++ {
+		if _, sErr := os.Stat(sockPath); sErr == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	openResp, err := queryDaemon(profile, daemon.IPCRequest{
+		Action: daemon.IPCActionOpen,
+		Key:    []byte("01234567890123456789012345678901"),
+		TTL:    "5m",
+	})
+	if err != nil || openResp == nil || !openResp.Success {
+		t.Fatalf("failed to open daemon session: %v", err)
+	}
+	t.Setenv("SEC_SESSION_TOKEN", openResp.Token)
+
+	// 1. Target-scoped user@host keys take precedence over profile-wide ssh/ keys
+	_, _ = queryDaemon(profile, daemon.IPCRequest{Action: daemon.IPCActionSet, Path: "ssh/server_alive_interval", Value: "60", NoTrace: true})
+	_, _ = queryDaemon(profile, daemon.IPCRequest{Action: daemon.IPCActionSet, Path: "ssh/server_alive_count_max", Value: "5", NoTrace: true})
+	_, _ = queryDaemon(profile, daemon.IPCRequest{Action: daemon.IPCActionSet, Path: "ssh/backup@10.0.0.50/server_alive_interval", Value: "30", NoTrace: true})
+	_, _ = queryDaemon(profile, daemon.IPCRequest{Action: daemon.IPCActionSet, Path: "ssh/backup@10.0.0.50/server_alive_count_max", Value: "4", NoTrace: true})
+
+	cfg, err := resolveStealthSSHTarget(profile, store.BackupManifest{SSHTarget: "backup@10.0.0.50"}, true)
+	if err != nil {
+		t.Fatalf("resolveStealthSSHTarget failed: %v", err)
+	}
+	if cfg.ServerAliveInterval != 30 || cfg.ServerAliveCountMax != 4 {
+		t.Errorf("expected target-scoped user@host keepalive 30/4, got %d/%d", cfg.ServerAliveInterval, cfg.ServerAliveCountMax)
+	}
+
+	// 2. Host-only ssh/<host>/ keys work for user@host targets when user@host key is absent
+	_, _ = queryDaemon(profile, daemon.IPCRequest{Action: daemon.IPCActionSet, Path: "ssh/10.0.0.99/server_alive_interval", Value: "25", NoTrace: true})
+	_, _ = queryDaemon(profile, daemon.IPCRequest{Action: daemon.IPCActionSet, Path: "ssh/10.0.0.99/server_alive_count_max", Value: "3", NoTrace: true})
+	cfgHost, err := resolveStealthSSHTarget(profile, store.BackupManifest{SSHTarget: "backup@10.0.0.99"}, true)
+	if err != nil {
+		t.Fatalf("resolveStealthSSHTarget (host-only) failed: %v", err)
+	}
+	if cfgHost.ServerAliveInterval != 25 || cfgHost.ServerAliveCountMax != 3 {
+		t.Errorf("expected host-scoped keepalive 25/3, got %d/%d", cfgHost.ServerAliveInterval, cfgHost.ServerAliveCountMax)
+	}
+
+	// 3. Profile-wide ssh/ fallback still works when target-scoped keys are absent
+	cfgFallback, err := resolveStealthSSHTarget(profile, store.BackupManifest{SSHTarget: "backup@10.0.0.77"}, true)
+	if err != nil {
+		t.Fatalf("resolveStealthSSHTarget (fallback) failed: %v", err)
+	}
+	if cfgFallback.ServerAliveInterval != 60 || cfgFallback.ServerAliveCountMax != 5 {
+		t.Errorf("expected profile-wide fallback keepalive 60/5, got %d/%d", cfgFallback.ServerAliveInterval, cfgFallback.ServerAliveCountMax)
+	}
+}
+
+func TestRsyncStderrFilterDemotesNonRegularFileLines(t *testing.T) {
+	var out bytes.Buffer
+	filter := newRsyncStderrFilterWriter(&out, false)
+	_, _ = filter.Write([]byte("skipping non-regular file \"foo/link\"\nrsync: [sender] real error line\nskipping non-regular file \"bar/sock\"\n"))
+	skipped := filter.Flush()
+
+	if skipped != 2 {
+		t.Errorf("expected 2 skipped non-regular file lines, got %d", skipped)
+	}
+	if strings.Contains(out.String(), "skipping non-regular file") {
+		t.Errorf("expected non-regular file lines to be suppressed in non-verbose mode, got:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "real error line") {
+		t.Errorf("expected real error line to pass through, got:\n%s", out.String())
+	}
+
+	// In verbose mode, all lines pass through untouched
+	var verboseOut bytes.Buffer
+	vFilter := newRsyncStderrFilterWriter(&verboseOut, true)
+	_, _ = vFilter.Write([]byte("skipping non-regular file \"foo/link\"\n"))
+	if vSkipped := vFilter.Flush(); vSkipped != 0 {
+		t.Errorf("expected 0 suppressed lines in verbose mode, got %d", vSkipped)
+	}
+	if !strings.Contains(verboseOut.String(), "skipping non-regular file") {
+		t.Errorf("expected verbose mode to pass through non-regular file lines, got:\n%s", verboseOut.String())
+	}
+}

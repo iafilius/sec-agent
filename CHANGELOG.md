@@ -5,6 +5,14 @@ All notable changes to `sec-agent` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v2.19.6] - 2026-11-19
+
+### Fixed & Enhanced
+- **Target-Scoped SSH Vault Lookup for `user@host` Targets (`sec backup`)**:
+  - Updated `resolveStealthSSHTarget` to check `ssh/<target>/...` (for both named targets and `user@host` targets) and `ssh/<host>/...` before falling back to profile-wide `ssh/...`, so `sec set ssh/<user@host>/server_alive_interval 30` and `sec set ssh/server_alive_interval 30` both work as documented.
+- **Cleaner `rsync` Output for Symlinks & Sockets (`skipping non-regular file`)**:
+  - Demoted informational `skipping non-regular file` lines on `rsync` stderr to verbose-only output (`--verbose`), printing a single concise summary (`[i] Note: rsync skipped N non-regular file(s)...`) in normal runs so real errors stand out cleanly.
+
 ## [v2.19.5] - 2026-11-19
 
 ### Enhanced

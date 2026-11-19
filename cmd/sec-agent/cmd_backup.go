@@ -1120,10 +1120,15 @@ func resolveStealthSSHTarget(profile string, manifest store.BackupManifest, noTr
 		}
 	}
 
-	// 2. Check active profile vault for ssh/<targetName>/... or ssh/...
+	// 2. Check active profile vault for ssh/<targetName>/..., ssh/<host>/... (for user@host targets), or ssh/...
 	var prefixes []string
-	if targetName != "" && !strings.Contains(targetName, "@") {
+	if targetName != "" {
 		prefixes = append(prefixes, "ssh/"+targetName+"/")
+		if strings.Contains(targetName, "@") {
+			if hostPart := strings.TrimSpace(strings.SplitN(targetName, "@", 2)[1]); hostPart != "" {
+				prefixes = append(prefixes, "ssh/"+hostPart+"/")
+			}
+		}
 	}
 	prefixes = append(prefixes, "ssh/")
 
@@ -1572,6 +1577,59 @@ func startSSHServerAliveMonitor(client sshKeepaliveSender, interval time.Duratio
 	return func() {
 		stopOnce.Do(func() { close(stopCh) })
 	}
+}
+
+// rsyncStderrFilterWriter filters noisy informational "skipping non-regular file" lines
+// emitted by rsync for symlinks/sockets when not in Verbose mode, counting them so a single
+// concise summary can be printed without obscuring real errors.
+type rsyncStderrFilterWriter struct {
+	mu                sync.Mutex
+	dst               io.Writer
+	verbose           bool
+	buf               []byte
+	skippedNonRegular int
+}
+
+func newRsyncStderrFilterWriter(dst io.Writer, verbose bool) *rsyncStderrFilterWriter {
+	return &rsyncStderrFilterWriter{dst: dst, verbose: verbose}
+}
+
+func (w *rsyncStderrFilterWriter) Write(p []byte) (int, error) {
+	if w.verbose {
+		return w.dst.Write(p)
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.buf = append(w.buf, p...)
+	for {
+		idx := strings.IndexByte(string(w.buf), '\n')
+		if idx == -1 {
+			break
+		}
+		line := string(w.buf[:idx+1])
+		w.buf = w.buf[idx+1:]
+		if strings.HasPrefix(strings.TrimSpace(line), "skipping non-regular file") {
+			w.skippedNonRegular++
+			continue
+		}
+		_, _ = io.WriteString(w.dst, line)
+	}
+	return len(p), nil
+}
+
+func (w *rsyncStderrFilterWriter) Flush() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.buf) > 0 {
+		line := string(w.buf)
+		w.buf = nil
+		if strings.HasPrefix(strings.TrimSpace(line), "skipping non-regular file") {
+			w.skippedNonRegular++
+		} else {
+			_, _ = io.WriteString(w.dst, line)
+		}
+	}
+	return w.skippedNonRegular
 }
 
 // nonRetryableBackupError wraps a folder backup error that should fail immediately
@@ -2205,13 +2263,18 @@ func executeStealthBackupRun(profile string, args []string) error {
 		cmd.Dir = localDir
 		cmd.ExtraFiles = []*os.File{excludePipeRead}
 		cmd.Env = append(os.Environ(), fmt.Sprintf("SEC_STDIO_SOCK=%s", sockPath))
+		stderrFilter := newRsyncStderrFilterWriter(os.Stderr, Verbose)
 		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
+		cmd.Stderr = stderrFilter
 
 		runErr := cmd.Run()
 		_ = excludePipeRead.Close()
 		bridgeErr := waitBridgeErr()
 		cleanupBridge()
+
+		if skipped := stderrFilter.Flush(); skipped > 0 {
+			fmt.Fprintf(os.Stderr, "[i] Note: rsync skipped %d non-regular file(s) (symlinks/sockets) in %q; pass --verbose to list them.\n", skipped, folder.Source)
+		}
 
 		return classifyRsyncRunError(runErr, bridgeErr, folder.Source)
 	}

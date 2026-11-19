@@ -42,7 +42,7 @@ var (
 	daemonIPCDeadline = 10 * time.Second
 )
 var (
-	Version   = "v2.19.5"
+	Version   = "v2.19.6"
 	BuildDate = "unknown"
 )
 
