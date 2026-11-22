@@ -88,7 +88,7 @@ func TestBuildLocalStealthRsyncArgsNoLeakage(t *testing.T) {
 		},
 	}
 
-	args := buildLocalStealthRsyncArgs(manifest, "/usr/local/bin/sec-agent", false)
+	args := buildLocalStealthRsyncArgs(manifest, "/usr/local/bin/sec-agent", false, false)
 	joined := strings.Join(args, " ")
 
 	forbiddenTokens := []string{
@@ -97,9 +97,10 @@ func TestBuildLocalStealthRsyncArgsNoLeakage(t *testing.T) {
 		"backupuser",
 		"MediaArchive",
 		"Photos-History",
-		"-e",
+		" -e ",
 		"ssh-stdio",
 		"--progress",
+		"-rtvP",
 		"--sparse",
 		"--partial-dir",
 	}
@@ -519,6 +520,7 @@ func TestStealthBackupRunRealRsyncOverGoSSH(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(localFolder, "._document.txt"), []byte("junk-appledouble"), 0600); err != nil {
 		t.Fatalf("WriteFile ._document.txt failed: %v", err)
 	}
+	_ = os.Symlink("/nonexistent/secret_symlink_target", filepath.Join(localFolder, "secret_symlink"))
 
 	// Initialize backup job and add folder via CLI binary
 	runSecCLI := func(cliArgs ...string) string {
@@ -551,7 +553,15 @@ func TestStealthBackupRunRealRsyncOverGoSSH(t *testing.T) {
 	_ = os.Remove(auditPath)
 
 	// Pass 1: Run initial stealth backup (with --tofu to pin host key into vault)
-	runSecCLI("backup", "run", "work", "--tofu")
+	pass1Out := runSecCLI("backup", "run", "work", "--tofu")
+	for _, forbidden := range []string{"document.txt", "secret_symlink", "Photos - 2026", localBase, remoteBase, "backupuser"} {
+		if strings.Contains(pass1Out, forbidden) {
+			t.Errorf("OUTPUT PRIVACY LEAK in normal mode Pass 1: found %q in output:\n%s", forbidden, pass1Out)
+		}
+	}
+	if !strings.Contains(pass1Out, "alias=photos status=ok") || !strings.Contains(pass1Out, "skipped_non_regular=1") || !strings.Contains(pass1Out, "exit=0") {
+		t.Errorf("expected concise per-folder summary in normal mode Pass 1, got:\n%s", pass1Out)
+	}
 
 	// Verify destination file was synced
 	remoteDestFile := filepath.Join(remoteBase, "Photos - 2026", "document.txt")
@@ -583,7 +593,12 @@ func TestStealthBackupRunRealRsyncOverGoSSH(t *testing.T) {
 	_ = os.Chtimes(filepath.Join(localFolder, "document.txt"), futureTime, futureTime)
 
 	_ = os.Remove(auditPath)
-	runSecCLI("backup", "run", "work")
+	pass2Out := runSecCLI("backup", "run", "work")
+	for _, forbidden := range []string{"document.txt", "secret_symlink", "Photos - 2026", localBase, remoteBase, "127.0.0.1", "backupuser"} {
+		if strings.Contains(pass2Out, forbidden) {
+			t.Errorf("OUTPUT PRIVACY LEAK in normal mode Pass 2: found %q in output:\n%s", forbidden, pass2Out)
+		}
+	}
 
 	// Verify remote destination now has v2
 	gotV2, err := os.ReadFile(remoteDestFile)
@@ -624,6 +639,37 @@ func TestStealthBackupRunRealRsyncOverGoSSH(t *testing.T) {
 	// Verify Pass 2 left zero GET entries in local audit.log
 	if data, err := os.ReadFile(auditPath); err == nil && len(data) > 0 {
 		t.Errorf("expected zero audit.log entries during stealth Pass 2 run, found:\n%s", string(data))
+	}
+
+	// Pass 3: Normal mode with explicit --log-file -> 0700 dir, 0600 file, runtime warning, zero filenames in log
+	localLogPath := filepath.Join(tmpBinDir, "private_logs", "backup_run.log")
+	pass3Out := runSecCLI("backup", "run", "work", "--log-file", localLogPath)
+	if !strings.Contains(pass3Out, "WARNING: --log-file enabled") {
+		t.Errorf("expected --log-file runtime warning, got:\n%s", pass3Out)
+	}
+	dInfo, dErr := os.Stat(filepath.Dir(localLogPath))
+	fInfo, fErr := os.Stat(localLogPath)
+	if dErr != nil || fErr != nil {
+		t.Fatalf("expected --log-file and parent dir to exist: dirErr=%v fileErr=%v", dErr, fErr)
+	}
+	if dInfo.Mode().Perm() != 0700 || fInfo.Mode().Perm() != 0600 {
+		t.Errorf("expected log dir=0700 file=0600, got dir=%04o file=%04o", dInfo.Mode().Perm(), fInfo.Mode().Perm())
+	}
+	logBytes, _ := os.ReadFile(localLogPath)
+	if strings.Contains(string(logBytes), "document.txt") || strings.Contains(string(logBytes), localBase) {
+		t.Errorf("normal-mode --log-file leaked sensitive filename/path:\n%s", string(logBytes))
+	}
+
+	// Pass 4: --verbose mode -> upfront warning + per-file output visible
+	if err := os.WriteFile(filepath.Join(localFolder, "verbose_visible_file.txt"), []byte("verbose-payload\n"), 0600); err != nil {
+		t.Fatalf("WriteFile verbose_visible_file.txt failed: %v", err)
+	}
+	pass4Out := runSecCLI("backup", "run", "work", "--verbose")
+	if !strings.Contains(pass4Out, "WARNING: --verbose enabled") {
+		t.Errorf("expected upfront --verbose privacy warning, got:\n%s", pass4Out)
+	}
+	if !strings.Contains(pass4Out, "verbose_visible_file.txt") {
+		t.Errorf("expected per-file name in --verbose output, got:\n%s", pass4Out)
 	}
 
 	// Verify live kernel process table (ps) captured during active rsync execution had zero sensitive path/host leaks
@@ -954,7 +1000,7 @@ func TestTimeoutInLocalAndRemoteRsyncArgs(t *testing.T) {
 		Dest:    "home-archive",
 		Timeout: 180,
 	}
-	localArgs := buildLocalStealthRsyncArgs(manifest, "/usr/local/bin/sec-agent", false, folder)
+	localArgs := buildLocalStealthRsyncArgs(manifest, "/usr/local/bin/sec-agent", false, false, folder)
 	if !strings.Contains(strings.Join(localArgs, " "), "--timeout=180") {
 		t.Errorf("expected --timeout=180 in local rsync args, got: %v", localArgs)
 	}
@@ -1556,12 +1602,211 @@ func TestLegacyV2192ManifestBackfillEndToEnd(t *testing.T) {
 			folder.Timeout, folder.ServerAliveInterval, folder.ServerAliveCountMax)
 	}
 
-	localArgs := buildLocalStealthRsyncArgs(manifest, "/usr/local/bin/sec-agent", true, folder)
+	localArgs := buildLocalStealthRsyncArgs(manifest, "/usr/local/bin/sec-agent", true, false, folder)
 	if !strings.Contains(strings.Join(localArgs, " "), "--timeout=600") {
 		t.Errorf("expected --timeout=600 in local rsync args, got %v", localArgs)
 	}
 	remoteCmd := rewriteRemoteRsyncServerCommand([]string{"rsync", "--server", "-vlogDtprze.iLsfxCIvu", ".", "target"}, manifest, folder, time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC))
 	if !strings.Contains(remoteCmd, "--timeout=600") {
 		t.Errorf("expected --timeout=600 in rewritten remote rsync command, got %s", remoteCmd)
+	}
+}
+
+func TestBackupOutputPrivacyRsyncStdoutAndStderrFilters(t *testing.T) {
+	// 1. Normal-mode stdout filter: never forwards filenames, parses GNU & openrsync --stats counts
+	var normalOut bytes.Buffer
+	sw := newRsyncStdoutStatsWriter(&normalOut, false)
+	_, _ = sw.Write([]byte("sending incremental file list\nconfidential_merger_2026.pdf\nNumber of files: 1,234 (reg: 1,200, dir: 34)\nNumber of regular files transferred: 42\n"))
+	transferred, total, skippedStdout := sw.Flush()
+	if normalOut.Len() != 0 {
+		t.Errorf("expected zero stdout output in normal mode, got: %q", normalOut.String())
+	}
+	if transferred != 42 || total != 1234 || skippedStdout != 0 {
+		t.Errorf("expected transferred=42 total=1234 skipped=0, got transferred=%d total=%d skipped=%d", transferred, total, skippedStdout)
+	}
+
+	// openrsync wording variant + stdout skipping non-regular file counting
+	var openOut bytes.Buffer
+	swOpen := newRsyncStdoutStatsWriter(&openOut, false)
+	_, _ = swOpen.Write([]byte("skipping non-regular file \"secret_link\"\nNumber of files: 15\nNumber of files transferred: 7\n"))
+	trOpen, totOpen, skipOpen := swOpen.Flush()
+	if openOut.Len() != 0 || trOpen != 7 || totOpen != 15 || skipOpen != 1 {
+		t.Errorf("openrsync stats parse failed: out=%q tr=%d tot=%d skip=%d", openOut.String(), trOpen, totOpen, skipOpen)
+	}
+
+	// Verbose-mode stdout filter: forwards raw output
+	var verboseOut bytes.Buffer
+	swVerb := newRsyncStdoutStatsWriter(&verboseOut, true)
+	_, _ = swVerb.Write([]byte("confidential_merger_2026.pdf\n"))
+	_, _, _ = swVerb.Flush()
+	if !strings.Contains(verboseOut.String(), "confidential_merger_2026.pdf") {
+		t.Errorf("expected verbose stdout to forward filename, got: %q", verboseOut.String())
+	}
+
+	// 2. Normal-mode stderr filter: counts skipped non-regular files and redacts paths/hosts while preserving error classes
+	var normalErr bytes.Buffer
+	ew := newRsyncStderrFilterWriter(&normalErr, false)
+	_, _ = ew.Write([]byte(
+		"skipping non-regular file \"subdir/socket.sock\"\n" +
+			"skipping non-regular file \"subdir/link.ln\"\n" +
+			"rsync: [sender] opendir \"/Users/alice/Library/Mail\" failed: Operation not permitted (1)\n" +
+			"rsync: [receiver] write failed on \"/Volumes/SecretDrive/Backups/foo.zip\": No space left on device (28)\n" +
+			"ssh: connect to host alice@10.0.0.50 port 22: Connection refused\n" +
+			"rsync: opendir ~/Private/Keys: Permission denied (13)\n",
+	))
+	skipped := ew.Flush()
+	if skipped != 2 {
+		t.Errorf("expected skipped=2, got %d", skipped)
+	}
+	gotErr := normalErr.String()
+	for _, forbidden := range []string{"socket.sock", "link.ln", "/Users/alice", "Library/Mail", "SecretDrive", "foo.zip", "alice@10.0.0.50", "10.0.0.50", "~/Private/Keys"} {
+		if strings.Contains(gotErr, forbidden) {
+			t.Errorf("normal-mode stderr leaked %q in:\n%s", forbidden, gotErr)
+		}
+	}
+	for _, want := range []string{"<path>", "<host>", "Operation not permitted (1)", "No space left on device (28)", "Permission denied (13)", "Connection refused"} {
+		if !strings.Contains(gotErr, want) {
+			t.Errorf("expected normal-mode stderr to preserve %q in:\n%s", want, gotErr)
+		}
+	}
+}
+
+func TestBuildLocalStealthRsyncArgsNormalVsVerbose(t *testing.T) {
+	manifest := store.BackupManifest{
+		Name:         "work",
+		SSHTarget:    "backupuser@10.0.0.50",
+		LocalBase:    "/Users/backupuser",
+		RemoteBase:   "/Volumes/MediaArchive/Backups",
+		ModifyWindow: 2,
+		PartialDir:   ".rsync-partial",
+		Excludes:     []string{".DS_Store"},
+	}
+	folder := store.BackupFolderSpec{Source: "Docs", Sparse: true}
+
+	normalArgs := buildLocalStealthRsyncArgs(manifest, "/usr/local/bin/sec-agent", false, false, folder)
+	normalJoined := strings.Join(normalArgs, " ")
+	if normalArgs[0] != "-rtS" {
+		t.Errorf("expected normal shortFlags -rtS, got %q (all=%v)", normalArgs[0], normalArgs)
+	}
+	if !strings.Contains(normalJoined, "--partial") || !strings.Contains(normalJoined, "--stats") {
+		t.Errorf("expected --partial and --stats in normal mode, got %v", normalArgs)
+	}
+	if strings.Contains(normalArgs[0], "v") || strings.Contains(normalArgs[0], "P") || strings.Contains(normalJoined, "--progress") {
+		t.Errorf("normal mode must not include -v, -P, or --progress: %v", normalArgs)
+	}
+
+	verboseArgs := buildLocalStealthRsyncArgs(manifest, "/usr/local/bin/sec-agent", true, true, folder)
+	if verboseArgs[0] != "-rtvPSn" {
+		t.Errorf("expected verbose dry-run sparse shortFlags -rtvPSn, got %q (all=%v)", verboseArgs[0], verboseArgs)
+	}
+}
+
+func TestStartStealthStdioBridgeRedactsRemoteStderr(t *testing.T) {
+	manifest := store.BackupManifest{
+		Name:           "work",
+		SSHTarget:      "backupuser@10.0.0.50",
+		LocalBase:      "/Users/backupuser",
+		RemoteBase:     "/Volumes/SecretVolume/Backups",
+		RemoteRsyncBin: "/opt/homebrew/bin/rsync",
+	}
+	folder := store.BackupFolderSpec{Source: "Confidential"}
+	fixedNow := time.Date(2026, 11, 21, 19, 0, 0, 0, time.UTC)
+
+	var filteredErr bytes.Buffer
+	stderrFilter := newRsyncStderrFilterWriter(&filteredErr, false)
+
+	mockRunner := func(remoteCmd string, stdin io.Reader, stdout, stderr io.Writer) error {
+		_, _ = io.WriteString(stderr, "rsync: mkdir \"/Volumes/SecretVolume/Backups/Confidential\" failed: Permission denied (13)\n")
+		_, _ = io.Copy(io.Discard, stdin)
+		return nil
+	}
+
+	sockPath, waitErr, cleanup, err := startStealthStdioBridge(manifest, folder, fixedNow, mockRunner, stderrFilter)
+	if err != nil {
+		t.Fatalf("startStealthStdioBridge failed: %v", err)
+	}
+	defer cleanup()
+
+	var clientOut bytes.Buffer
+	if err := runSSHStdioClient(sockPath, []string{"s", "rsync", "--server", "-vlogDtpr", ".", "t"}, bytes.NewBuffer(nil), &clientOut); err != nil {
+		t.Fatalf("runSSHStdioClient failed: %v", err)
+	}
+	_ = waitErr()
+	stderrFilter.Flush()
+
+	got := filteredErr.String()
+	if strings.Contains(got, "SecretVolume") || strings.Contains(got, "Confidential") {
+		t.Errorf("remote SSH stderr leaked path in normal mode: %q", got)
+	}
+	if !strings.Contains(got, "<path>") || !strings.Contains(got, "Permission denied (13)") {
+		t.Errorf("expected redacted <path> and error class in remote SSH stderr, got: %q", got)
+	}
+}
+
+func TestOpenHardenedBackupLogFilePermissions(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := filepath.Join(tmpDir, "nested-logs", "backup.log")
+
+	f, expanded, err := openHardenedBackupLogFile(logPath)
+	if err != nil {
+		t.Fatalf("openHardenedBackupLogFile failed: %v", err)
+	}
+	_, _ = f.WriteString("summary line\n")
+	_ = f.Close()
+
+	if expanded != logPath {
+		t.Errorf("expected expanded path %q, got %q", logPath, expanded)
+	}
+	dirInfo, err := os.Stat(filepath.Dir(logPath))
+	if err != nil {
+		t.Fatalf("stat parent dir failed: %v", err)
+	}
+	if dirInfo.Mode().Perm() != 0700 {
+		t.Errorf("expected log dir perm 0700, got %04o", dirInfo.Mode().Perm())
+	}
+	fileInfo, err := os.Stat(logPath)
+	if err != nil {
+		t.Fatalf("stat log file failed: %v", err)
+	}
+	if fileInfo.Mode().Perm() != 0600 {
+		t.Errorf("expected log file perm 0600, got %04o", fileInfo.Mode().Perm())
+	}
+}
+
+func TestSafeFolderAliasAndSummaryNoLeak(t *testing.T) {
+	manifest := store.BackupManifest{
+		Name:        "home-nas",
+		MaxAttempts: 1,
+	}
+	folders := []store.BackupFolderSpec{
+		{Source: "/Users/alice/Documents/SecretProject"},
+		{Name: "photos-alias", Source: "/Users/alice/Pictures/Family"},
+	}
+
+	var outBuf, errBuf bytes.Buffer
+	failed, err := runStealthBackupFoldersWithOutput(
+		manifest,
+		folders,
+		nil,
+		&outBuf,
+		&errBuf,
+		func(f store.BackupFolderSpec, _ int) (backupFolderRunStats, error) {
+			return backupFolderRunStats{Transferred: 5, SkippedNonRegular: 2, ExitCode: 0}, nil
+		},
+		nil,
+	)
+	if err != nil || len(failed) != 0 {
+		t.Fatalf("expected success, got failed=%v err=%v", failed, err)
+	}
+	combined := outBuf.String() + errBuf.String()
+	for _, forbidden := range []string{"/Users/alice", "Documents/SecretProject", "Pictures/Family"} {
+		if strings.Contains(combined, forbidden) {
+			t.Errorf("summary leaked raw path %q in:\n%s", forbidden, combined)
+		}
+	}
+	for _, want := range []string{"alias=photos-alias status=ok transferred=5 skipped_non_regular=2 exit=0"} {
+		if !strings.Contains(combined, want) {
+			t.Errorf("expected summary %q in:\n%s", want, combined)
+		}
 	}
 }

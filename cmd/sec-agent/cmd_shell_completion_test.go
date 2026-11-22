@@ -221,6 +221,9 @@ func TestShellCompletionOutput(t *testing.T) {
 			if !strings.Contains(out, "-l tofu") {
 				t.Errorf("expected shell completion for fish to contain '-l tofu', got:\n%s", out)
 			}
+			if !strings.Contains(out, "-l verbose") || !strings.Contains(out, "-l log-file") {
+				t.Errorf("expected shell completion for fish to contain '-l verbose' and '-l log-file', got:\n%s", out)
+			}
 		} else {
 			if !strings.Contains(out, "--install-tools") || !strings.Contains(out, "--verify-live") {
 				t.Errorf("expected shell completion for %s to contain '--install-tools' and '--verify-live', got:\n%s", shell, out)
@@ -266,6 +269,9 @@ func TestShellCompletionOutput(t *testing.T) {
 			}
 			if !strings.Contains(out, "--no-single-line") || !strings.Contains(out, "--max-attempts") || !strings.Contains(out, "--sparse") {
 				t.Errorf("expected shell completion for %s to contain '--no-single-line', '--max-attempts', and '--sparse', got:\n%s", shell, out)
+			}
+			if !strings.Contains(out, "--verbose") || !strings.Contains(out, "--log-file") {
+				t.Errorf("expected shell completion for %s to contain '--verbose' and '--log-file', got:\n%s", shell, out)
 			}
 		}
 	}

@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -86,7 +87,7 @@ func printStealthBackupUsage() {
 	fmt.Println("  sec backup remove-folder <name> <folder>")
 	fmt.Println("  sec backup show <name>")
 	fmt.Println("  sec backup jobs")
-	fmt.Println("  sec backup run <name> [<folder-filter>] [--max-attempts <n>] [--dry-run] [--no-trace] [--trace] [--tofu] [--insecure]")
+	fmt.Println("  sec backup run <name> [<folder-filter>] [--max-attempts <n>] [--dry-run] [--verbose] [--log-file <path>] [--no-trace] [--trace] [--tofu] [--insecure]")
 	fmt.Println("  sec backup batch <define|list|show|run> [<name>] [--file <manifest.json>]")
 	fmt.Println("  sec backup <export|import|list> [<file.kdbx>]")
 }
@@ -578,7 +579,7 @@ func handleStealthBackupBatch(profile string, args []string) {
 		fmt.Println("  sec backup batch define <name> --file <manifest.json> [--stdin]")
 		fmt.Println("  sec backup batch list")
 		fmt.Println("  sec backup batch show <name>")
-		fmt.Println("  sec backup batch run <name> [<folder-filter>] [--max-attempts <n>] [--dry-run] [--tofu]")
+		fmt.Println("  sec backup batch run <name> [<folder-filter>] [--max-attempts <n>] [--dry-run] [--verbose] [--log-file <path>] [--tofu]")
 		return
 	}
 	switch args[0] {
@@ -1207,7 +1208,10 @@ func resolveStealthSSHTarget(profile string, manifest store.BackupManifest, noTr
 	}
 
 	if resolvedHost == "" {
-		return nil, fmt.Errorf("unknown SSH target %q and not a valid user@host destination", targetName)
+		if Verbose {
+			return nil, fmt.Errorf("unknown SSH target %q and not a valid user@host destination", targetName)
+		}
+		return nil, fmt.Errorf("unknown SSH target and not a valid destination")
 	}
 
 	if manifest.SSHPort > 0 {
@@ -1283,7 +1287,10 @@ func dialStealthSSHClient(profile string, cfg *resolvedStealthSSHConfig, opts ho
 		authMethods = append(authMethods, ssh.Password(cfg.Password))
 	}
 	if len(authMethods) == 0 {
-		return nil, fmt.Errorf("no vault SSH credentials (private_key or password) found for target %q", cfg.TargetName)
+		if Verbose {
+			return nil, fmt.Errorf("no vault SSH credentials (private_key or password) found for target %q", cfg.TargetName)
+		}
+		return nil, fmt.Errorf("no vault SSH credentials (private_key or password) found for configured target")
 	}
 
 	pinTarget := cfg.TargetName
@@ -1301,7 +1308,10 @@ func dialStealthSSHClient(profile string, cfg *resolvedStealthSSHConfig, opts ho
 	addr := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
 	client, err := ssh.Dial("tcp", addr, sshConfig)
 	if err != nil {
-		return nil, fmt.Errorf("failed to dial SSH server at %s: %w", addr, err)
+		if Verbose {
+			return nil, fmt.Errorf("failed to dial SSH server at %s: %w", addr, err)
+		}
+		return nil, fmt.Errorf("failed to dial SSH server: %s", redactBackupOutputLine(err.Error()))
 	}
 	return client, nil
 }
@@ -1404,7 +1414,9 @@ func shellQuoteIfNeeded(s string) string {
 // into `cmd.Env`, passing excludes via `/dev/fd/3`, and using compact flags + opaque `. s:t`,
 // zero folder names, volume paths, usernames, IP addresses, or verbose transport options
 // appear in the local host's `ps aux` process table.
-func buildLocalStealthRsyncArgs(manifest store.BackupManifest, selfExe string, dryRun bool, folders ...store.BackupFolderSpec) []string {
+// In normal mode (`!verbose`), `-v` and `--progress` are omitted and `--stats` is used so
+// filenames are never emitted over stdout; per-file output (`-rtvP`) is gated behind `--verbose`.
+func buildLocalStealthRsyncArgs(manifest store.BackupManifest, selfExe string, dryRun bool, verbose bool, folders ...store.BackupFolderSpec) []string {
 	_ = selfExe
 	manifest.ApplyDefaults()
 	var activeFolder store.BackupFolderSpec
@@ -1414,7 +1426,10 @@ func buildLocalStealthRsyncArgs(manifest store.BackupManifest, selfExe string, d
 		activeFolder = manifest.Folders[0]
 	}
 
-	shortFlags := "-rtvP"
+	shortFlags := "-rt"
+	if verbose {
+		shortFlags = "-rtvP"
+	}
 	if activeFolder.Sparse {
 		shortFlags += "S"
 	}
@@ -1422,6 +1437,9 @@ func buildLocalStealthRsyncArgs(manifest store.BackupManifest, selfExe string, d
 		shortFlags += "n"
 	}
 	args := []string{shortFlags}
+	if !verbose {
+		args = append(args, "--partial", "--stats")
+	}
 	if effTimeout := activeFolder.EffectiveTimeout(manifest.Timeout); effTimeout > 0 {
 		args = append(args, fmt.Sprintf("--timeout=%d", effTimeout))
 	}
@@ -1601,27 +1619,120 @@ func startSSHServerAliveMonitor(client sshKeepaliveSender, interval time.Duratio
 	}
 }
 
-// rsyncStderrFilterWriter filters noisy informational "skipping non-regular file" lines
-// emitted by rsync for symlinks/sockets when not in Verbose mode, counting them so a single
-// concise summary can be printed without obscuring real errors.
-type rsyncStderrFilterWriter struct {
+var (
+	reQuotedSegment = regexp.MustCompile(`"[^"\r\n]+"`)
+	reUserAtHost    = regexp.MustCompile(`\b[A-Za-z0-9._-]+@[A-Za-z0-9.-]+(?::\d+)?\b`)
+	reIPv4Addr      = regexp.MustCompile(`\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b`)
+	reAbsOrHomePath = regexp.MustCompile(`(^|[\s(\['=])(?:~/|/)[^\s:,"')\]]+`)
+	reStatsNumber   = regexp.MustCompile(`:\s*([0-9,]+)`)
+)
+
+// safeFolderAlias returns a privacy-preserving display label for a backup folder:
+// its explicit alias Name if configured, otherwise its derived slug (never raw Source or localDir).
+func safeFolderAlias(folder store.BackupFolderSpec) string {
+	if n := strings.TrimSpace(folder.Name); n != "" {
+		return n
+	}
+	return folder.DeriveSlug()
+}
+
+// redactBackupOutputLine scrubs filesystem paths, quoted filenames, user@host tokens, and
+// IPv4 addresses from rsync/SSH error lines while preserving error classes and exit codes.
+func redactBackupOutputLine(line string) string {
+	suffix := ""
+	body := line
+	if strings.HasSuffix(body, "\n") {
+		suffix = "\n"
+		body = strings.TrimSuffix(body, "\n")
+	}
+	if strings.TrimSpace(body) == "" {
+		return line
+	}
+	body = reQuotedSegment.ReplaceAllString(body, `"<path>"`)
+	body = reUserAtHost.ReplaceAllString(body, "<host>")
+	body = reIPv4Addr.ReplaceAllString(body, "<host>")
+	body = reAbsOrHomePath.ReplaceAllString(body, "${1}<path>")
+	return body + suffix
+}
+
+// openHardenedBackupLogFile creates parent directories with 0700 permissions and opens/creates
+// the local backup log file with strict 0600 permissions.
+func openHardenedBackupLogFile(rawPath string) (*os.File, string, error) {
+	expanded := expandLocalBasePath(rawPath)
+	if strings.TrimSpace(expanded) == "" {
+		return nil, "", fmt.Errorf("log file path cannot be empty")
+	}
+	dir := filepath.Dir(expanded)
+	// #nosec G301 G703
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return nil, "", fmt.Errorf("failed to create log directory: %w", err)
+	}
+	// #nosec G302 G703
+	if err := os.Chmod(dir, 0700); err != nil {
+		return nil, "", fmt.Errorf("failed to harden log directory permissions to 0700: %w", err)
+	}
+	// #nosec G304 G703
+	f, err := os.OpenFile(expanded, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to open log file: %w", err)
+	}
+	// #nosec G302 G703
+	if err := os.Chmod(expanded, 0600); err != nil {
+		_ = f.Close()
+		return nil, "", fmt.Errorf("failed to harden log file permissions to 0600: %w", err)
+	}
+	return f, expanded, nil
+}
+
+// rsyncStdoutStatsWriter consumes local rsync stdout.
+// In normal mode (!verbose), zero raw lines are forwarded; instead, `--stats` transfer counters
+// (compatible with both GNU rsync and macOS openrsync) are parsed in memory.
+// In verbose mode, raw stdout is forwarded to dst.
+type rsyncStdoutStatsWriter struct {
 	mu                sync.Mutex
 	dst               io.Writer
 	verbose           bool
 	buf               []byte
+	transferredFiles  int
+	totalFiles        int
 	skippedNonRegular int
 }
 
-func newRsyncStderrFilterWriter(dst io.Writer, verbose bool) *rsyncStderrFilterWriter {
-	return &rsyncStderrFilterWriter{dst: dst, verbose: verbose}
+func newRsyncStdoutStatsWriter(dst io.Writer, verbose bool) *rsyncStdoutStatsWriter {
+	return &rsyncStdoutStatsWriter{dst: dst, verbose: verbose}
 }
 
-func (w *rsyncStderrFilterWriter) Write(p []byte) (int, error) {
-	if w.verbose {
-		return w.dst.Write(p)
+func (w *rsyncStdoutStatsWriter) parseStatsLine(line string) {
+	trimmed := strings.TrimSpace(line)
+	lower := strings.ToLower(trimmed)
+	if strings.HasPrefix(lower, "skipping non-regular file") {
+		w.skippedNonRegular++
+		return
 	}
+	if strings.HasPrefix(lower, "number of regular files transferred:") ||
+		strings.HasPrefix(lower, "number of files transferred:") {
+		if m := reStatsNumber.FindStringSubmatch(trimmed); len(m) == 2 {
+			if n, err := strconv.Atoi(strings.ReplaceAll(m[1], ",", "")); err == nil {
+				w.transferredFiles = n
+			}
+		}
+	} else if strings.HasPrefix(lower, "number of files:") {
+		if m := reStatsNumber.FindStringSubmatch(trimmed); len(m) == 2 {
+			if n, err := strconv.Atoi(strings.ReplaceAll(m[1], ",", "")); err == nil {
+				w.totalFiles = n
+			}
+		}
+	}
+}
+
+func (w *rsyncStdoutStatsWriter) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if w.verbose && w.dst != nil {
+		if _, err := w.dst.Write(p); err != nil {
+			return 0, err
+		}
+	}
 	w.buf = append(w.buf, p...)
 	for {
 		idx := strings.IndexByte(string(w.buf), '\n')
@@ -1630,28 +1741,94 @@ func (w *rsyncStderrFilterWriter) Write(p []byte) (int, error) {
 		}
 		line := string(w.buf[:idx+1])
 		w.buf = w.buf[idx+1:]
-		if strings.HasPrefix(strings.TrimSpace(line), "skipping non-regular file") {
-			w.skippedNonRegular++
-			continue
-		}
-		_, _ = io.WriteString(w.dst, line)
+		w.parseStatsLine(line)
 	}
 	return len(p), nil
 }
 
-func (w *rsyncStderrFilterWriter) Flush() int {
+func (w *rsyncStdoutStatsWriter) Flush() (transferred int, total int, skippedNonRegular int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.buf) > 0 {
+		w.parseStatsLine(string(w.buf))
+		w.buf = nil
+	}
+	return w.transferredFiles, w.totalFiles, w.skippedNonRegular
+}
+
+// rsyncRedactingStderrWriter filters noisy informational "skipping non-regular file" lines
+// emitted by rsync for symlinks/sockets and redacts paths/hosts on remaining error lines when
+// not in Verbose mode, counting skipped items so a single concise summary can be printed.
+type rsyncRedactingStderrWriter struct {
+	mu                sync.Mutex
+	dst               io.Writer
+	verbose           bool
+	buf               []byte
+	skippedNonRegular int
+}
+
+// rsyncStderrFilterWriter is kept as a type alias for backward compatibility with internal callers/tests.
+type rsyncStderrFilterWriter = rsyncRedactingStderrWriter
+
+func newRsyncStderrFilterWriter(dst io.Writer, verbose bool) *rsyncRedactingStderrWriter {
+	return &rsyncRedactingStderrWriter{dst: dst, verbose: verbose}
+}
+
+func (w *rsyncRedactingStderrWriter) processLineLocked(line string) {
+	if strings.HasPrefix(strings.TrimSpace(line), "skipping non-regular file") {
+		w.skippedNonRegular++
+		return
+	}
+	if w.dst != nil {
+		_, _ = io.WriteString(w.dst, redactBackupOutputLine(line))
+	}
+}
+
+func (w *rsyncRedactingStderrWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.verbose {
+		if w.dst == nil {
+			return len(p), nil
+		}
+		return w.dst.Write(p)
+	}
+	w.buf = append(w.buf, p...)
+	for {
+		idx := strings.IndexByte(string(w.buf), '\n')
+		if idx == -1 {
+			break
+		}
+		line := string(w.buf[:idx+1])
+		w.buf = w.buf[idx+1:]
+		w.processLineLocked(line)
+	}
+	return len(p), nil
+}
+
+func (w *rsyncRedactingStderrWriter) Flush() int {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if len(w.buf) > 0 {
 		line := string(w.buf)
 		w.buf = nil
-		if strings.HasPrefix(strings.TrimSpace(line), "skipping non-regular file") {
-			w.skippedNonRegular++
+		if w.verbose {
+			if w.dst != nil {
+				_, _ = io.WriteString(w.dst, line)
+			}
 		} else {
-			_, _ = io.WriteString(w.dst, line)
+			w.processLineLocked(line)
 		}
 	}
 	return w.skippedNonRegular
+}
+
+// backupFolderRunStats captures privacy-safe per-folder counters returned by a single backup attempt.
+type backupFolderRunStats struct {
+	Transferred       int
+	SkippedNonRegular int
+	ExitCode          int
+	Vanished          bool
 }
 
 // nonRetryableBackupError wraps a folder backup error that should fail immediately
@@ -1673,20 +1850,39 @@ func isNonRetryableBackupError(err error) bool {
 	return errors.As(err, &nr)
 }
 
+func extractRsyncExitCode(err error) int {
+	if err == nil {
+		return 0
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode()
+	}
+	return 1
+}
+
 // classifyRsyncRunError inspects the exit status of local rsync:
 //   - Exit code 24 (partial transfer due to vanished source files): logs a non-fatal warning and returns nil.
 //   - Exit code 23 (partial transfer due to permission/TCC errors) or syntax/config exit codes (1..6, 11, 13, 14):
 //     returns a *nonRetryableBackupError so the runner does not waste 4 retries re-walking a TCC-blocked directory tree.
 //   - Transient network, socket, SSH, or timeout exit codes (10, 12, 30, 35, 255, etc.): returns a retryable error.
-func classifyRsyncRunError(runErr, bridgeErr error, folderSource string) error {
+func classifyRsyncRunError(runErr, bridgeErr error, folderAlias string) error {
 	if runErr == nil {
 		return nil
+	}
+	safeBridge := ""
+	if bridgeErr != nil {
+		if Verbose {
+			safeBridge = bridgeErr.Error()
+		} else {
+			safeBridge = redactBackupOutputLine(bridgeErr.Error())
+		}
 	}
 	var exitErr *exec.ExitError
 	if errors.As(runErr, &exitErr) {
 		code := exitErr.ExitCode()
 		if code == 24 {
-			fmt.Fprintf(os.Stderr, "[!] Note: rsync exit 24 for folder %q (some source files vanished during transfer); treating as non-fatal.\n", folderSource)
+			fmt.Fprintf(os.Stderr, "[!] Note: rsync exit 24 for folder %q (some source files vanished during transfer); treating as non-fatal.\n", folderAlias)
 			return nil
 		}
 		switch code {
@@ -1694,20 +1890,20 @@ func classifyRsyncRunError(runErr, bridgeErr error, folderSource string) error {
 			var baseErr error
 			tccHint := ""
 			if code == 23 {
-				tccHint = " — hint: on macOS, exit 23 ('Operation not permitted') usually indicates a TCC-protected subpath (e.g. under ~/Library); exclude the blocked subpath via --exclude or grant Full Disk Access to your terminal"
+				tccHint = " — hint: on macOS, exit 23 ('Operation not permitted') usually indicates a TCC-protected subpath; exclude the blocked subpath via --exclude or grant Full Disk Access to your terminal"
 			}
-			if bridgeErr != nil {
-				baseErr = fmt.Errorf("rsync failed for folder %q (exit %d, non-retryable%s): %v (remote: %v)", folderSource, code, tccHint, runErr, bridgeErr)
+			if safeBridge != "" {
+				baseErr = fmt.Errorf("rsync failed for folder %q (exit %d, non-retryable%s): %v (remote: %s)", folderAlias, code, tccHint, runErr, safeBridge)
 			} else {
-				baseErr = fmt.Errorf("rsync failed for folder %q (exit %d, non-retryable%s): %w", folderSource, code, tccHint, runErr)
+				baseErr = fmt.Errorf("rsync failed for folder %q (exit %d, non-retryable%s): %w", folderAlias, code, tccHint, runErr)
 			}
 			return &nonRetryableBackupError{Err: baseErr}
 		}
 	}
-	if bridgeErr != nil {
-		return fmt.Errorf("rsync failed for folder %q: %v (remote: %v)", folderSource, runErr, bridgeErr)
+	if safeBridge != "" {
+		return fmt.Errorf("rsync failed for folder %q: %v (remote: %s)", folderAlias, runErr, safeBridge)
 	}
-	return fmt.Errorf("rsync failed for folder %q: %w", folderSource, runErr)
+	return fmt.Errorf("rsync failed for folder %q: %w", folderAlias, runErr)
 }
 
 // runStealthBackupFolders executes each folder in selectedFolders with up to manifest.MaxAttempts
@@ -1720,6 +1916,35 @@ func runStealthBackupFolders(
 	attemptFn func(folder store.BackupFolderSpec, attempt int) error,
 	reconnectFn func() error,
 ) ([]string, error) {
+	return runStealthBackupFoldersWithOutput(
+		manifest,
+		selectedFolders,
+		lost,
+		os.Stdout,
+		os.Stderr,
+		func(folder store.BackupFolderSpec, attempt int) (backupFolderRunStats, error) {
+			err := attemptFn(folder, attempt)
+			return backupFolderRunStats{ExitCode: extractRsyncExitCode(err)}, err
+		},
+		reconnectFn,
+	)
+}
+
+func runStealthBackupFoldersWithOutput(
+	manifest store.BackupManifest,
+	selectedFolders []store.BackupFolderSpec,
+	lost <-chan struct{},
+	out io.Writer,
+	errOut io.Writer,
+	attemptFn func(folder store.BackupFolderSpec, attempt int) (backupFolderRunStats, error),
+	reconnectFn func() error,
+) ([]string, error) {
+	if out == nil {
+		out = os.Stdout
+	}
+	if errOut == nil {
+		errOut = os.Stderr
+	}
 	maxAttempts := manifest.MaxAttempts
 	if maxAttempts <= 0 {
 		maxAttempts = store.DefaultBackupMaxAttempts
@@ -1727,13 +1952,11 @@ func runStealthBackupFolders(
 
 	var failedFolders []string
 	for idx, folder := range selectedFolders {
-		folderLabel := strings.TrimSpace(folder.Name)
-		if folderLabel == "" {
-			folderLabel = folder.Source
-		}
-		fmt.Printf("[%d/%d] Synchronizing folder (stealth transport)...\n", idx+1, len(selectedFolders))
+		folderAlias := safeFolderAlias(folder)
+		fmt.Fprintf(out, "[%d/%d] alias=%s starting (stealth transport)...\n", idx+1, len(selectedFolders), folderAlias)
 
 		var lastErr error
+		var lastStats backupFolderRunStats
 		succeeded := false
 		attemptsRun := 0
 		for attempt := 1; attempt <= maxAttempts; attempt++ {
@@ -1746,7 +1969,7 @@ func runStealthBackupFolders(
 			}
 
 			attemptsRun = attempt
-			lastErr = attemptFn(folder, attempt)
+			lastStats, lastErr = attemptFn(folder, attempt)
 			if lastErr == nil {
 				succeeded = true
 				break
@@ -1757,7 +1980,7 @@ func runStealthBackupFolders(
 
 			if attempt < maxAttempts {
 				delay := backupBackoff(attempt)
-				fmt.Fprintf(os.Stderr, "[!] Attempt %d/%d for folder %q failed (%v); retrying in %s...\n", attempt, maxAttempts, folderLabel, lastErr, delay)
+				fmt.Fprintf(errOut, "[!] Attempt %d/%d for alias=%s failed (%v); retrying in %s...\n", attempt, maxAttempts, folderAlias, lastErr, delay)
 				if lost != nil {
 					select {
 					case <-lost:
@@ -1773,26 +1996,40 @@ func runStealthBackupFolders(
 			}
 		}
 
-		if !succeeded {
-			fmt.Fprintf(os.Stderr, "[✗] Folder %q failed after %d attempt(s): %v\n", folderLabel, attemptsRun, lastErr)
-			failedFolders = append(failedFolders, folderLabel)
+		if succeeded {
+			statusLabel := "ok"
+			if lastStats.Vanished {
+				statusLabel = "ok(vanished)"
+			}
+			fmt.Fprintf(out, "[%d/%d] alias=%s status=%s transferred=%d skipped_non_regular=%d exit=%d\n",
+				idx+1, len(selectedFolders), folderAlias, statusLabel, lastStats.Transferred, lastStats.SkippedNonRegular, lastStats.ExitCode)
+		} else {
+			fmt.Fprintf(errOut, "[%d/%d] alias=%s status=failed attempts=%d transferred=%d skipped_non_regular=%d exit=%d error=%v\n",
+				idx+1, len(selectedFolders), folderAlias, attemptsRun, lastStats.Transferred, lastStats.SkippedNonRegular, lastStats.ExitCode, lastErr)
+			failedFolders = append(failedFolders, folderAlias)
 		}
 	}
 
 	if len(failedFolders) > 0 {
-		fmt.Fprintf(os.Stderr, "[✗] Stealth backup job %q completed with %d failed folder(s): %s\n", manifest.Name, len(failedFolders), strings.Join(failedFolders, ", "))
+		fmt.Fprintf(errOut, "[✗] Stealth backup job %q completed with %d failed folder(s): %s\n", manifest.Name, len(failedFolders), strings.Join(failedFolders, ", "))
 		return failedFolders, fmt.Errorf("%d folder(s) failed backup synchronization: %s", len(failedFolders), strings.Join(failedFolders, ", "))
 	}
 
-	fmt.Printf("[✓] Completed stealth backup job %q (%d folder(s) synchronized)\n", manifest.Name, len(selectedFolders))
+	fmt.Fprintf(out, "[✓] Completed stealth backup job %q (%d folder(s) synchronized)\n", manifest.Name, len(selectedFolders))
 	return nil, nil
 }
 
 // startStealthStdioBridge starts an ephemeral Unix domain socket listener (0600 in a private temp dir)
 // for a single folder synchronization session. When the local `ssh-stdio` helper connects and sends
 // its 1-line JSON argument header, the bridge rewrites the remote `rsync --server` command and streams
-// stdin/stdout bi-directionally through `runner`.
-func startStealthStdioBridge(manifest store.BackupManifest, folder store.BackupFolderSpec, now time.Time, runner remoteCommandRunner) (sockPath string, waitErr func() error, cleanup func(), err error) {
+// stdin/stdout bi-directionally through `runner`. Optional `stderrWriters` lets callers route remote
+// SSH stderr through a privacy-preserving redacting filter instead of raw os.Stderr.
+func startStealthStdioBridge(manifest store.BackupManifest, folder store.BackupFolderSpec, now time.Time, runner remoteCommandRunner, stderrWriters ...io.Writer) (sockPath string, waitErr func() error, cleanup func(), err error) {
+	remoteStderr := io.Writer(os.Stderr)
+	if len(stderrWriters) > 0 && stderrWriters[0] != nil {
+		remoteStderr = stderrWriters[0]
+	}
+
 	tmpDir, err := os.MkdirTemp("", "sec_stdio_*")
 	if err != nil {
 		return "", nil, nil, fmt.Errorf("failed to create ephemeral stdio socket dir: %w", err)
@@ -1836,7 +2073,7 @@ func startStealthStdioBridge(manifest store.BackupManifest, folder store.BackupF
 		}
 
 		remoteCmd := rewriteRemoteRsyncServerCommand(hs.Args, manifest, folder, now)
-		runErr := runner(remoteCmd, br, conn, os.Stderr)
+		runErr := runner(remoteCmd, br, conn, remoteStderr)
 		if uc, ok := conn.(*net.UnixConn); ok {
 			_ = uc.CloseWrite()
 		}
@@ -1959,8 +2196,9 @@ func handleStealthBackupRun(profile string, args []string) {
 }
 
 func executeStealthBackupRun(profile string, args []string) error {
-	var rawName, folderFilter string
+	var rawName, folderFilter, logFilePath string
 	dryRun := false
+	localVerbose := false
 	noTrace := true
 	trustOnFirstUse := false
 	insecureHostKey := false
@@ -1973,12 +2211,19 @@ func executeStealthBackupRun(profile string, args []string) error {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if a == "--help" || a == "-h" {
-			fmt.Println("Usage: sec backup run <name> [<folder-filter>] [--max-attempts <n>] [--timeout <sec>] [--server-alive-interval <sec>] [--server-alive-count-max <count>] [--dry-run] [--no-trace] [--trace] [--tofu] [--insecure]")
+			fmt.Println("Usage: sec backup run <name> [<folder-filter>] [--max-attempts <n>] [--timeout <sec>] [--server-alive-interval <sec>] [--server-alive-count-max <count>] [--dry-run] [--verbose] [--log-file <path>] [--no-trace] [--trace] [--tofu] [--insecure]")
 			return nil
 		}
 		switch {
 		case a == "--dry-run" || a == "-n":
 			dryRun = true
+		case a == "--verbose" || a == "-v":
+			localVerbose = true
+		case a == "--log-file" && i+1 < len(args):
+			logFilePath = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--log-file="):
+			logFilePath = strings.TrimPrefix(a, "--log-file=")
 		case a == "--no-trace":
 			noTrace = true
 		case a == "--trace":
@@ -2084,9 +2329,15 @@ func executeStealthBackupRun(profile string, args []string) error {
 		return &stealthBackupCliError{
 			Code:        "MISSING_ARGUMENT",
 			Err:         fmt.Errorf("backup job <name> is required"),
-			Remediation: "Usage: sec backup run <name> [<folder-filter>] [--max-attempts <n>] [--dry-run] [--no-trace] [--trace] [--tofu] [--insecure]",
+			Remediation: "Usage: sec backup run <name> [<folder-filter>] [--max-attempts <n>] [--dry-run] [--verbose] [--log-file <path>] [--no-trace] [--trace] [--tofu] [--insecure]",
 		}
 	}
+
+	prevVerbose := Verbose
+	if localVerbose {
+		Verbose = true
+	}
+	defer func() { Verbose = prevVerbose }()
 
 	if err := requireUnlockedForStealthBackup(profile, noTrace); err != nil {
 		return &stealthBackupCliError{
@@ -2204,11 +2455,31 @@ func executeStealthBackupRun(profile string, args []string) error {
 	}
 
 	expandedLocalBase := expandLocalBasePath(manifest.LocalBase)
+	effectiveVerbose := Verbose || localVerbose
 
-	attemptFn := func(folder store.BackupFolderSpec, _ int) error {
+	outWriter := io.Writer(os.Stdout)
+	errWriter := io.Writer(os.Stderr)
+	if strings.TrimSpace(logFilePath) != "" {
+		logFile, _, logErr := openHardenedBackupLogFile(logFilePath)
+		if logErr != nil {
+			return &stealthBackupCliError{
+				Code: "LOG_FILE_ERROR",
+				Err:  logErr,
+			}
+		}
+		defer logFile.Close()
+		outWriter = io.MultiWriter(os.Stdout, logFile)
+		errWriter = io.MultiWriter(os.Stderr, logFile)
+		fmt.Fprintln(errWriter, "[!] WARNING: --log-file enabled (mode 0600 in 0700 dir) — prefer a tmpfs/RAM-backed path and delete the log file immediately after inspection to minimize metadata exposure.")
+	}
+	if effectiveVerbose {
+		fmt.Fprintln(errWriter, "[!] WARNING: --verbose enabled — per-file names, paths, and progress will be written to stdout/stderr; avoid piping to world-readable log files.")
+	}
+
+	attemptFn := func(folder store.BackupFolderSpec, _ int) (backupFolderRunStats, error) {
 		if sshClient == nil {
 			if dErr := reconnectFn(); dErr != nil {
-				return dErr
+				return backupFolderRunStats{ExitCode: 1}, dErr
 			}
 		}
 
@@ -2221,6 +2492,7 @@ func executeStealthBackupRun(profile string, args []string) error {
 		dateStr := now.Format("2006-01-02")
 		datetimeStr := now.Format("2006-01-02_1504")
 
+		folderAlias := safeFolderAlias(folder)
 		localDir := folder.ResolveLocalDir(expandedLocalBase)
 		remoteDest := folder.DeriveRemoteDest(manifest.RemoteBase)
 		remoteHistoryDir := folder.DeriveHistoryDir(manifest.RemoteBase, dateStr)
@@ -2228,13 +2500,18 @@ func executeStealthBackupRun(profile string, args []string) error {
 
 		// #nosec G703
 		if fi, statErr := os.Stat(localDir); statErr != nil || !fi.IsDir() {
-			return &nonRetryableBackupError{
-				Err: fmt.Errorf("local source directory does not exist for folder %q: %s", folder.Source, localDir),
+			if effectiveVerbose {
+				return backupFolderRunStats{ExitCode: 1}, &nonRetryableBackupError{
+					Err: fmt.Errorf("local source directory does not exist for folder %q: %s", folder.Source, localDir),
+				}
+			}
+			return backupFolderRunStats{ExitCode: 1}, &nonRetryableBackupError{
+				Err: fmt.Errorf("local source directory does not exist for alias %q (<path>)", folderAlias),
 			}
 		}
 
-		if Verbose {
-			fmt.Fprintf(os.Stderr, "[VERBOSE] Remote Dest: %s | History: %s | Log: %s\n", remoteDest, remoteHistoryDir, remoteLogPath)
+		if effectiveVerbose {
+			fmt.Fprintf(errWriter, "[VERBOSE] Remote Dest: %s | History: %s | Log: %s\n", remoteDest, remoteHistoryDir, remoteLogPath)
 		}
 
 		sshRunner := func(remoteCmd string, stdin io.Reader, stdout, stderr io.Writer) error {
@@ -2263,15 +2540,18 @@ func executeStealthBackupRun(profile string, args []string) error {
 			return session.Wait()
 		}
 
-		sockPath, waitBridgeErr, cleanupBridge, bErr := startStealthStdioBridge(manifest, folder, now, sshRunner)
+		stdoutFilter := newRsyncStdoutStatsWriter(outWriter, effectiveVerbose)
+		stderrFilter := newRsyncStderrFilterWriter(errWriter, effectiveVerbose)
+
+		sockPath, waitBridgeErr, cleanupBridge, bErr := startStealthStdioBridge(manifest, folder, now, sshRunner, stderrFilter)
 		if bErr != nil {
-			return bErr
+			return backupFolderRunStats{ExitCode: 1}, bErr
 		}
 
 		excludePipeRead, excludePipeWrite, pErr := os.Pipe()
 		if pErr != nil {
 			cleanupBridge()
-			return fmt.Errorf("failed to create anonymous exclude pipe: %w", pErr)
+			return backupFolderRunStats{ExitCode: 1}, fmt.Errorf("failed to create anonymous exclude pipe: %w", pErr)
 		}
 		excludeContent := strings.Join(folder.EffectiveExcludes(manifest.Excludes), "\n") + "\n"
 		go func(w *os.File, payload string) {
@@ -2279,14 +2559,13 @@ func executeStealthBackupRun(profile string, args []string) error {
 			_ = w.Close()
 		}(excludePipeWrite, excludeContent)
 
-		rsyncArgs := buildLocalStealthRsyncArgs(manifest, selfExe, dryRun, folder)
+		rsyncArgs := buildLocalStealthRsyncArgs(manifest, selfExe, dryRun, effectiveVerbose, folder)
 		// #nosec G204 G702
 		cmd := exec.Command(localRsyncBin, rsyncArgs...)
 		cmd.Dir = localDir
 		cmd.ExtraFiles = []*os.File{excludePipeRead}
 		cmd.Env = buildLocalStealthRsyncEnv(manifest, selfExe, sockPath)
-		stderrFilter := newRsyncStderrFilterWriter(os.Stderr, Verbose)
-		cmd.Stdout = os.Stdout
+		cmd.Stdout = stdoutFilter
 		cmd.Stderr = stderrFilter
 
 		runErr := cmd.Run()
@@ -2294,14 +2573,20 @@ func executeStealthBackupRun(profile string, args []string) error {
 		bridgeErr := waitBridgeErr()
 		cleanupBridge()
 
-		if skipped := stderrFilter.Flush(); skipped > 0 {
-			fmt.Fprintf(os.Stderr, "[i] Note: rsync skipped %d non-regular file(s) (symlinks/sockets) in %q; pass --verbose to list them.\n", skipped, folder.Source)
+		transferred, _, stdoutSkipped := stdoutFilter.Flush()
+		stderrSkipped := stderrFilter.Flush()
+		rawExit := extractRsyncExitCode(runErr)
+		stats := backupFolderRunStats{
+			Transferred:       transferred,
+			SkippedNonRegular: stdoutSkipped + stderrSkipped,
+			ExitCode:          rawExit,
+			Vanished:          rawExit == 24,
 		}
 
-		return classifyRsyncRunError(runErr, bridgeErr, folder.Source)
+		return stats, classifyRsyncRunError(runErr, bridgeErr, folderAlias)
 	}
 
-	if _, err := runStealthBackupFolders(manifest, selectedFolders, lostCh, attemptFn, reconnectFn); err != nil {
+	if _, err := runStealthBackupFoldersWithOutput(manifest, selectedFolders, lostCh, outWriter, errWriter, attemptFn, reconnectFn); err != nil {
 		return &stealthBackupCliError{
 			Code: "BACKUP_SYNC_FAILED",
 			Err:  err,

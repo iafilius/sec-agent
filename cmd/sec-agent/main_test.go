@@ -1827,8 +1827,9 @@ func TestEnsureDaemonRunningEvictsOutdatedDaemonOnUpgrade(t *testing.T) {
 
 	// Run 'sec open' with the newer CLI binary: ensureDaemonRunning MUST detect version drift,
 	// print the eviction notice, replace the daemon, and unlock on the new CLI version.
+	t.Setenv("SEC_SESSION_TOKEN", "")
 	openCmd := exec.Command(binPath, "open", "--profile", profile)
-	openCmd.Env = append(os.Environ(), "SEC_CONFIG_DIR="+tmpCfgDir, "SEC_TEST_MODE=1")
+	openCmd.Env = append(os.Environ(), "SEC_CONFIG_DIR="+tmpCfgDir, "SEC_TEST_MODE=1", "SEC_SESSION_TOKEN=")
 	openOut, openErr := openCmd.CombinedOutput()
 	if openErr != nil {
 		t.Fatalf("sec open after version upgrade failed: %v\nOutput:\n%s", openErr, string(openOut))
@@ -1839,7 +1840,7 @@ func TestEnsureDaemonRunningEvictsOutdatedDaemonOnUpgrade(t *testing.T) {
 
 	// Verify the running daemon now reports the new CLI Version
 	statusCmd := exec.Command(binPath, "status", "--profile", profile)
-	statusCmd.Env = append(os.Environ(), "SEC_CONFIG_DIR="+tmpCfgDir, "SEC_TEST_MODE=1")
+	statusCmd.Env = append(os.Environ(), "SEC_CONFIG_DIR="+tmpCfgDir, "SEC_TEST_MODE=1", "SEC_SESSION_TOKEN=")
 	statusOut, statusErr := statusCmd.CombinedOutput()
 	if statusErr != nil {
 		t.Fatalf("sec status after upgrade failed: %v\nOutput:\n%s", statusErr, string(statusOut))
