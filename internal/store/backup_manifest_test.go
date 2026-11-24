@@ -3,7 +3,9 @@ package store
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestBackupManifestValidationAndDefaults(t *testing.T) {
@@ -358,4 +360,147 @@ func TestBackupManifestLegacyRsyncTimeoutAndSSHOptionsNormalization(t *testing.T
 	if f.LegacyRsyncTimeout != 0 || f.LegacySSHOptions != "" {
 		t.Errorf("expected folder legacy fields cleared after Normalize(), got %d / %q", f.LegacyRsyncTimeout, f.LegacySSHOptions)
 	}
+}
+
+func TestBackupManifestNoProgressTimeout(t *testing.T) {
+	t.Run("ParseNoProgressTimeout valid and disabled values", func(t *testing.T) {
+		cases := []struct {
+			raw  string
+			want time.Duration
+		}{
+			{"", 0},
+			{"   ", 0},
+			{"0", 0},
+			{"0s", 0},
+			{"0m", 0},
+			{"30m", 30 * time.Minute},
+			{"15m30s", 15*time.Minute + 30*time.Second},
+			{"600s", 600 * time.Second},
+			{"1800", 1800 * time.Second},
+			{" 900 ", 900 * time.Second},
+		}
+		for _, tc := range cases {
+			got, err := ParseNoProgressTimeout(tc.raw)
+			if err != nil {
+				t.Errorf("ParseNoProgressTimeout(%q) unexpected error: %v", tc.raw, err)
+				continue
+			}
+			if got != tc.want {
+				t.Errorf("ParseNoProgressTimeout(%q) = %v, want %v", tc.raw, got, tc.want)
+			}
+		}
+	})
+
+	t.Run("ParseNoProgressTimeout invalid and negative values", func(t *testing.T) {
+		cases := []struct {
+			raw        string
+			wantSubstr string
+		}{
+			{"bogus", "invalid no_progress_timeout"},
+			{"-5m", "cannot be negative"},
+			{"-10", "cannot be negative"},
+			{"-1s", "cannot be negative"},
+		}
+		for _, tc := range cases {
+			_, err := ParseNoProgressTimeout(tc.raw)
+			if err == nil {
+				t.Errorf("ParseNoProgressTimeout(%q) expected error, got nil", tc.raw)
+				continue
+			}
+			if !strings.Contains(err.Error(), tc.wantSubstr) {
+				t.Errorf("ParseNoProgressTimeout(%q) error = %q, want substring %q", tc.raw, err.Error(), tc.wantSubstr)
+			}
+		}
+	})
+
+	t.Run("JSON unmarshal string and number formats, defaults, and validation", func(t *testing.T) {
+		basePrefix := `{"name":"home-nas","ssh_target":"backupuser@10.0.0.50","local_base":"/Users/backupuser","remote_base":"/Volumes/MediaArchive","folders":[{"src":"Photos"}]`
+
+		// 1. Existing manifest without no_progress_timeout defaults to OFF (0)
+		var mDefault BackupManifest
+		if err := json.Unmarshal([]byte(basePrefix+`}`), &mDefault); err != nil {
+			t.Fatalf("json.Unmarshal(default) failed: %v", err)
+		}
+		mDefault.ApplyDefaults()
+		if mDefault.NoProgressTimeout != "" {
+			t.Errorf("expected ApplyDefaults() to leave NoProgressTimeout empty, got %q", mDefault.NoProgressTimeout)
+		}
+		if err := mDefault.Validate(); err != nil {
+			t.Fatalf("Validate() failed for manifest without no_progress_timeout: %v", err)
+		}
+		if got, err := mDefault.EffectiveNoProgressTimeout(); err != nil || got != 0 {
+			t.Errorf("EffectiveNoProgressTimeout() = (%v, %v), want (0, nil)", got, err)
+		}
+
+		// 2. Valid JSON string and JSON number values
+		validCases := []struct {
+			name     string
+			fieldVal string
+			want     time.Duration
+		}{
+			{"empty string", `""`, 0},
+			{"zero string", `"0"`, 0},
+			{"zero seconds string", `"0s"`, 0},
+			{"zero number", `0`, 0},
+			{"null", `null`, 0},
+			{"go duration 30m", `"30m"`, 30 * time.Minute},
+			{"go duration 15m30s", `"15m30s"`, 15*time.Minute + 30*time.Second},
+			{"go duration 600s", `"600s"`, 600 * time.Second},
+			{"integer seconds string", `"1800"`, 1800 * time.Second},
+			{"integer seconds number", `1800`, 1800 * time.Second},
+		}
+		for _, tc := range validCases {
+			t.Run(tc.name, func(t *testing.T) {
+				raw := basePrefix + `,"no_progress_timeout":` + tc.fieldVal + `}`
+				var m BackupManifest
+				if err := json.Unmarshal([]byte(raw), &m); err != nil {
+					t.Fatalf("json.Unmarshal failed: %v", err)
+				}
+				m.ApplyDefaults()
+				if err := m.Validate(); err != nil {
+					t.Fatalf("Validate() failed: %v", err)
+				}
+				got, err := m.EffectiveNoProgressTimeout()
+				if err != nil {
+					t.Fatalf("EffectiveNoProgressTimeout() failed: %v", err)
+				}
+				if got != tc.want {
+					t.Errorf("EffectiveNoProgressTimeout() = %v, want %v", got, tc.want)
+				}
+			})
+		}
+
+		// 3. Invalid or negative JSON values fail Validate() with ErrInvalidBackupManifest
+		invalidValidationCases := []struct {
+			name     string
+			fieldVal string
+		}{
+			{"bogus string", `"bogus"`},
+			{"negative duration string", `"-5m"`},
+			{"negative integer string", `"-10"`},
+			{"negative JSON number", `-5`},
+		}
+		for _, tc := range invalidValidationCases {
+			t.Run(tc.name, func(t *testing.T) {
+				raw := basePrefix + `,"no_progress_timeout":` + tc.fieldVal + `}`
+				var m BackupManifest
+				if err := json.Unmarshal([]byte(raw), &m); err != nil {
+					t.Fatalf("expected json.Unmarshal to preserve raw value for Validate(), got error: %v", err)
+				}
+				err := m.Validate()
+				if !errors.Is(err, ErrInvalidBackupManifest) {
+					t.Errorf("Validate() error = %v, want ErrInvalidBackupManifest", err)
+				}
+			})
+		}
+
+		// 4. Non-string/non-integer JSON types fail json.Unmarshal
+		for _, badVal := range []string{`true`, `{}`, `[]`, `12.5`} {
+			raw := basePrefix + `,"no_progress_timeout":` + badVal + `}`
+			var m BackupManifest
+			if err := json.Unmarshal([]byte(raw), &m); err == nil {
+				t.Errorf("expected json.Unmarshal error for no_progress_timeout=%s, got nil", badVal)
+			}
+		}
+	})
 }

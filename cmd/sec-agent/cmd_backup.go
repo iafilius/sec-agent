@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"secure_secrets/internal/config"
 	"secure_secrets/internal/daemon"
 	"secure_secrets/internal/store"
 
@@ -83,11 +84,13 @@ func shellQuotePOSIX(s string) string {
 func printStealthBackupUsage() {
 	fmt.Println("Usage:")
 	fmt.Println("  sec backup init <name> [--file <manifest.json> | --stdin] --target <ssh-target-or-user@host> --remote-base <path> [--local-base <path>] [--max-attempts <n>] [--sparse] [--ssh-key-secret <vault-key>] [--ssh-password-key <vault-key>] [--port <port>] [--remote-rsync <path>] [--modify-window <sec>] [--partial-dir <dir>] [--exclude <pattern>...] [--folder <folder>...]")
+	fmt.Println("  sec backup init <name> [--file <manifest.json> | --stdin] --target <ssh-target-or-user@host> --remote-base <path> [--local-base <path>] [--max-attempts <n>] [--timeout <sec>] [--no-progress-timeout <dur>] [--sparse] [--ssh-key-secret <vault-key>] [--ssh-password-key <vault-key>] [--port <port>] [--remote-rsync <path>] [--modify-window <sec>] [--partial-dir <dir>] [--exclude <pattern>...] [--folder <folder>...]")
 	fmt.Println("  sec backup add-folder <name> <folder> [--dest <remote-folder-name>] [--history-prefix <prefix>] [--slug <slug>] [--sparse] [--backup-dir <path>] [--log-file <path>] [--exclude <pattern>...]")
 	fmt.Println("  sec backup remove-folder <name> <folder>")
 	fmt.Println("  sec backup show <name>")
 	fmt.Println("  sec backup jobs")
 	fmt.Println("  sec backup run <name> [<folder-filter>] [--max-attempts <n>] [--dry-run] [--verbose] [--log-file <path>] [--no-trace] [--trace] [--tofu] [--insecure]")
+	fmt.Println("  sec backup run <name> [<folder-filter>] [--max-attempts <n>] [--timeout <sec>] [--no-progress-timeout <dur>] [--dry-run] [--verbose] [--log-file <path>] [--no-trace] [--trace] [--tofu] [--insecure]")
 	fmt.Println("  sec backup batch <define|list|show|run> [<name>] [--file <manifest.json>]")
 	fmt.Println("  sec backup <export|import|list> [<file.kdbx>]")
 }
@@ -282,9 +285,9 @@ func loadStealthBackupManifest(profile string, rawName string, noTrace bool) (st
 }
 
 func handleStealthBackupInit(profile string, args []string) {
-	var rawName, target, localBase, remoteBase, sshKeySecret, sshPasswordKey, remoteRsync, partialDir, filePath string
+	var rawName, target, localBase, remoteBase, sshKeySecret, sshPasswordKey, remoteRsync, partialDir, filePath, noProgressTimeout string
 	var port, modifyWindow, maxAttempts, timeoutSec, serverAliveInterval, serverAliveCountMax int
-	var fromStdin, sparse bool
+	var fromStdin, sparse, noProgressTimeoutSet bool
 	var excludes []string
 	var folders []store.BackupFolderSpec
 
@@ -332,6 +335,20 @@ func handleStealthBackupInit(profile string, args []string) {
 				fail("INVALID_ARGUMENTS", fmt.Errorf("invalid timeout %q", toStr), "")
 			}
 			timeoutSec = to
+		case a == "--no-progress-timeout" && i+1 < len(args):
+			if _, err := store.ParseNoProgressTimeout(args[i+1]); err != nil {
+				fail("INVALID_ARGUMENTS", err, "")
+			}
+			noProgressTimeout = strings.TrimSpace(args[i+1])
+			noProgressTimeoutSet = true
+			i++
+		case strings.HasPrefix(a, "--no-progress-timeout="):
+			npStr := strings.TrimPrefix(a, "--no-progress-timeout=")
+			if _, err := store.ParseNoProgressTimeout(npStr); err != nil {
+				fail("INVALID_ARGUMENTS", err, "")
+			}
+			noProgressTimeout = strings.TrimSpace(npStr)
+			noProgressTimeoutSet = true
 		case a == "--server-alive-interval" && i+1 < len(args):
 			sai, err := strconv.Atoi(args[i+1])
 			if err != nil || sai < 0 {
@@ -496,6 +513,9 @@ func handleStealthBackupInit(profile string, args []string) {
 		if timeoutSec > 0 {
 			manifest.Timeout = timeoutSec
 		}
+		if noProgressTimeoutSet {
+			manifest.NoProgressTimeout = noProgressTimeout
+		}
 		if serverAliveInterval > 0 {
 			manifest.ServerAliveInterval = serverAliveInterval
 		}
@@ -549,6 +569,7 @@ func handleStealthBackupInit(profile string, args []string) {
 			PartialDir:          strings.TrimSpace(partialDir),
 			MaxAttempts:         maxAttempts,
 			Timeout:             timeoutSec,
+			NoProgressTimeout:   noProgressTimeout,
 			ServerAliveInterval: serverAliveInterval,
 			ServerAliveCountMax: serverAliveCountMax,
 			Excludes:            excludes,
@@ -580,6 +601,7 @@ func handleStealthBackupBatch(profile string, args []string) {
 		fmt.Println("  sec backup batch list")
 		fmt.Println("  sec backup batch show <name>")
 		fmt.Println("  sec backup batch run <name> [<folder-filter>] [--max-attempts <n>] [--dry-run] [--verbose] [--log-file <path>] [--tofu]")
+		fmt.Println("  sec backup batch run <name> [<folder-filter>] [--max-attempts <n>] [--timeout <sec>] [--no-progress-timeout <dur>] [--dry-run] [--verbose] [--log-file <path>] [--tofu]")
 		return
 	}
 	switch args[0] {
@@ -873,6 +895,11 @@ func handleStealthBackupShow(profile string, args []string) {
 	fmt.Printf("  Partial Dir:    %s\n", manifest.PartialDir)
 	if manifest.Timeout > 0 {
 		fmt.Printf("  Rsync Timeout:  %ds\n", manifest.Timeout)
+	}
+	if npDur, npErr := manifest.EffectiveNoProgressTimeout(); npErr == nil && npDur > 0 {
+		fmt.Printf("  No-Progress:    %s\n", npDur)
+	} else {
+		fmt.Printf("  No-Progress:    (disabled)\n")
 	}
 	jobSAI := manifest.ServerAliveInterval
 	if jobSAI == 0 {
@@ -1439,6 +1466,9 @@ func buildLocalStealthRsyncArgs(manifest store.BackupManifest, selfExe string, d
 	args := []string{shortFlags}
 	if !verbose {
 		args = append(args, "--partial", "--stats")
+		if npDur, npErr := manifest.EffectiveNoProgressTimeout(); npErr == nil && npDur > 0 {
+			args = append(args, "--info=name0,flist2,progress2")
+		}
 	}
 	if effTimeout := activeFolder.EffectiveTimeout(manifest.Timeout); effTimeout > 0 {
 		args = append(args, fmt.Sprintf("--timeout=%d", effTimeout))
@@ -1696,13 +1726,21 @@ type rsyncStdoutStatsWriter struct {
 	transferredFiles  int
 	totalFiles        int
 	skippedNonRegular int
+	tracker           *backupProgressTracker
 }
 
-func newRsyncStdoutStatsWriter(dst io.Writer, verbose bool) *rsyncStdoutStatsWriter {
-	return &rsyncStdoutStatsWriter{dst: dst, verbose: verbose}
+func newRsyncStdoutStatsWriter(dst io.Writer, verbose bool, trackers ...*backupProgressTracker) *rsyncStdoutStatsWriter {
+	var tr *backupProgressTracker
+	if len(trackers) > 0 {
+		tr = trackers[0]
+	}
+	return &rsyncStdoutStatsWriter{dst: dst, verbose: verbose, tracker: tr}
 }
 
 func (w *rsyncStdoutStatsWriter) parseStatsLine(line string) {
+	if w.tracker != nil {
+		w.tracker.RecordProgressLine(line)
+	}
 	trimmed := strings.TrimSpace(line)
 	lower := strings.ToLower(trimmed)
 	if strings.HasPrefix(lower, "skipping non-regular file") {
@@ -1735,7 +1773,7 @@ func (w *rsyncStdoutStatsWriter) Write(p []byte) (int, error) {
 	}
 	w.buf = append(w.buf, p...)
 	for {
-		idx := strings.IndexByte(string(w.buf), '\n')
+		idx := strings.IndexAny(string(w.buf), "\r\n")
 		if idx == -1 {
 			break
 		}
@@ -1974,7 +2012,7 @@ func runStealthBackupFoldersWithOutput(
 				succeeded = true
 				break
 			}
-			if isNonRetryableBackupError(lastErr) {
+			if isWatchdogAbortError(lastErr) || isNonRetryableBackupError(lastErr) {
 				break
 			}
 
@@ -2004,9 +2042,17 @@ func runStealthBackupFoldersWithOutput(
 			fmt.Fprintf(out, "[%d/%d] alias=%s status=%s transferred=%d skipped_non_regular=%d exit=%d\n",
 				idx+1, len(selectedFolders), folderAlias, statusLabel, lastStats.Transferred, lastStats.SkippedNonRegular, lastStats.ExitCode)
 		} else {
-			fmt.Fprintf(errOut, "[%d/%d] alias=%s status=failed attempts=%d transferred=%d skipped_non_regular=%d exit=%d error=%v\n",
-				idx+1, len(selectedFolders), folderAlias, attemptsRun, lastStats.Transferred, lastStats.SkippedNonRegular, lastStats.ExitCode, lastErr)
+			statusLabel := "failed"
+			if isWatchdogAbortError(lastErr) {
+				statusLabel = "failed(suspected-stall)"
+			}
+			fmt.Fprintf(errOut, "[%d/%d] alias=%s status=%s attempts=%d transferred=%d skipped_non_regular=%d exit=%d error=%v\n",
+				idx+1, len(selectedFolders), folderAlias, statusLabel, attemptsRun, lastStats.Transferred, lastStats.SkippedNonRegular, lastStats.ExitCode, lastErr)
 			failedFolders = append(failedFolders, folderAlias)
+			if isWatchdogAbortError(lastErr) {
+				fmt.Fprintf(errOut, "[✗] Aborting remaining folders in job %q after suspected stall on alias=%s.\n", manifest.Name, folderAlias)
+				break
+			}
 		}
 	}
 
@@ -2197,6 +2243,8 @@ func handleStealthBackupRun(profile string, args []string) {
 
 func executeStealthBackupRun(profile string, args []string) error {
 	var rawName, folderFilter, logFilePath string
+	var noProgressOverride time.Duration
+	noProgressOverrideSet := false
 	dryRun := false
 	localVerbose := false
 	noTrace := true
@@ -2212,6 +2260,7 @@ func executeStealthBackupRun(profile string, args []string) error {
 		a := args[i]
 		if a == "--help" || a == "-h" {
 			fmt.Println("Usage: sec backup run <name> [<folder-filter>] [--max-attempts <n>] [--timeout <sec>] [--server-alive-interval <sec>] [--server-alive-count-max <count>] [--dry-run] [--verbose] [--log-file <path>] [--no-trace] [--trace] [--tofu] [--insecure]")
+			fmt.Println("Usage: sec backup run <name> [<folder-filter>] [--max-attempts <n>] [--timeout <sec>] [--no-progress-timeout <dur>] [--server-alive-interval <sec>] [--server-alive-count-max <count>] [--dry-run] [--verbose] [--log-file <path>] [--no-trace] [--trace] [--tofu] [--insecure]")
 			return nil
 		}
 		switch {
@@ -2224,6 +2273,28 @@ func executeStealthBackupRun(profile string, args []string) error {
 			i++
 		case strings.HasPrefix(a, "--log-file="):
 			logFilePath = strings.TrimPrefix(a, "--log-file=")
+		case a == "--no-progress-timeout" && i+1 < len(args):
+			d, err := store.ParseNoProgressTimeout(args[i+1])
+			if err != nil {
+				return &stealthBackupCliError{
+					Code: "INVALID_ARGUMENTS",
+					Err:  err,
+				}
+			}
+			noProgressOverride = d
+			noProgressOverrideSet = true
+			i++
+		case strings.HasPrefix(a, "--no-progress-timeout="):
+			npStr := strings.TrimPrefix(a, "--no-progress-timeout=")
+			d, err := store.ParseNoProgressTimeout(npStr)
+			if err != nil {
+				return &stealthBackupCliError{
+					Code: "INVALID_ARGUMENTS",
+					Err:  err,
+				}
+			}
+			noProgressOverride = d
+			noProgressOverrideSet = true
 		case a == "--no-trace":
 			noTrace = true
 		case a == "--trace":
@@ -2368,6 +2439,22 @@ func executeStealthBackupRun(profile string, args []string) error {
 		manifest.ServerAliveCountMax = serverAliveCountMaxOverride
 	}
 
+	effectiveNoProgressTimeout, npErr := manifest.EffectiveNoProgressTimeout()
+	if npErr != nil {
+		return &stealthBackupCliError{
+			Code: "INVALID_BACKUP_MANIFEST",
+			Err:  npErr,
+		}
+	}
+	if noProgressOverrideSet {
+		effectiveNoProgressTimeout = noProgressOverride
+		if noProgressOverride > 0 {
+			manifest.NoProgressTimeout = noProgressOverride.String()
+		} else {
+			manifest.NoProgressTimeout = ""
+		}
+	}
+
 	if len(manifest.Folders) == 0 {
 		return &stealthBackupCliError{
 			Code:        "EMPTY_BACKUP_FOLDERS",
@@ -2404,8 +2491,46 @@ func executeStealthBackupRun(profile string, args []string) error {
 		}
 	}
 	if rsyncIsOpenrsync(localRsyncBin) {
+		if effectiveNoProgressTimeout > 0 {
+			return &stealthBackupCliError{
+				Code:        "WATCHDOG_UNSUPPORTED_RSYNC",
+				Err:         fmt.Errorf("no-progress watchdog (%s) cannot run with macOS openrsync (%s): openrsync (protocol 29) provides no reliable scan-phase progress signal", effectiveNoProgressTimeout, localRsyncBin),
+				Remediation: "Install GNU rsync ('brew install rsync') or disable the watchdog with --no-progress-timeout 0",
+			}
+		}
 		fmt.Fprintf(os.Stderr, "[!] Note: using macOS openrsync (%s); install GNU rsync ('brew install rsync') for full remote --log-file support.\n", localRsyncBin)
 	}
+
+	// Acquire atomic per-(profile, job) overlap guard for EVERY backup run (watchdog on or off).
+	if !isBackupGuardPlatformSupported() {
+		return &stealthBackupCliError{
+			Code: "BACKUP_GUARD_UNSUPPORTED_PLATFORM",
+			Err:  fmt.Errorf("atomic backup overlap guard and kernel process-identity verification are not supported on this platform"),
+		}
+	}
+	cfgDir, cfgErr := config.GetConfigDir()
+	if cfgErr != nil {
+		return &stealthBackupCliError{
+			Code: "CONFIG_DIR_ERROR",
+			Err:  fmt.Errorf("failed to resolve config directory for backup overlap guard: %w", cfgErr),
+		}
+	}
+	guardDir := filepath.Join(cfgDir, "backup-guards")
+	runGuard, guardErr := acquireBackupRunGuard(guardDir, profile, manifest.Name.String(), nil)
+	if guardErr != nil {
+		return &stealthBackupCliError{
+			Code: "BACKUP_OVERLAP_BLOCKED",
+			Err:  guardErr,
+		}
+	}
+	guardTerminationUnconfirmed := false
+	defer func() {
+		if guardTerminationUnconfirmed {
+			runGuard.ReleaseLockOnly()
+		} else {
+			_ = runGuard.ConfirmExitedAndClear()
+		}
+	}()
 
 	selfExe, err := os.Executable()
 	if err != nil {
@@ -2514,6 +2639,8 @@ func executeStealthBackupRun(profile string, args []string) error {
 			fmt.Fprintf(errWriter, "[VERBOSE] Remote Dest: %s | History: %s | Log: %s\n", remoteDest, remoteHistoryDir, remoteLogPath)
 		}
 
+		progressTracker := newBackupProgressTracker()
+
 		sshRunner := func(remoteCmd string, stdin io.Reader, stdout, stderr io.Writer) error {
 			session, sErr := sshClient.NewSession()
 			if sErr != nil {
@@ -2526,21 +2653,23 @@ func executeStealthBackupRun(profile string, args []string) error {
 				return fmt.Errorf("failed to create SSH session stdin pipe: %w", pErr)
 			}
 			session.Stdout = stdout
+			session.Stdout = &countingBridgeWriter{w: stdout, tracker: progressTracker}
 			session.Stderr = stderr
 
 			if startErr := session.Start(remoteCmd); startErr != nil {
 				return fmt.Errorf("failed to start remote rsync server: %w", startErr)
 			}
 
+			countingIn := &countingBridgeReader{r: stdin, tracker: progressTracker}
 			go func() {
-				_, _ = io.Copy(sessStdin, stdin)
+				_, _ = io.Copy(sessStdin, countingIn)
 				_ = sessStdin.Close()
 			}()
 
 			return session.Wait()
 		}
 
-		stdoutFilter := newRsyncStdoutStatsWriter(outWriter, effectiveVerbose)
+		stdoutFilter := newRsyncStdoutStatsWriter(outWriter, effectiveVerbose, progressTracker)
 		stderrFilter := newRsyncStderrFilterWriter(errWriter, effectiveVerbose)
 
 		sockPath, waitBridgeErr, cleanupBridge, bErr := startStealthStdioBridge(manifest, folder, now, sshRunner, stderrFilter)
@@ -2565,11 +2694,39 @@ func executeStealthBackupRun(profile string, args []string) error {
 		cmd.Dir = localDir
 		cmd.ExtraFiles = []*os.File{excludePipeRead}
 		cmd.Env = buildLocalStealthRsyncEnv(manifest, selfExe, sockPath)
-		cmd.Stdout = stdoutFilter
-		cmd.Stderr = stderrFilter
 
-		runErr := cmd.Run()
+		runErr, abortedErr := runCommandWithWatchdog(
+			cmd,
+			stdoutFilter,
+			stderrFilter,
+			runGuard,
+			progressTracker,
+			effectiveNoProgressTimeout,
+			folderAlias,
+			func() {
+				cleanupBridge()
+				if sshClient != nil {
+					_ = sshClient.Close()
+					sshClient = nil
+				}
+			},
+		)
 		_ = excludePipeRead.Close()
+
+		if abortedErr != nil {
+			cleanupBridge()
+			if !abortedErr.TerminationConfirmed {
+				guardTerminationUnconfirmed = true
+			}
+			transferred, _, stdoutSkipped := stdoutFilter.Flush()
+			stderrSkipped := stderrFilter.Flush()
+			return backupFolderRunStats{
+				Transferred:       transferred,
+				SkippedNonRegular: stdoutSkipped + stderrSkipped,
+				ExitCode:          124,
+			}, abortedErr
+		}
+
 		bridgeErr := waitBridgeErr()
 		cleanupBridge()
 

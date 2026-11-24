@@ -1,11 +1,14 @@
 package store
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 )
 
@@ -377,6 +380,7 @@ type BackupManifest struct {
 	PartialDir          string             `json:"partial_dir,omitempty"`
 	MaxAttempts         int                `json:"max_attempts,omitempty"`
 	Timeout             int                `json:"timeout,omitempty"`
+	NoProgressTimeout   string             `json:"no_progress_timeout,omitempty"`
 	LegacyRsyncTimeout  int                `json:"rsync_timeout,omitempty"`
 	ServerAliveInterval int                `json:"server_alive_interval,omitempty"`
 	ServerAliveCountMax int                `json:"server_alive_count_max,omitempty"`
@@ -384,6 +388,76 @@ type BackupManifest struct {
 	Excludes            []string           `json:"excludes,omitempty"`
 	Folders             []BackupFolderSpec `json:"folders"`
 	LegacyJobs          []BackupFolderSpec `json:"jobs,omitempty"`
+}
+
+// UnmarshalJSON decodes a BackupManifest while accepting no_progress_timeout as either
+// a JSON string (e.g. "30m", "900s", "1800", "0", "") or a JSON integer number of seconds
+// (e.g. 1800, 0, -5), preserving the raw value for Validate() to enforce domain constraints.
+func (m *BackupManifest) UnmarshalJSON(data []byte) error {
+	type alias BackupManifest
+	aux := struct {
+		*alias
+		NoProgressTimeout json.RawMessage `json:"no_progress_timeout,omitempty"`
+	}{
+		alias: (*alias)(m),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	raw := strings.TrimSpace(string(aux.NoProgressTimeout))
+	if raw == "" || raw == "null" {
+		m.NoProgressTimeout = ""
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(aux.NoProgressTimeout, &s); err == nil {
+		m.NoProgressTimeout = s
+		return nil
+	}
+	var n int64
+	if err := json.Unmarshal(aux.NoProgressTimeout, &n); err == nil {
+		m.NoProgressTimeout = strconv.FormatInt(n, 10)
+		return nil
+	}
+	return fmt.Errorf("invalid no_progress_timeout: expected duration string or integer seconds, got %s", raw)
+}
+
+// ParseNoProgressTimeout parses a manifest or CLI no-progress watchdog timeout string.
+// Empty string, "0", or "0s" (and other zero durations) return 0, nil (watchdog disabled).
+// Plain integer strings are interpreted as seconds; otherwise Go time.ParseDuration syntax is used.
+func ParseNoProgressTimeout(raw string) (time.Duration, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || trimmed == "0" || trimmed == "0s" {
+		return 0, nil
+	}
+	if secs, err := strconv.ParseInt(trimmed, 10, 64); err == nil {
+		if secs < 0 {
+			return 0, fmt.Errorf("no_progress_timeout cannot be negative: %q", trimmed)
+		}
+		if secs == 0 {
+			return 0, nil
+		}
+		if secs > math.MaxInt64/int64(time.Second) {
+			return 0, fmt.Errorf("invalid no_progress_timeout %q: duration overflow", trimmed)
+		}
+		return time.Duration(secs) * time.Second, nil
+	}
+	d, err := time.ParseDuration(trimmed)
+	if err != nil {
+		return 0, fmt.Errorf("invalid no_progress_timeout %q: %w", trimmed, err)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("no_progress_timeout cannot be negative: %q", trimmed)
+	}
+	if d == 0 {
+		return 0, nil
+	}
+	return d, nil
+}
+
+// EffectiveNoProgressTimeout returns the parsed no-progress watchdog timeout duration (0 means disabled).
+func (m BackupManifest) EffectiveNoProgressTimeout() (time.Duration, error) {
+	return ParseNoProgressTimeout(m.NoProgressTimeout)
 }
 
 // ApplyDefaults populates default rsync settings on the manifest when unset.
@@ -474,6 +548,9 @@ func (m BackupManifest) Validate() error {
 	}
 	if m.Timeout < 0 || m.ServerAliveInterval < 0 || m.ServerAliveCountMax < 0 {
 		return fmt.Errorf("%w: timeout and server_alive_* cannot be negative", ErrInvalidBackupManifest)
+	}
+	if _, err := ParseNoProgressTimeout(m.NoProgressTimeout); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidBackupManifest, err)
 	}
 	for i, folder := range m.Folders {
 		if err := folder.Validate(); err != nil {

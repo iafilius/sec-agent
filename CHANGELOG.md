@@ -5,6 +5,27 @@ All notable changes to `sec-agent` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v2.21.0] - 2026-11-24
+
+### Added & Enhanced
+- **Opt-In No-Progress Stall Watchdog (`no_progress_timeout` / `--no-progress-timeout`)**:
+  - Disabled by default (`""` / `0`) for all existing and new backup manifests; configurable per job (`no_progress_timeout: "30m"`) or per run (`--no-progress-timeout <duration>`, `--no-progress-timeout 0` to disable), completely separate from `rsync --timeout` and SSH keepalives. Invalid or negative values fail fast before SSH dial.
+  - Measures inactivity monotonically using GNU `rsync` `--info=name0,flist2,progress2` (zero filenames) + `ssh-stdio` channel payload bytes across both scan and transfer phases, ignoring SSH keepalives and repeated `stderr` errors. Fails closed at startup if enabled with macOS `openrsync` (protocol 29, which lacks scan-phase signals) or on unsupported platforms.
+  - On suspected stall: marks the current folder and entire job failed without retrying or advancing, closes the SSH bridge, runs a conservative bounded shutdown (`SIGTERM` + `15s` grace → `SIGKILL` + `10s` confirm), handles completion-vs-timeout races cleanly, and honestly distinguishes **confirmed termination** vs. **termination requested, NOT confirmed stopped** (e.g. macOS `U` state in kernel I/O).
+- **Atomic Per-Job Overlap Prevention & Process Identity Guard (`~/.config/sec-agent/backup-guards/`)**:
+  - Active for **every** `sec backup run` / `sec backup batch run` (watchdog on or off) using hashed `<sha256>` filenames (`0700` dir / `0600` files, zero sensitive metadata), exclusive `unix.Flock`, native macOS `kern.boottime` (`unix.SysctlTimeval`) and `kern.proc.pid` (`unix.SysctlKinfoProc` `P_starttime`/`P_comm`), covering `launch-pending` crash windows, PID reuse, system reboots, uncertain identity (fail-closed), and concurrent independent jobs.
+- **Security & Dependency Upgrades (Zero-Vulnerability Release Gate)**:
+  - Upgraded `golang.org/x/crypto` `v0.54.0` → `v0.59.0` (resolving `GO-2026-6354` and `GO-2026-6355`), `golang.org/x/sys` → `v0.50.0`, and `golang.org/x/term` → `v0.48.0`.
+  - Made `govulncheck ./...` in `Makefile` `sec-check` fail-closed and switched `Makefile` builds from `cmd/sec-agent/*.go` to `./cmd/sec-agent` so `//go:build` platform constraints are strictly honored.
+
+## [v2.20.0] - 2026-11-22
+
+### Changed (**BREAKING**) & Added
+- **Privacy-Preserving Default Backup Output (`backup-output-privacy`)**:
+  - **BREAKING**: `sec backup run` and `sec backup batch run` now run local `rsync` with `-rt --partial --stats` (no `-v`, no `--progress`) and pipe local `stdout`/`stderr` plus remote SSH bridge `session.Stderr` through in-process Go filters, emitting only a concise per-folder summary (`alias`, `status`, `transferred`, `skipped_non_regular`, `exit`) with zero filenames, paths, hosts, or usernames. Scripts requiring per-file lines must pass `--verbose`.
+  - Redacts filesystem paths (`<path>`) and host/user tokens (`<host>`) on `rsync` and SSH error lines while preserving error classes.
+  - Gates per-file output and `--progress` (`-rtvP`) strictly behind `--verbose` (with an upfront privacy warning on `stderr`), adds opt-in hardened local `--log-file <path>` (`0700` dir, `0600` file, runtime tmpfs/cleanup warning, zero default log file), updates Zsh/Bash/Fish completions, and adds an AI-agent privacy directive in `SKILL.md`.
+
 ## [v2.19.7] - 2026-11-19
 
 ### Enhanced & Tested

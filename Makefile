@@ -1,4 +1,4 @@
-VERSION := v2.20.0
+VERSION := v2.21.0
 BUILD_DATE := $(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
 LDFLAGS := -ldflags "-X main.Version=$(VERSION) -X main.BuildDate=$(BUILD_DATE)"
 SDKROOT ?= $(shell if [ -d /Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk ]; then echo /Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk; elif [ -d /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk ]; then echo /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk; else xcrun --show-sdk-path; fi)
@@ -9,7 +9,7 @@ export SDKROOT
 all: build codesign app
 
 build:
-	go build $(LDFLAGS) -o sec-agent cmd/sec-agent/*.go
+	go build $(LDFLAGS) -o sec-agent ./cmd/sec-agent
 	ln -sf sec-agent sec
 
 codesign: build
@@ -60,7 +60,7 @@ install-app: gui-app
 package:
 	@echo "=== Building Release Binaries & Tarballs for $(VERSION) ==="
 	rm -rf dist && mkdir -p dist
-	go build $(LDFLAGS) -o dist/sec-agent cmd/sec-agent/*.go
+	go build $(LDFLAGS) -o dist/sec-agent ./cmd/sec-agent
 	codesign --force --options runtime --sign - dist/sec-agent
 	cp README.md dist/README.md
 	tar -czf dist/sec-agent_$(VERSION)_darwin_arm64.tar.gz -C dist sec-agent README.md
@@ -90,7 +90,7 @@ sec-check: privacy-check
 	@echo "=== Running Go Vet ==="
 	go vet ./...
 	@echo "=== Running Go Vulncheck ==="
-	@if [ -f $$HOME/go/bin/govulncheck ]; then $$HOME/go/bin/govulncheck ./... || true; else govulncheck ./... || true; fi
+	@if [ -f $$HOME/go/bin/govulncheck ]; then $$HOME/go/bin/govulncheck ./...; else govulncheck ./...; fi
 	@echo "=== Running Go AST Security Checker (gosec) ==="
 	@if [ -f $$HOME/go/bin/gosec ]; then $$HOME/go/bin/gosec -exclude=G115 ./...; else gosec -exclude=G115 ./...; fi
 
