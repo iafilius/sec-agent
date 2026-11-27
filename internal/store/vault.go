@@ -93,8 +93,6 @@ func ListVaultFiles() ([]VaultFileInfo, error) {
 	return vaults, nil
 }
 
-
-
 const (
 	SchemaV1 = "1.0" // Legacy: raw AES-GCM ciphertext managed by keychain
 	SchemaV2 = "2.0" // Dual-Slot: JSON envelope with Slot0 (Touch ID) + Slot1 (BIP39 seed)
@@ -334,6 +332,7 @@ func WriteVaultEnvelope(path string, env *VaultEnvelope) error {
 				}
 				metaBytes, _ := json.MarshalIndent(meta, "", "  ")
 				_ = os.WriteFile(snapMetaPath, metaBytes, 0600)
+				_, _ = PruneSnapshots(prof, EffectiveMaxSnapshots())
 			}
 		}
 	}

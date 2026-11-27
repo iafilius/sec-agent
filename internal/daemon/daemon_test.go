@@ -3,9 +3,11 @@ package daemon
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -17,7 +19,20 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	for i, arg := range os.Args {
+	args := os.Args
+	if len(args) == 3 && args[1] == "--cmd-fd" {
+		if fd, err := strconv.Atoi(args[2]); err == nil && fd >= 3 {
+			if f := os.NewFile(uintptr(fd), "cmd-fd"); f != nil {
+				raw, _ := io.ReadAll(f)
+				_ = f.Close()
+				var parsed []string
+				if json.Unmarshal(raw, &parsed) == nil && len(parsed) > 0 {
+					args = append([]string{args[0]}, parsed...)
+				}
+			}
+		}
+	}
+	for i, arg := range args {
 		if arg == "daemon" {
 			if os.Getenv("SEC_TEST_REEXEC_HANG") == "1" {
 				time.Sleep(10 * time.Second)
@@ -25,8 +40,8 @@ func TestMain(m *testing.M) {
 			}
 			prof := os.Getenv("SEC_PROFILE")
 			for j := 0; j < i; j++ {
-				if os.Args[j] == "--profile" && j+1 < len(os.Args) {
-					prof = os.Args[j+1]
+				if args[j] == "--profile" && j+1 < len(args) {
+					prof = args[j+1]
 				}
 			}
 			if prof == "" {
@@ -40,7 +55,20 @@ func TestMain(m *testing.M) {
 			return
 		}
 	}
-	os.Exit(m.Run())
+	// Isolate daemon unit tests from the operator's real ~/.config/sec-agent directory
+	// so tests never accumulate snapshots or sockets on the workstation.
+	var cleanupTmpCfg string
+	if os.Getenv("SEC_CONFIG_DIR") == "" {
+		if tmpCfg, err := os.MkdirTemp("/tmp", "sec-dtest-"); err == nil {
+			_ = os.Setenv("SEC_CONFIG_DIR", tmpCfg)
+			cleanupTmpCfg = tmpCfg
+		}
+	}
+	code := m.Run()
+	if cleanupTmpCfg != "" {
+		_ = os.RemoveAll(cleanupTmpCfg)
+	}
+	os.Exit(code)
 }
 
 func TestDaemonConcurrency(t *testing.T) {

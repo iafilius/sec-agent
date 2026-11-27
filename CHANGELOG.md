@@ -5,6 +5,30 @@ All notable changes to `sec-agent` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v2.22.0] - 2026-11-25
+
+### Added & Enhanced
+- **Opaque CLI Invocation (`sec -` and `sec --cmd-fd <n>`) & Hidden Daemon Arguments**:
+  - Added `sec -` (command vector via `stdin`) and `sec --cmd-fd <n>` (inherited FD `>= 3`, keeping `stdin` free for TTYs and `set --stdin`), accepting lossless JSON string arrays (`["--profile", "prod", "status"]`) and POSIX shell-quoted lines, capped at `64 KiB` with immediate raw-buffer zeroing, recursion rejection, and exit code `2` on invalid payloads.
+  - Updated background daemon startup (`ensureDaemonRunning` → `--cmd-fd 3`) and hot-reload (`reexec` → `--cmd-fd 5`) to pass daemon arguments over anonymous pipes and omit `SEC_PROFILE` from `cmd.Env` so `ps aux` and `ps eww` never reveal which profile or session is unlocked, while `sec daemon list` and `sec doctor` continue to discover and enrich opaque daemons via private `0600` PID lockfiles.
+  - Added `--cmd-fd` to Zsh, Bash, and Fish completions and added AI-agent process-table privacy instructions + residual `sh -c` trace guidance in `README.md` and `cmd/sec-agent/SKILL.md`.
+- **Local Direct `rsync` Backup Transport (`--local` / `--dest-base`) & Exclusion-Candidate Error Monitor (`--suggest-excludes`)**:
+  - Added strongly-typed `BackupTransport` (`"ssh"` default | `"local"`) and `--dest-base` / `dest_base` alias so vault-encrypted multi-folder backup jobs can target locally attached disks without requiring `--target` or SSH keys, preserving full SSH parity (`<Prefix>-History/<YYYY-MM-DD>` via `--backup --backup-dir`, destination `rsync_<slug>_<datetime>.log`, `/dev/fd/3` excludes, overlap guard, privacy-preserving output, and optional `--no-progress-timeout` watchdog).
+  - Added fail-closed macOS `/Volumes/<MountName>` `statfs` `Fsid` verification before directory creation or `rsync` execution so unmounted external drives abort immediately instead of writing to a local stub folder on the boot SSD.
+  - Made per-folder excludes additive (merging job-level defaults `.DS_Store`, `.Trash*`, `._*` with folder-level `--exclude` patterns) and updated `sec backup add-folder` to merge new excludes into existing folders without overwriting other settings.
+  - Extended `rsync` stderr monitoring across both local and SSH runs to count permission/TCC/open errors privately by default and print deduplicated relative paths + ready-to-run `sec backup add-folder <job> <folder> --exclude "..."` commands when `--suggest-excludes` or `--verbose` is passed.
+  - Runs direct local `rsync` inside an ephemeral mode-`0700` staging directory (`/tmp/s<rand>/`) using opaque single-letter symlinks (`s/`, `d/`, `<stageDir>/h`, `l`) so zero volume names, folder names, history dates, or log filenames appear in `ps aux`/`pstree`.
+- **Remote-to-Local SSH Pull Backup (`transport: "ssh-pull"` / `--pull`)**:
+  - Completes the 3-mode backup matrix (`ssh` push, `local`, and `ssh-pull`) via `sec backup init <name> --pull --target <ssh-target> --source-base ~ --dest-base /Volumes/<Disk>/<Host> --folder <folder>`.
+  - Combines the encrypted pure-Go `ssh-stdio` bridge (`s:t/ d/`) with the ephemeral `0700` local symlink stage directory (`d/`, `<stageDir>/h`, `l`) so zero remote hostnames, usernames, remote paths, local volume names, folder names, history dates, or log filenames appear in `ps aux`/`pstree`.
+  - Runs strictly read-only on the remote host (`rsync --server --sender`), defaults `remote_rsync_bin` to `"rsync"` for Linux & macOS compatibility, safely expands remote `~/` via `"$HOME/"`, stores dated `-History/<YYYY-MM-DD>` and `rsync_<slug>_*.log` locally, and enforces fail-closed `/Volumes` mount safety before dialing SSH.
+- **Automatic Vault Snapshot Retention (`DefaultMaxSnapshots = 25`), `sec snapshot prune`, & Hermetic Test Isolation**:
+  - Automatically prunes older vault snapshots per profile on write (`WriteVaultEnvelope` and `CreateSnapshot`), keeping the newest `25` snapshots by default (configurable via `SEC_MAX_SNAPSHOTS`) and removing orphaned `.meta.json` files.
+  - Added `sec snapshot prune [--keep <n>] [--all]` (with Zsh/Bash/Fish completions) to reclaim disk space across all profiles.
+  - Isolated `internal/daemon` and `cmd/sec-agent` `TestMain` suites to temporary `SEC_CONFIG_DIR` paths so `go test ./...` can never leak test profiles or snapshots into `~/.config/sec-agent/`.
+- **Internal Refactoring**:
+  - Split `cmd/sec-agent/cmd_backup.go` (~2,750 lines) into 5 cohesive modules (`cmd_backup.go`, `backup_output_privacy.go`, `backup_transport.go`, `backup_manifest_cli.go`, `backup_runner.go`) plus `backup_mount_darwin.go` / `backup_mount_unsupported.go`.
+
 ## [v2.21.0] - 2026-11-24
 
 ### Added & Enhanced

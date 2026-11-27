@@ -148,7 +148,7 @@ func TestDaemonSessionRemotePairingDoesNotBlockAccess(t *testing.T) {
 	}
 
 	// A normal, non-hijacked query must succeed even though remotepairingd is running.
-	queryCmd := exec.Command("./sec_remotepairing_bin", "get", "test/key", "--profile", profile)
+	queryCmd := exec.Command("./sec_remotepairing_bin", "get", "test/key", "--raw", "--profile", profile)
 	queryCmd.Env = append(os.Environ(), "SEC_SESSION_TOKEN="+token)
 	out, err := queryCmd.CombinedOutput()
 	if err != nil {

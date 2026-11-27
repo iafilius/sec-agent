@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -19,13 +20,30 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if len(os.Args) >= 2 && (os.Args[1] == "--cmd-fd" || strings.HasPrefix(os.Args[1], "--cmd-fd=") || os.Args[1] == "-") {
+		main()
+		return
+	}
 	for _, arg := range os.Args {
 		if arg == "daemon" {
 			main()
 			return
 		}
 	}
-	os.Exit(m.Run())
+	// Isolate CLI unit tests from the operator's real ~/.config/sec-agent directory
+	// so tests never leak test profiles or snapshots into the workstation vault.
+	var cleanupTmpCfg string
+	if os.Getenv("SEC_CONFIG_DIR") == "" {
+		if tmpCfg, err := os.MkdirTemp("/tmp", "sec-ctest-"); err == nil {
+			_ = os.Setenv("SEC_CONFIG_DIR", tmpCfg)
+			cleanupTmpCfg = tmpCfg
+		}
+	}
+	code := m.Run()
+	if cleanupTmpCfg != "" {
+		_ = os.RemoveAll(cleanupTmpCfg)
+	}
+	os.Exit(code)
 }
 
 func TestMainIntegration(t *testing.T) {
@@ -1849,12 +1867,17 @@ func TestEnsureDaemonRunningEvictsOutdatedDaemonOnUpgrade(t *testing.T) {
 		t.Errorf("expected restarted daemon to report version %s, got:\n%s", Version, string(statusOut))
 	}
 
-	// Clean up the spawned replacement daemon
+	// Clean up the spawned replacement daemon via its PID lockfile (daemon argv is opaque --cmd-fd 3)
 	lockCmd := exec.Command(binPath, "lock", "--profile", profile)
 	lockCmd.Env = append(os.Environ(), "SEC_CONFIG_DIR="+tmpCfgDir, "SEC_TEST_MODE=1")
 	_ = lockCmd.Run()
-	_ = exec.Command("pkill", "-f", binPath+" --profile "+profile+" daemon").Run()
+	t.Setenv("SEC_CONFIG_DIR", tmpCfgDir)
+	if pidPath, err := config.GetPIDFilePath(profile); err == nil {
+		if pidData, err := os.ReadFile(pidPath); err == nil {
+			var info daemon.PIDLockInfo
+			if json.Unmarshal(pidData, &info) == nil && info.PID > 0 {
+				_ = syscall.Kill(info.PID, syscall.SIGTERM)
+			}
+		}
+	}
 }
-
-
-

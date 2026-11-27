@@ -1,10 +1,10 @@
 ---
 name: sec-agent-integration
 description: Use the sec-agent CLI utility to start background daemons, store secrets, run applications in isolated environments, migrate dotenv files, install AI skills, inspect snapshots, and manage backups.
-version: v2.17.0
+version: v2.22.0
 ---
 
-# sec-agent Secrets Management Integration (v2.17.0)
+# sec-agent Secrets Management Integration (v2.22.0)
 
 This skill enables AI coding agents and autonomous assistants to use the `sec-agent` CLI tool (v1.9.4+) to securely retrieve credentials, run application build/test/terraform pipelines in isolated process environments, migrate dotenv configuration files, install integration skills across IDEs, inspect point-in-time snapshots (`sec snapshot`), and manage KeePassXC `.kdbx` backups on macOS.
 
@@ -102,7 +102,7 @@ When `sec-agent` is updated on the workstation (e.g. via Homebrew or source rebu
 **CRITICAL RULE FOR AI ASSISTANTS**:
 1. **Dynamic Version Drift Detection**: When executing `sec status`, `sec status --quick`, or any CLI command, if the CLI output indicates:
    * An advisory upgrade notice (`[sec-agent] 💡 Active workspace AI skill instructions trail CLI version ... Run 'sec-agent skill update' to refresh.`), or
-   * A CLI version newer than this document's declared version (`v2.14.4`),
+   * A CLI version newer than this document's declared version (`v2.22.0`),
 2. **Immediate Update & Re-Read Obligation**:
    * Execute `sec-agent skill update` to refresh installed skills to the latest binary version.
    * Then **IMMEDIATELY INVOKE your file viewing tool** (e.g. `view_file`) on the installed skill path (such as `.agents/skills/sec-agent-integration/SKILL.md` or `~/.gemini/config/skills/sec-agent-integration/SKILL.md`) before taking further action. This purges stale cached instructions from the LLM conversation context and equips the agent with new commands, flags, and security rules.
@@ -757,7 +757,7 @@ sec stream --template "export APP_KEY='{{db/password}}' GLOBAL_CA='{{@global-sha
    * **`NEEDS_WORKSPACE_ADAPTATION` (Tier 2)**: Includes step-by-step `workspace_advice` to refactor hardcoded scripts, source literals, or static config files to consume `$ENV_VAR`, `--stdin-key`, `sec stream`, or `--temp-file`.
    * **`SEC_AGENT_EXTENSION_OPPORTUNITY` (Tier 3)**: Identifies rigid ecosystem files (e.g. `.netrc`, `.npmrc`, fixed-path configs) and emits `sec_agent_extension_idea` proposals for extending `sec-agent` itself.
 
-### 5.39. Zero-Trace Command Execution (`sec exec`)
+### 5.39. Zero-Trace Command Execution (`sec exec`) & Opaque CLI Invocation (`sec -` / `sec --cmd-fd`)
 Store and execute shell commands or multi-line scripts directly from the encrypted vault without leaving traces on the local host:
 ```bash
 # Store a command or script in exec/<name> inside the encrypted vault via stdin
@@ -774,6 +774,25 @@ sec exec daily-sync -- --dry-run --verbose
 ```
 * **In-Memory Stdin Pipe Execution**: `sec exec <name> [-- <args...>]` fetches `exec/<name>` from the unlocked daemon with `NoTrace: true` and streams the script directly into `/bin/sh -s -- <args...>` over an in-memory stdin pipe (`cmd.Stdin`).
 * **Zero Host Artifacts**: Nothing from the stored script body appears in `.zsh_history`, temporary files on disk, `ps aux` wrapper arguments, or `~/.config/sec-agent/audit.log` (and `secrets.enc` modification timestamps remain untouched during execution).
+
+#### Opaque CLI Invocation Protocol for AI Agents (`sec -` and `sec --cmd-fd <n>`)
+> [!IMPORTANT]
+> **AI Agent Process-Table Privacy Rule**: For sensitive or long-running `sec-agent` operations (such as `backup run`, `exec`, `ssh`, or targeted `--profile <name>` secret lookups), **prefer opaque invocation (`sec -` or `sec --cmd-fd 3`)** so `sec-agent`'s process entry in `ps aux` never leaks which operation, profile, key path, or backup job is running.
+
+```bash
+# Primary lossless format (JSON string array) via `exec sec - <<<'...'`:
+# Using `exec` replaces the outer `zsh -c`/`sh -c` process in-place so zero command text remains in `pstree`/`ps aux`!
+exec sec - <<<'["--profile", "prod", "backup", "run", "home-nas"]'
+
+# POSIX shell-quoted line fallback (when trimmed input does not start with `[`)
+exec sec - <<<'--profile work get "app/my secret key"'
+
+# Keep stdin (FD 0) free for TTYs or `set --stdin` using --cmd-fd 3
+printf 'secret-payload' | sec --cmd-fd 3 3<<<'["--profile","prod","set","api/token","--stdin"]'
+```
+* **Prefer `exec sec - <<<'[...]'` in Shell Runners (Zero Lingering `zsh -c` in `pstree`)**: Never use `printf '...' | sec -` for long-running operations like `backup run` or `ssh`, because the parent shell stays alive in `pstree` waiting for the pipeline. Always prefix with `exec sec - <<<'[...]'` so the shell replaces itself with `sec -` immediately (`<1ms`), or spawn `["sec", "-"]` directly via `execve` in Python/Go/Node.
+* **Hidden Background Daemon Identity**: Background daemons started by `sec open` and `--hot-reload` automatically launch via `--cmd-fd` without `SEC_PROFILE` in their environment, so `ps aux` / `ps eww` never expose which profile/session is unlocked.
+* **Unavoidable Residual-Trace Note**: Even with `exec sec - <<<'[...]'`, the brief shell invocation string still exists in the tool runner's own transcript/log before `execve` completes. Never place raw secret values inside that string—use `--cmd-fd 3` with piped secret stdin or vault references instead.
 
 ### 5.40. Stealth Multi-Folder `rsync` Backups (`sec backup`)
 Configure and run encrypted, zero-trace multi-folder `rsync` backups over `sec-agent`'s native pure-Go SSH transport without exposing folder names, remote volume paths, usernames, IP addresses, or SSH keepalive options in shell history or the local process table:
@@ -810,7 +829,31 @@ sec backup jobs
 sec backup run home-nas
 sec backup run home-nas "Photos - 2026" --max-attempts 5 --tofu
 sec backup batch run home-nas
+
+# Local direct rsync backup to an external disk (no SSH required, same dated -History & log layout)
+sec backup init dev-disk \
+  --local \
+  --local-base ~ \
+  --dest-base /Volumes/ExternalBackup/DevBackups \
+  --folder personal \
+  --folder work
+sec backup add-folder dev-disk work --exclude "archived-client/"
+sec backup run dev-disk --suggest-excludes
+
+# Remote-to-local SSH pull backup from a remote Linux/macOS host into a local volume (read-only remote, local -History & log)
+sec backup init remote-box \
+  --pull \
+  --target remote-linux \
+  --source-base ~ \
+  --dest-base /Volumes/ExternalBackup/RemoteBox \
+  --folder work
+exec sec - <<<'["backup","run","remote-box","--suggest-excludes"]'
 ```
+* **Local Direct `rsync` Transport (`--local` / `--dest-base`) & Exclusion Monitor (`--suggest-excludes`)**:
+  * Executes direct local `rsync` with SSH parity (`<Prefix>-History/<YYYY-MM-DD>` via `--backup --backup-dir`, destination `rsync_<slug>_<datetime>.log`, `/dev/fd/3` excludes, overlap guard, privacy-preserving output, and optional `--no-progress-timeout` watchdog).
+  * **Fail-Closed `/Volumes` Mount Check**: Verifies `/Volumes/<MountName>` has a distinct `statfs` `Fsid` from `/Volumes` before creating directories or running `rsync`, preventing accidental writes to an unmounted stub directory.
+  * **Additive Excludes & Exclusion-Candidate Monitor**: Folder-level excludes merge with job-level excludes (preserving `.DS_Store`, `.Trash*`, `._*`). Both local and SSH runs count permission/TCC/open errors privately by default; pass `--suggest-excludes` (or `--verbose`) when troubleshooting to print deduplicated relative paths and ready-to-run `sec backup add-folder <job> <folder> --exclude "..."` suggestions.
+  * **Zero Volume/Folder/Log Leakage in `ps aux` (Ephemeral `0700` Stage Dir)**: Direct local `rsync` runs inside an ephemeral mode-`0700` staging directory (`/tmp/s<rand>/`, removed on exit) using opaque single-letter symlinks (`s/`, `d/`, `<stageDir>/h`, `l`) so zero volume names, folder names, history dates, or log filenames appear in `ps aux`/`pstree`. Always invoke via `exec sec - <<<'[...]'` so the outer shell wrapper disappears from `pstree` in `<1ms`.
 * **The 6 Zero-Trace Guarantees**:
   1. **Zero `.zsh_history` Command/Path Exposure**: The operator or agent only runs `sec backup run <name>`, keeping sensitive folder names, IP addresses, and remote volume paths completely out of shell history.
   2. **Zero Local `ps aux` Exposure**: Local `rsync` executes inside working directory `.` (`local_base/<folder>`) with compact flags (`-rt --partial --stats` in normal mode; `-rtvP` / `-rtvPS` only when `--verbose` is passed), `--exclude-from=/dev/fd/3` (fed via an anonymous pipe, including default `.DS_Store`, `.Trash*`, and macOS AppleDouble `._*` exclusions), opaque target `. s:t`, and transport/partial-dir passed privately via `RSYNC_RSH` and `RSYNC_PARTIAL_DIR` in `cmd.Env`. No folder names, volume paths, history paths, usernames, IP addresses, or `-e` transport flags appear in `ps aux`; `sec-agent` intercepts and rewrites the remote `rsync --server` command over the encrypted Go SSH channel. *(Note on unavoidable residual `ps` tokens: generic flags without `rsync` env-var equivalents — such as `--modify-window`, `--timeout`, `--partial`, `--stats`, `--exclude-from=/dev/fd/3` — and `rsync`'s own `rsync --server ... . t` invocation of `$RSYNC_RSH` remain visible in `ps aux`, containing zero sensitive paths, hosts, or credentials.)*

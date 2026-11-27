@@ -1274,7 +1274,7 @@ func TestLoadStealthBackupManifestFallbackToBackupBatchPrefix(t *testing.T) {
 		"Timeout:     600s",
 		"SSH Alive:   interval=30s count_max=4",
 		"Sparse:      true",
-		"Excludes:    Library, Example, ._*",
+		"Excludes:    .DS_Store, .Trash*, ._*, Library, Example",
 	} {
 		if !strings.Contains(showOut, wantSub) {
 			t.Errorf("expected sec backup show output to contain %q, got:\n%s", wantSub, showOut)

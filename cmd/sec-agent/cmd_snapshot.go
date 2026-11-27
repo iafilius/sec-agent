@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 
 	"secure_secrets/internal/config"
@@ -31,11 +33,69 @@ func handleSnapshot(profile string, args []string) {
 		handleSnapshotCreate(profile, subArgs)
 	case "restore":
 		handleSnapshotRestore(profile, subArgs)
+	case "prune":
+		handleSnapshotPrune(profile, subArgs)
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown snapshot subcommand: %s\n", subCmd)
-		fmt.Fprintln(os.Stderr, "Usage: sec snapshot <list|create|restore> [args]")
+		fmt.Fprintln(os.Stderr, "Usage: sec snapshot <list|create|restore|prune> [args]")
 		os.Exit(1)
 	}
+}
+
+func handleSnapshotPrune(profile string, args []string) {
+	keep := store.EffectiveMaxSnapshots()
+	allProfiles := false
+
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--all" || a == "--all-profiles" || a == "-A":
+			allProfiles = true
+		case a == "--keep" && i+1 < len(args):
+			n, err := strconv.Atoi(args[i+1])
+			if err != nil || n <= 0 {
+				fail("INVALID_ARGUMENTS", fmt.Errorf("invalid --keep value %q (must be positive integer)", args[i+1]), "Example: sec snapshot prune --keep 25")
+			}
+			keep = n
+			i++
+		case strings.HasPrefix(a, "--keep="):
+			nStr := strings.TrimPrefix(a, "--keep=")
+			n, err := strconv.Atoi(nStr)
+			if err != nil || n <= 0 {
+				fail("INVALID_ARGUMENTS", fmt.Errorf("invalid --keep value %q (must be positive integer)", nStr), "Example: sec snapshot prune --keep 25")
+			}
+			keep = n
+		}
+	}
+
+	if allProfiles {
+		results, err := store.PruneAllSnapshots(keep)
+		if err != nil {
+			fail("SNAPSHOT_PRUNE_FAILED", err, "")
+		}
+		if len(results) == 0 {
+			fmt.Printf("[✓] All profiles already within retention limit (keep=%d snapshots per profile).\n", keep)
+			return
+		}
+		var profs []string
+		total := 0
+		for p, n := range results {
+			profs = append(profs, p)
+			total += n
+		}
+		sort.Strings(profs)
+		fmt.Printf("[✓] Pruned %d old snapshot(s) across %d profile(s) (kept newest %d per profile):\n", total, len(profs), keep)
+		for _, p := range profs {
+			fmt.Printf("    • %-24s removed %d snapshot(s)\n", p, results[p])
+		}
+		return
+	}
+
+	deleted, err := store.PruneSnapshots(profile, keep)
+	if err != nil {
+		fail("SNAPSHOT_PRUNE_FAILED", err, "")
+	}
+	fmt.Printf("[✓] Pruned %d old snapshot(s) for profile %q (kept newest %d).\n", deleted, profile, keep)
 }
 
 func handleSnapshotList(profile string, args []string) {

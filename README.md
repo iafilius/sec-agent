@@ -572,7 +572,7 @@ Place a `.secignore` file in your project root to suppress harmless template fil
 **/*.secret.template
 ```
 
-### 14. Zero-Trace Command Execution (`sec exec`)
+### 14. Zero-Trace Command Execution (`sec exec`) & Opaque CLI Invocation (`sec -` / `sec --cmd-fd`)
 Store sensitive shell commands or multi-line operational scripts inside the encrypted vault (`exec/<name>`) and execute them over an in-memory stdin pipe into `/bin/sh -s` with `NoTrace: true`—leaving zero traces in `.zsh_history`, temporary files on disk, `ps aux` wrapper arguments, or `~/.config/sec-agent/audit.log`:
 ```bash
 # Save a command or script into exec/<name> inside the encrypted vault
@@ -587,6 +587,23 @@ sec exec rm daily-sync
 sec exec daily-sync
 sec exec daily-sync -- --dry-run --verbose
 ```
+
+#### Opaque CLI Invocation (`sec -` and `sec --cmd-fd <n>`)
+To hide subcommands, profile names, key paths, and flags from `ps aux` / kernel `execve` snapshots completely, pass the command vector over `stdin` (`sec -`) or an inherited file descriptor (`sec --cmd-fd <n>`, `n >= 3`) instead of command-line `argv`:
+```bash
+# 1. Read JSON string array (primary lossless format) via `exec sec - <<<'...'`:
+#    Using `exec` replaces the outer shell process in-place so `zsh -c` / `sh -c` disappears from `pstree`/`ps aux` immediately!
+exec sec - <<<'["--profile", "prod", "backup", "run", "home-nas"]'
+
+# 2. POSIX shell-quoted line fallback (when trimmed input does not start with `[`)
+exec sec - <<<'--profile work get "app/my secret key"'
+
+# 3. Inherited file descriptor (--cmd-fd 3) keeps stdin (FD 0) free for TTYs or `set --stdin`
+printf 'super-secret-value' | sec --cmd-fd 3 3<<<'["--profile","prod","set","api/token","--stdin"]'
+```
+* **Hidden Background Daemon `argv` & `env`**: Both initial daemon startup (`sec open`) and `--hot-reload` spawn the background daemon via `--cmd-fd` over an anonymous pipe and omit `SEC_PROFILE` from the daemon's environment—so `ps aux` and `ps eww` never reveal which profile or session is unlocked. `sec daemon list` and `sec doctor` continue to discover active daemons via private `0600` PID lockfiles and sockets.
+* **Memory & Safety Caps**: Opaque payloads are capped at `64 KiB`, zeroed in memory immediately after parsing, and checked against recursive `-` / `--cmd-fd` nesting (exiting with code `2` on invalid input).
+* **Residual-Trace Note (Shell Pipelines vs. `exec`)**: Avoid `printf '...' | sec -` for long-running commands inside `sh -c`/`zsh -c`, because the outer shell stays alive in `pstree` waiting for the pipeline to finish. Prefer `exec sec - <<<'[...]'` (which replaces the shell process in-place in `<1ms`) or direct `execve` subprocess pipes (`subprocess.Popen(["sec", "-"], stdin=PIPE)`).
 
 ### 15. Stealth Multi-Folder `rsync` Backups (`sec backup`)
 Configure and run multi-folder `rsync` backups over `sec-agent`'s pure-Go SSH transport without exposing folder names, remote volume paths, usernames, IP addresses, or SSH keepalive options on the local host:
@@ -627,7 +644,32 @@ sec backup batch run home-nas
 # Opt-in per-file verbose output (prints privacy warning) or hardened local log file (0700 dir / 0600 file)
 sec backup run home-nas --verbose
 sec backup run home-nas --log-file /tmp/sec-logs/run.log
+
+# Local direct rsync backup to an external disk (no SSH required, same dated -History & log layout)
+sec backup init dev-disk \
+  --local \
+  --local-base ~ \
+  --dest-base /Volumes/ExternalBackup/DevBackups \
+  --folder personal \
+  --folder work
+sec backup add-folder dev-disk work --exclude "archived-client/"
+sec backup run dev-disk --suggest-excludes
+
+# Remote-to-local SSH pull backup from a remote Linux/macOS host into a local volume (zero ps aux leakage)
+sec backup init remote-box \
+  --pull \
+  --target remote-linux \
+  --source-base ~ \
+  --dest-base /Volumes/ExternalBackup/RemoteBox \
+  --folder work
+exec sec - <<<'["backup","run","remote-box","--suggest-excludes"]'
 ```
+* **Local Direct `rsync` Transport (`--local` / `--dest-base`) & Exclusion Monitor (`--suggest-excludes`)**:
+  * Supports vault-encrypted multi-folder backups to locally attached drives (`/Volumes/<Disk>/<Base>`) without `--target` or SSH keys, preserving SSH parity (`<Prefix>-History/<YYYY-MM-DD>` via `--backup --backup-dir`, destination `rsync_<slug>_<datetime>.log`, `/dev/fd/3` excludes, overlap guard, privacy-preserving output, and optional `--no-progress-timeout` watchdog).
+  * **Fail-Closed `/Volumes` Mount Safety**: Before creating directories or spawning `rsync`, verifies `/Volumes/<MountName>` has a distinct `statfs` `Fsid` from `/Volumes`, aborting immediately if the external disk is unmounted so backups never write to a local stub folder on the boot SSD.
+  * **Additive Per-Folder Excludes**: Folder-specific `--exclude` patterns merge with job-level excludes (keeping `.DS_Store`, `.Trash*`, and `._*`); re-running `sec backup add-folder <job> <folder> --exclude <pattern>` appends the new pattern without overwriting existing folder settings.
+  * **Exclusion-Candidate Error Monitor**: Both local and SSH runs classify and count permission/TCC/open errors on `rsync` stderr without leaking paths in default mode; passing `--suggest-excludes` (or `--verbose`) prints deduplicated relative paths and ready-to-run `sec backup add-folder <job> <folder> --exclude "..."` commands.
+  * **Zero Volume/Folder/Log Leakage in `ps aux` (Ephemeral `0700` Symlink Stage Dir)**: Direct local `rsync` executes inside an ephemeral mode-`0700` staging directory (`/tmp/s<rand>/`, deleted immediately on exit) with opaque single-letter symlinks (`s/` → source, `d/` → destination, `<stageDir>/h` → history dir, `l` → destination log file), so zero volume names, folder names, history dates, or log filenames ever appear in `ps aux` or `pstree` while preserving 100% native local disk speed. Combine with `exec sec - <<<'[...]'` so the outer shell process also disappears from `pstree` immediately.
 * **6 Zero-Trace Guarantees**:
   1. **Zero `.zsh_history` Exposure**: Only `sec backup run <name>` is typed in the shell.
   2. **Zero Local `ps aux` Exposure**: Local `rsync` runs in working directory `.` with compact flags (`-rt --partial --stats` in normal mode; `-rtvP` / `-rtvPS` only when `--verbose` is passed), `--exclude-from=/dev/fd/3` (including default `.DS_Store`, `.Trash*`, and macOS AppleDouble `._*` exclusions), opaque target `. s:t`, and transport/partial-dir passed privately via `RSYNC_RSH` and `RSYNC_PARTIAL_DIR` in `cmd.Env`, while `sec-agent` rewrites the remote `rsync --server` command over the encrypted Go SSH channel. *(Note on unavoidable residual `ps` tokens: because external `rsync` has no environment variable for `--modify-window`, `--timeout`, `--partial`, `--stats`, or `--exclude-from=/dev/fd/3`, and because `rsync` itself invokes `$RSYNC_RSH` with `rsync --server ... . t` on the helper's `argv`, those generic non-sensitive flags remain visible in `ps aux`; zero folder names, volume paths, usernames, hostnames, or exclude patterns are ever exposed.)*

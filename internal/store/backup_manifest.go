@@ -317,6 +317,29 @@ func expandDatePlaceholders(s, dateStr, datetimeStr string) string {
 	return out
 }
 
+// ResolveRemoteSource resolves the remote source directory path (with trailing slash)
+// against sourceBase without expanding '~' against the local workstation's $HOME.
+func (f BackupFolderSpec) ResolveRemoteSource(sourceBase string) string {
+	src := strings.TrimSpace(f.Source)
+	if src == "" {
+		src = strings.TrimSpace(f.LegacySource)
+	}
+	base := strings.TrimSpace(sourceBase)
+	if base == "" {
+		base = "~"
+	}
+	var resolved string
+	switch {
+	case src == "~" || src == "~/" || src == "." || src == "./":
+		resolved = base
+	case strings.HasPrefix(src, "~/") || strings.HasPrefix(src, "/"):
+		resolved = src
+	default:
+		resolved = strings.TrimRight(base, "/") + "/" + strings.TrimLeft(src, "/")
+	}
+	return strings.TrimRight(resolved, "/") + "/"
+}
+
 // DeriveRemoteDest returns the remote destination directory path (with trailing slash) inside remoteBase.
 func (f BackupFolderSpec) DeriveRemoteDest(remoteBase string) string {
 	dest := strings.TrimSpace(f.Dest)
@@ -353,28 +376,60 @@ func (f BackupFolderSpec) DeriveRemoteLogPath(remoteBase, datetimeStr string) st
 	return strings.TrimRight(remoteBase, "/") + "/rsync_" + f.DeriveSlug() + "_" + datetimeStr + ".log"
 }
 
-// EffectiveExcludes returns the folder-specific exclude list (falling back to manifestExcludes or defaults),
-// always ensuring macOS AppleDouble files ("._*") are excluded.
-func (f BackupFolderSpec) EffectiveExcludes(manifestExcludes []string) []string {
-	base := f.Excludes
-	if len(base) == 0 {
-		base = manifestExcludes
+// BackupTransport identifies how a backup job transfers files ("ssh", "ssh-pull", or "local").
+type BackupTransport string
+
+const (
+	BackupTransportSSH     BackupTransport = "ssh"
+	BackupTransportSSHPull BackupTransport = "ssh-pull"
+	BackupTransportLocal   BackupTransport = "local"
+)
+
+// Validate checks that the transport is either empty (defaulting to "ssh"), "ssh", "ssh-pull", or "local".
+func (t BackupTransport) Validate() error {
+	switch strings.ToLower(strings.TrimSpace(string(t))) {
+	case "", string(BackupTransportSSH), string(BackupTransportSSHPull), string(BackupTransportLocal):
+		return nil
+	default:
+		return fmt.Errorf("%w: unsupported transport %q (expected %q, %q, or %q)", ErrInvalidBackupManifest, t, BackupTransportSSH, BackupTransportSSHPull, BackupTransportLocal)
 	}
+}
+
+// EffectiveExcludes merges job-level excludes (or default excludes when empty) with
+// folder-specific excludes in order, deduplicating exact matches and always ensuring
+// macOS AppleDouble files ("._*") are excluded.
+func (f BackupFolderSpec) EffectiveExcludes(manifestExcludes []string) []string {
+	base := manifestExcludes
 	if len(base) == 0 {
 		base = DefaultBackupExcludes()
 	}
-	return ensureAppleDoubleExclude(base)
+	merged := make([]string, 0, len(base)+len(f.Excludes)+1)
+	seen := make(map[string]bool, len(base)+len(f.Excludes)+1)
+	for _, list := range [][]string{base, f.Excludes} {
+		for _, p := range list {
+			trimmed := strings.TrimSpace(p)
+			if trimmed == "" || seen[trimmed] {
+				continue
+			}
+			seen[trimmed] = true
+			merged = append(merged, trimmed)
+		}
+	}
+	return ensureAppleDoubleExclude(merged)
 }
 
 // BackupManifest defines a complete vault-stored backup job configuration.
 type BackupManifest struct {
 	Name                BackupJobName      `json:"name"`
-	SSHTarget           string             `json:"ssh_target"`
+	Transport           BackupTransport    `json:"transport,omitempty"`
+	SSHTarget           string             `json:"ssh_target,omitempty"`
 	SSHKeySecret        string             `json:"ssh_key_secret,omitempty"`
 	SSHPasswordKey      string             `json:"ssh_password_key,omitempty"`
 	SSHPort             int                `json:"ssh_port,omitempty"`
 	LocalBase           string             `json:"local_base"`
+	SourceBase          string             `json:"source_base,omitempty"`
 	RemoteBase          string             `json:"remote_base"`
+	DestBase            string             `json:"dest_base,omitempty"`
 	RemoteRsyncBin      string             `json:"remote_rsync_bin,omitempty"`
 	ModifyWindow        int                `json:"modify_window,omitempty"`
 	PartialDir          string             `json:"partial_dir,omitempty"`
@@ -388,6 +443,18 @@ type BackupManifest struct {
 	Excludes            []string           `json:"excludes,omitempty"`
 	Folders             []BackupFolderSpec `json:"folders"`
 	LegacyJobs          []BackupFolderSpec `json:"jobs,omitempty"`
+}
+
+// EffectiveTransport returns the normalized transport for this manifest ("ssh" by default).
+func (m BackupManifest) EffectiveTransport() BackupTransport {
+	switch strings.ToLower(strings.TrimSpace(string(m.Transport))) {
+	case string(BackupTransportLocal):
+		return BackupTransportLocal
+	case string(BackupTransportSSHPull):
+		return BackupTransportSSHPull
+	default:
+		return BackupTransportSSH
+	}
 }
 
 // UnmarshalJSON decodes a BackupManifest while accepting no_progress_timeout as either
@@ -465,6 +532,19 @@ func (m *BackupManifest) ApplyDefaults() {
 	if m == nil {
 		return
 	}
+	if strings.TrimSpace(string(m.Transport)) == "" {
+		m.Transport = BackupTransportSSH
+	} else {
+		m.Transport = BackupTransport(strings.ToLower(strings.TrimSpace(string(m.Transport))))
+	}
+	if strings.TrimSpace(m.LocalBase) == "" && strings.TrimSpace(m.SourceBase) != "" {
+		m.LocalBase = strings.TrimSpace(m.SourceBase)
+	}
+	m.SourceBase = ""
+	if strings.TrimSpace(m.RemoteBase) == "" && strings.TrimSpace(m.DestBase) != "" {
+		m.RemoteBase = strings.TrimSpace(m.DestBase)
+	}
+	m.DestBase = ""
 	if m.Timeout == 0 && m.LegacyRsyncTimeout > 0 {
 		m.Timeout = m.LegacyRsyncTimeout
 	}
@@ -513,8 +593,15 @@ func (m *BackupManifest) ApplyDefaults() {
 			m.RemoteBase = "/"
 		}
 	}
+	if m.EffectiveTransport() == BackupTransportSSHPull && strings.TrimSpace(m.LocalBase) == "" {
+		m.LocalBase = "~"
+	}
 	if strings.TrimSpace(m.RemoteRsyncBin) == "" {
-		m.RemoteRsyncBin = DefaultRemoteRsyncBin
+		if m.EffectiveTransport() == BackupTransportSSHPull {
+			m.RemoteRsyncBin = "rsync"
+		} else {
+			m.RemoteRsyncBin = DefaultRemoteRsyncBin
+		}
 	}
 	if m.ModifyWindow == 0 {
 		m.ModifyWindow = DefaultModifyWindow
@@ -537,14 +624,17 @@ func (m BackupManifest) Validate() error {
 	if err := m.Name.Validate(); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidBackupManifest, err)
 	}
-	if strings.TrimSpace(m.SSHTarget) == "" {
-		return fmt.Errorf("%w: ssh_target cannot be empty", ErrInvalidBackupManifest)
+	if err := m.Transport.Validate(); err != nil {
+		return err
+	}
+	if (m.EffectiveTransport() == BackupTransportSSH || m.EffectiveTransport() == BackupTransportSSHPull) && strings.TrimSpace(m.SSHTarget) == "" {
+		return fmt.Errorf("%w: ssh_target cannot be empty for %s transport", ErrInvalidBackupManifest, m.EffectiveTransport())
 	}
 	if strings.TrimSpace(m.LocalBase) == "" {
 		return fmt.Errorf("%w: local_base cannot be empty", ErrInvalidBackupManifest)
 	}
-	if strings.TrimSpace(m.RemoteBase) == "" {
-		return fmt.Errorf("%w: remote_base cannot be empty", ErrInvalidBackupManifest)
+	if strings.TrimSpace(m.RemoteBase) == "" && strings.TrimSpace(m.DestBase) == "" {
+		return fmt.Errorf("%w: remote_base (or dest_base) cannot be empty", ErrInvalidBackupManifest)
 	}
 	if m.Timeout < 0 || m.ServerAliveInterval < 0 || m.ServerAliveCountMax < 0 {
 		return fmt.Errorf("%w: timeout and server_alive_* cannot be negative", ErrInvalidBackupManifest)

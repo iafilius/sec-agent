@@ -26,7 +26,7 @@ func TestInitSkillInstallerAndBackupList(t *testing.T) {
 		gopath = filepath.Join(os.Getenv("HOME"), "go")
 	}
 	gocache := os.Getenv("GOCACHE")
-	env := append(os.Environ(), "HOME="+tmpHome, "GOPATH="+gopath, "GOCACHE="+gocache)
+	env := append(os.Environ(), "HOME="+tmpHome, "GOPATH="+gopath, "GOCACHE="+gocache, "SEC_CONFIG_DIR=")
 
 	// Build CLI binary
 	binPath := filepath.Join(tmpHome, "sec_test_init_bin")
@@ -317,6 +317,7 @@ func TestSkillShow(t *testing.T) {
 func TestInitLegacyVaultSchemaDetection(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	t.Setenv("SEC_CONFIG_DIR", "")
 	origWd, _ := os.Getwd()
 	if err := os.Chdir(tmpDir); err != nil {
 		t.Fatalf("failed to chdir to tmpDir: %v", err)

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -254,7 +255,145 @@ func CreateSnapshot(profile, triggerReason, actor, comment string, activeKey []b
 		_ = os.WriteFile(metaPath, metaBytes, 0600)
 	}
 
+	_, _ = PruneSnapshots(profile, EffectiveMaxSnapshots())
+
 	return &meta, nil
+}
+
+// DefaultMaxSnapshots is the default number of point-in-time vault snapshots
+// retained per profile when automatic pruning runs on vault writes.
+const DefaultMaxSnapshots = 25
+
+// EffectiveMaxSnapshots returns the configured per-profile snapshot retention
+// limit from SEC_MAX_SNAPSHOTS (defaulting to DefaultMaxSnapshots = 25).
+func EffectiveMaxSnapshots() int {
+	if raw := strings.TrimSpace(os.Getenv("SEC_MAX_SNAPSHOTS")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			return n
+		}
+	}
+	return DefaultMaxSnapshots
+}
+
+// PruneSnapshots removes older snapshots for a profile beyond the newest `keep`
+// entries (deleting both .enc and companion .meta.json files, plus any orphaned
+// .meta.json files without a matching .enc). Returns the number of snapshots deleted.
+func PruneSnapshots(profile string, keep int) (int, error) {
+	if profile == "" {
+		profile = "default"
+	}
+	if keep <= 0 {
+		keep = EffectiveMaxSnapshots()
+	}
+	snapDir, err := GetSnapshotDir(profile)
+	if err != nil {
+		return 0, err
+	}
+	entries, err := os.ReadDir(snapDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+
+	type snapEntry struct {
+		base    string
+		encPath string
+		modTime time.Time
+	}
+	var encSnaps []snapEntry
+	encBases := make(map[string]bool)
+
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if strings.HasSuffix(name, ".enc") {
+			base := strings.TrimSuffix(name, ".enc")
+			encBases[base] = true
+			var mod time.Time
+			if info, iErr := e.Info(); iErr == nil {
+				mod = info.ModTime()
+			}
+			encSnaps = append(encSnaps, snapEntry{
+				base:    base,
+				encPath: filepath.Join(snapDir, name),
+				modTime: mod,
+			})
+		}
+	}
+
+	// Sort newest-first by ModTime, with reverse lexicographical base name as deterministic tie-breaker
+	sort.Slice(encSnaps, func(i, j int) bool {
+		if !encSnaps[i].modTime.Equal(encSnaps[j].modTime) {
+			return encSnaps[i].modTime.After(encSnaps[j].modTime)
+		}
+		return encSnaps[i].base > encSnaps[j].base
+	})
+
+	deleted := 0
+	if len(encSnaps) > keep {
+		for _, old := range encSnaps[keep:] {
+			// #nosec G703
+			if rmErr := os.Remove(old.encPath); rmErr == nil {
+				deleted++
+			}
+			delete(encBases, old.base)
+			// #nosec G703
+			_ = os.Remove(filepath.Join(snapDir, old.base+".meta.json"))
+		}
+	}
+
+	// Clean any orphaned .meta.json files whose .enc no longer exists
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if strings.HasSuffix(name, ".meta.json") {
+			base := strings.TrimSuffix(name, ".meta.json")
+			if !encBases[base] {
+				// #nosec G703
+				_ = os.Remove(filepath.Join(snapDir, name))
+			}
+		}
+	}
+
+	return deleted, nil
+}
+
+// PruneAllSnapshots prunes snapshots across every profile directory under
+// ~/.config/sec-agent/snapshots/, keeping the newest `keep` snapshots per profile.
+func PruneAllSnapshots(keep int) (map[string]int, error) {
+	if keep <= 0 {
+		keep = EffectiveMaxSnapshots()
+	}
+	cfgDir, err := config.GetConfigDir()
+	if err != nil {
+		return nil, err
+	}
+	rootSnapDir := filepath.Join(cfgDir, "snapshots")
+	entries, err := os.ReadDir(rootSnapDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return map[string]int{}, nil
+		}
+		return nil, err
+	}
+	results := make(map[string]int)
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		prof := e.Name()
+		n, pErr := PruneSnapshots(prof, keep)
+		if pErr == nil && n > 0 {
+			results[prof] = n
+		}
+	}
+	return results, nil
 }
 
 // ListSnapshots scans the profile's snapshot directory and returns all indexed snapshots sorted by date descending.

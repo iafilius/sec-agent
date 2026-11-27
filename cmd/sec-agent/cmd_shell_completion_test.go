@@ -221,8 +221,8 @@ func TestShellCompletionOutput(t *testing.T) {
 			if !strings.Contains(out, "-l tofu") {
 				t.Errorf("expected shell completion for fish to contain '-l tofu', got:\n%s", out)
 			}
-			if !strings.Contains(out, "-l verbose") || !strings.Contains(out, "-l log-file") || !strings.Contains(out, "-l no-progress-timeout") {
-				t.Errorf("expected shell completion for fish to contain '-l verbose', '-l log-file', and '-l no-progress-timeout', got:\n%s", out)
+			if !strings.Contains(out, "-l verbose") || !strings.Contains(out, "-l log-file") || !strings.Contains(out, "-l no-progress-timeout") || !strings.Contains(out, "-l cmd-fd") || !strings.Contains(out, "-l local") || !strings.Contains(out, "-l dest-base") || !strings.Contains(out, "-l suggest-excludes") {
+				t.Errorf("expected shell completion for fish to contain '-l verbose', '-l log-file', '-l no-progress-timeout', '-l cmd-fd', '-l local', '-l dest-base', and '-l suggest-excludes', got:\n%s", out)
 			}
 		} else {
 			if !strings.Contains(out, "--install-tools") || !strings.Contains(out, "--verify-live") {
@@ -248,6 +248,12 @@ func TestShellCompletionOutput(t *testing.T) {
 			}
 			if !strings.Contains(out, "--allow-command-string") {
 				t.Errorf("expected shell completion for %s to contain '--allow-command-string', got:\n%s", shell, out)
+			}
+			if !strings.Contains(out, "--cmd-fd") {
+				t.Errorf("expected shell completion for %s to contain '--cmd-fd', got:\n%s", shell, out)
+			}
+			if !strings.Contains(out, "--local") || !strings.Contains(out, "--pull") || !strings.Contains(out, "--source-base") || !strings.Contains(out, "--dest-base") || !strings.Contains(out, "--suggest-excludes") || !strings.Contains(out, "--keep") {
+				t.Errorf("expected shell completion for %s to contain '--local', '--pull', '--source-base', '--dest-base', '--suggest-excludes', and '--keep', got:\n%s", shell, out)
 			}
 			if !strings.Contains(out, "--incomplete") {
 				t.Errorf("expected shell completion for %s to contain '--incomplete', got:\n%s", shell, out)

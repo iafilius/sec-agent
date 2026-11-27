@@ -1056,9 +1056,44 @@ func ensureDaemonRunning(profile string) error {
 		return err
 	}
 
+	cmdPipeR, cmdPipeW, pipeErr := os.Pipe()
+	if pipeErr != nil {
+		return fmt.Errorf("failed to create opaque daemon command pipe: %w", pipeErr)
+	}
+	cmdPayload, marshalErr := json.Marshal([]string{"--profile", profile, "daemon"})
+	if marshalErr != nil {
+		_ = cmdPipeR.Close()
+		_ = cmdPipeW.Close()
+		return fmt.Errorf("failed to marshal daemon command payload: %w", marshalErr)
+	}
+	cmdPayload = append(cmdPayload, '\n')
+	_, writeErr := cmdPipeW.Write(cmdPayload)
+	for i := range cmdPayload {
+		cmdPayload[i] = 0
+	}
+	closeErr := cmdPipeW.Close()
+	if writeErr != nil || closeErr != nil {
+		_ = cmdPipeR.Close()
+		if writeErr != nil {
+			return fmt.Errorf("failed to write opaque daemon command payload: %w", writeErr)
+		}
+		return fmt.Errorf("failed to close opaque daemon command pipe: %w", closeErr)
+	}
+
+	// Spawn daemon via --cmd-fd 3 so neither the profile name nor "daemon"
+	// appears in ps aux / kernel execve argv snapshots, and omit SEC_PROFILE
+	// from cmd.Env so ps eww does not leak the active session profile either.
 	// #nosec G204 G702
-	cmd := exec.Command(bin, "--profile", profile, "daemon")
-	cmd.Env = os.Environ()
+	cmd := exec.Command(bin, "--cmd-fd", "3")
+	cmd.ExtraFiles = []*os.File{cmdPipeR}
+	var cleanEnv []string
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "SEC_PROFILE=") {
+			continue
+		}
+		cleanEnv = append(cleanEnv, kv)
+	}
+	cmd.Env = cleanEnv
 	if customCfg := os.Getenv("SEC_CONFIG_DIR"); customCfg != "" {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("SEC_CONFIG_DIR=%s", customCfg))
 	}
@@ -1068,7 +1103,6 @@ func ensureDaemonRunning(profile string) error {
 	if noSound := os.Getenv("SEC_NO_SOUND"); noSound != "" {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("SEC_NO_SOUND=%s", noSound))
 	}
-	cmd.Env = append(cmd.Env, fmt.Sprintf("SEC_PROFILE=%s", profile))
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setsid: true,
 	}
@@ -1088,8 +1122,10 @@ func ensureDaemonRunning(profile string) error {
 	}
 
 	if err := cmd.Start(); err != nil {
+		_ = cmdPipeR.Close()
 		return fmt.Errorf("failed to start daemon process: %w", err)
 	}
+	_ = cmdPipeR.Close()
 
 	socketPath, err := config.GetSocketPath(profile)
 	if err != nil {
@@ -1676,6 +1712,11 @@ func printCommandHelp(spec CommandSpec) {
 func main() {
 	if len(os.Args) >= 2 && os.Args[1] == "ssh-stdio" {
 		os.Exit(runInternalSSHStdio(os.Args[2:]))
+	}
+	if resolvedArgs, err := resolveOpaqueArgs(os.Args); err != nil {
+		fail("INVALID_ARGUMENTS", err, "Pass a JSON string array or POSIX shell-quoted command via 'sec -' (stdin) or 'sec --cmd-fd <n>' (FD >= 3).")
+	} else {
+		os.Args = resolvedArgs
 	}
 	keychain.SetVersion(Version)
 	profile, cleanArgs := extractGlobalFlags()

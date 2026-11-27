@@ -899,6 +899,17 @@ func handleDaemonList(args []string) {
 			}
 
 			isSecBin := base == "sec" || base == "sec-agent" || strings.Contains(fields[2], "sec-agent") || strings.Contains(fields[2], "/sec")
+
+			// If this PID was already discovered via its private 0600 PID lockfile,
+			// enrich its uptime/executable directly even when launched opaquely via --cmd-fd.
+			if entry, ok := entriesMap[pid]; ok && isSecBin {
+				entry.Uptime = etime
+				if entry.Executable == "" {
+					entry.Executable = fields[2]
+				}
+				continue
+			}
+
 			if !isSecBin {
 				if !strings.Contains(cmdLine, "sec daemon") && !strings.Contains(cmdLine, "sec-agent daemon") {
 					continue

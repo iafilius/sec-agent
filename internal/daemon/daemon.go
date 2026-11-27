@@ -56,31 +56,31 @@ func (a IPCAction) String() string {
 
 // IPCRequest defines the format for messages sent to the daemon.
 type IPCRequest struct {
-	Action         IPCAction                    `json:"action"`
-	Path           string                       `json:"path,omitempty"`
-	Value          string                       `json:"value,omitempty"`
+	Action           IPCAction                    `json:"action"`
+	Path             string                       `json:"path,omitempty"`
+	Value            string                       `json:"value,omitempty"`
 	Comment          string                       `json:"comment,omitempty"`
 	Description      string                       `json:"description,omitempty"`
 	Notes            string                       `json:"notes,omitempty"`
 	ClearDescription bool                         `json:"clear_description,omitempty"`
 	ClearNotes       bool                         `json:"clear_notes,omitempty"`
 	Metadata         map[string]string            `json:"metadata,omitempty"`
-	TTL            string                       `json:"ttl,omitempty"`
-	Grace          string                       `json:"grace,omitempty"`
-	Secrets        map[string]store.SecretEntry `json:"secrets,omitempty"`
-	Key            []byte                       `json:"key,omitempty"`
-	NewPath        string                       `json:"new_path,omitempty"`
-	IsPrefix       bool                         `json:"is_prefix,omitempty"`
-	Limit          int                          `json:"limit,omitempty"`
-	Expires        string                       `json:"expires,omitempty"`
-	ShowExpired    bool                         `json:"show_expired,omitempty"`
-	Token          string                       `json:"token,omitempty"`
-	ExtendsProfile string                       `json:"extends_profile,omitempty"`
-	TargetVersion  int                          `json:"target_version,omitempty"`
-	ShowTrash      bool                         `json:"show_trash,omitempty"`
-	Permanent      bool                         `json:"permanent,omitempty"`
-	ClearAlias     bool                         `json:"clear_alias,omitempty"`
-	NoTrace        bool                         `json:"no_trace,omitempty"`
+	TTL              string                       `json:"ttl,omitempty"`
+	Grace            string                       `json:"grace,omitempty"`
+	Secrets          map[string]store.SecretEntry `json:"secrets,omitempty"`
+	Key              []byte                       `json:"key,omitempty"`
+	NewPath          string                       `json:"new_path,omitempty"`
+	IsPrefix         bool                         `json:"is_prefix,omitempty"`
+	Limit            int                          `json:"limit,omitempty"`
+	Expires          string                       `json:"expires,omitempty"`
+	ShowExpired      bool                         `json:"show_expired,omitempty"`
+	Token            string                       `json:"token,omitempty"`
+	ExtendsProfile   string                       `json:"extends_profile,omitempty"`
+	TargetVersion    int                          `json:"target_version,omitempty"`
+	ShowTrash        bool                         `json:"show_trash,omitempty"`
+	Permanent        bool                         `json:"permanent,omitempty"`
+	ClearAlias       bool                         `json:"clear_alias,omitempty"`
+	NoTrace          bool                         `json:"no_trace,omitempty"`
 }
 
 // Validate checks whether the IPCRequest action is supported.
@@ -203,20 +203,20 @@ type IPCResponse struct {
 
 // Daemon represents the background secrets agent.
 type Daemon struct {
-	mu             sync.Mutex
-	masterKey      []byte
-	secretsStore   *store.EncryptedStore
-	sessionStart   time.Time
-	sessionTTL     time.Duration
-	lastUsed       time.Time
-	graceTTL       time.Duration
-	socketPath     string
-	listener       net.Listener
-	profile        string
-	sessionToken   string
-	version        string
-	prodConfirmed  bool
-	lockFile       *os.File
+	mu              sync.Mutex
+	masterKey       []byte
+	secretsStore    *store.EncryptedStore
+	sessionStart    time.Time
+	sessionTTL      time.Duration
+	lastUsed        time.Time
+	graceTTL        time.Duration
+	socketPath      string
+	listener        net.Listener
+	profile         string
+	sessionToken    string
+	version         string
+	prodConfirmed   bool
+	lockFile        *os.File
 	lastActivity    time.Time
 	idleTimeout     time.Duration
 	socketFileInfo  os.FileInfo
@@ -593,11 +593,61 @@ func (d *Daemon) processRequest(c net.Conn, req IPCRequest, peerPID int) {
 			return
 		}
 
+		cmdPipeR, cmdPipeW, err := os.Pipe()
+		if err != nil {
+			_ = r.Close()
+			_ = w.Close()
+			_ = ackR.Close()
+			_ = ackW.Close()
+			d.logAudit(AuditEventReexec, profile, peerPID, false, err.Error())
+			d.sendError(c, fmt.Sprintf("failed to create hot-reload command pipe: %v", err))
+			return
+		}
+		cmdPayload, err := json.Marshal([]string{"--profile", profile, "daemon"})
+		if err != nil {
+			_ = r.Close()
+			_ = w.Close()
+			_ = ackR.Close()
+			_ = ackW.Close()
+			_ = cmdPipeR.Close()
+			_ = cmdPipeW.Close()
+			d.logAudit(AuditEventReexec, profile, peerPID, false, err.Error())
+			d.sendError(c, fmt.Sprintf("failed to marshal hot-reload command payload: %v", err))
+			return
+		}
+		cmdPayload = append(cmdPayload, '\n')
+		_, cmdWriteErr := cmdPipeW.Write(cmdPayload)
+		wipeBytes(cmdPayload)
+		cmdCloseErr := cmdPipeW.Close()
+		if cmdWriteErr != nil || cmdCloseErr != nil {
+			_ = r.Close()
+			_ = w.Close()
+			_ = ackR.Close()
+			_ = ackW.Close()
+			_ = cmdPipeR.Close()
+			errMsg := cmdWriteErr
+			if errMsg == nil {
+				errMsg = cmdCloseErr
+			}
+			d.logAudit(AuditEventReexec, profile, peerPID, false, errMsg.Error())
+			d.sendError(c, fmt.Sprintf("failed to write hot-reload command payload: %v", errMsg))
+			return
+		}
+
 		// Start the replacement process BEFORE writing the state payload so it drains the pipe concurrently.
+		// Pass daemon arguments via --cmd-fd 5 and omit SEC_PROFILE from cmd.Env so ps aux / ps eww
+		// never reveal which profile or session is running.
 		// #nosec G204
-		cmd := exec.Command(execPath, "--profile", profile, "daemon")
-		cmd.Env = append(os.Environ(), "SEC_REEXEC_FD=3", "SEC_REEXEC_ACK_FD=4", fmt.Sprintf("SEC_PROFILE=%s", profile))
-		cmd.ExtraFiles = []*os.File{r, ackW}
+		cmd := exec.Command(execPath, "--cmd-fd", "5")
+		var cleanEnv []string
+		for _, kv := range os.Environ() {
+			if strings.HasPrefix(kv, "SEC_PROFILE=") {
+				continue
+			}
+			cleanEnv = append(cleanEnv, kv)
+		}
+		cmd.Env = append(cleanEnv, "SEC_REEXEC_FD=3", "SEC_REEXEC_ACK_FD=4")
+		cmd.ExtraFiles = []*os.File{r, ackW, cmdPipeR}
 		cmd.Stdout = nil
 		cmd.Stderr = nil
 
@@ -606,12 +656,14 @@ func (d *Daemon) processRequest(c net.Conn, req IPCRequest, peerPID int) {
 			_ = w.Close()
 			_ = ackR.Close()
 			_ = ackW.Close()
+			_ = cmdPipeR.Close()
 			d.logAudit(AuditEventReexec, profile, peerPID, false, err.Error())
 			d.sendError(c, fmt.Sprintf("failed to start replacement daemon: %v", err))
 			return
 		}
 		_ = r.Close()
 		_ = ackW.Close()
+		_ = cmdPipeR.Close()
 
 		deadline := time.Now().Add(reexecTimeout)
 		_ = w.SetWriteDeadline(deadline)

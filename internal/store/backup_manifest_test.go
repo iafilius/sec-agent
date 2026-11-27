@@ -504,3 +504,99 @@ func TestBackupManifestNoProgressTimeout(t *testing.T) {
 		}
 	})
 }
+
+func TestBackupManifestLocalTransportAndAdditiveExcludes(t *testing.T) {
+	rawJSON := `{
+		"name": "local-dev",
+		"transport": "local",
+		"local_base": "~",
+		"dest_base": "/Volumes/ExternalBackup/DevBackups",
+		"folders": [
+			{"src": "personal"},
+			{"src": "work", "excludes": ["archived-client/", ".DS_Store"]}
+		]
+	}`
+
+	var m BackupManifest
+	if err := json.Unmarshal([]byte(rawJSON), &m); err != nil {
+		t.Fatalf("json.Unmarshal failed: %v", err)
+	}
+	m.ApplyDefaults()
+	if err := m.Validate(); err != nil {
+		t.Fatalf("Validate() failed for valid local manifest: %v", err)
+	}
+	if m.EffectiveTransport() != BackupTransportLocal {
+		t.Fatalf("expected transport=local, got %q", m.EffectiveTransport())
+	}
+	if m.RemoteBase != "/Volumes/ExternalBackup/DevBackups" {
+		t.Fatalf("expected dest_base normalized into RemoteBase, got %q", m.RemoteBase)
+	}
+
+	// Verify additive excludes preserve job defaults (.DS_Store, .Trash*, ._*) AND deduplicate
+	workExcludes := m.Folders[1].EffectiveExcludes(m.Excludes)
+	want := []string{".DS_Store", ".Trash*", "._*", "archived-client/"}
+	if len(workExcludes) != len(want) {
+		t.Fatalf("expected additive excludes %v, got %v", want, workExcludes)
+	}
+	for i := range want {
+		if workExcludes[i] != want[i] {
+			t.Errorf("workExcludes[%d] = %q, want %q (all=%v)", i, workExcludes[i], want[i], workExcludes)
+		}
+	}
+
+	// Invalid transport must fail validation
+	bad := m
+	bad.Transport = BackupTransport("ftp")
+	if err := bad.Validate(); err == nil {
+		t.Fatalf("expected invalid transport 'ftp' to fail validation")
+	}
+}
+
+func TestBackupManifestSSHPullTransportAndRemoteSource(t *testing.T) {
+	rawJSON := `{
+		"name": "remote-box",
+		"transport": "ssh-pull",
+		"ssh_target": "remote-linux",
+		"source_base": "~",
+		"dest_base": "/Volumes/ExternalBackup/RemoteBox",
+		"folders": [
+			{"src": "work"},
+			{"src": "~/Projects 2026"},
+			{"src": "/var/backups/db"}
+		]
+	}`
+
+	var m BackupManifest
+	if err := json.Unmarshal([]byte(rawJSON), &m); err != nil {
+		t.Fatalf("json.Unmarshal failed: %v", err)
+	}
+	m.ApplyDefaults()
+	if err := m.Validate(); err != nil {
+		t.Fatalf("Validate() failed for ssh-pull manifest: %v", err)
+	}
+	if m.EffectiveTransport() != BackupTransportSSHPull {
+		t.Fatalf("expected transport=ssh-pull, got %q", m.EffectiveTransport())
+	}
+	if m.RemoteRsyncBin != "rsync" {
+		t.Errorf("expected default RemoteRsyncBin='rsync' for ssh-pull, got %q", m.RemoteRsyncBin)
+	}
+	if m.LocalBase != "~" {
+		t.Errorf("expected source_base preserved as '~', got %q", m.LocalBase)
+	}
+	if got := m.Folders[0].ResolveRemoteSource(m.LocalBase); got != "~/work/" {
+		t.Errorf("ResolveRemoteSource(work) = %q, want ~/work/", got)
+	}
+	if got := m.Folders[1].ResolveRemoteSource(m.LocalBase); got != "~/Projects 2026/" {
+		t.Errorf("ResolveRemoteSource(~/Projects 2026) = %q, want ~/Projects 2026/", got)
+	}
+	if got := m.Folders[2].ResolveRemoteSource(m.LocalBase); got != "/var/backups/db/" {
+		t.Errorf("ResolveRemoteSource(/var/backups/db) = %q, want /var/backups/db/", got)
+	}
+
+	// Missing ssh_target must fail for ssh-pull
+	bad := m
+	bad.SSHTarget = ""
+	if err := bad.Validate(); err == nil {
+		t.Fatalf("expected ssh-pull without ssh_target to fail validation")
+	}
+}
