@@ -413,6 +413,47 @@ func handleStealthBackupRun(profile string, args []string) {
 	}
 }
 
+// applyNetworkMountSafeguards applies automatic safety defaults when a backup source
+// folder resides on a macOS network filesystem (smbfs, cifs, nfs, afpfs, webdav):
+//   - On smbfs/cifs: merges Windows SMB junk excludes ($RECYCLE.BIN, System Volume Information, Thumbs.db)
+//   - If rsync timeout is unset (0): defaults to 180s
+//   - If no_progress_timeout is unset and GNU rsync is available (and not explicitly disabled with 0): defaults to 15m
+func applyNetworkMountSafeguards(
+	manifest store.BackupManifest,
+	folder store.BackupFolderSpec,
+	fsType string,
+	baseNoProgress time.Duration,
+	noProgressExplicitlyDisabled bool,
+	isOpenrsync bool,
+) (store.BackupManifest, store.BackupFolderSpec, time.Duration, []string) {
+	if !isNetworkFilesystemType(fsType) {
+		return manifest, folder, baseNoProgress, nil
+	}
+	effManifest := manifest
+	effFolder := folder
+	effNoProgress := baseNoProgress
+	var notes []string
+
+	if isSMBFilesystemType(fsType) {
+		effFolder.Excludes = append(append([]string(nil), effFolder.Excludes...), smbAutoExcludes...)
+		notes = append(notes, "auto-excluding SMB system junk ($RECYCLE.BIN, System Volume Information, Thumbs.db)")
+	}
+	if effFolder.EffectiveTimeout(effManifest.Timeout) == 0 {
+		effFolder.Timeout = defaultNetworkMountRsyncTimeout
+		notes = append(notes, fmt.Sprintf("defaulting rsync --timeout=%ds", defaultNetworkMountRsyncTimeout))
+	}
+	if effNoProgress == 0 && !noProgressExplicitlyDisabled {
+		if isOpenrsync {
+			notes = append(notes, "skipping automatic 15m no-progress watchdog on macOS openrsync (install GNU rsync via 'brew install rsync' for full stall protection)")
+		} else {
+			effNoProgress = defaultNetworkMountNoProgressTimeout
+			effManifest.NoProgressTimeout = defaultNetworkMountNoProgressTimeout.String()
+			notes = append(notes, fmt.Sprintf("activating %s no-progress watchdog (override with --no-progress-timeout 0)", defaultNetworkMountNoProgressTimeout))
+		}
+	}
+	return effManifest, effFolder, effNoProgress, notes
+}
+
 func executeStealthBackupRun(profile string, args []string) error {
 	var rawName, folderFilter, logFilePath string
 	var noProgressOverride time.Duration
@@ -664,7 +705,8 @@ func executeStealthBackupRun(profile string, args []string) error {
 			Remediation: "Install rsync (e.g., 'brew install rsync')",
 		}
 	}
-	if rsyncIsOpenrsync(localRsyncBin) {
+	localIsOpenrsync := rsyncIsOpenrsync(localRsyncBin)
+	if localIsOpenrsync {
 		if effectiveNoProgressTimeout > 0 {
 			return &stealthBackupCliError{
 				Code:        "WATCHDOG_UNSUPPORTED_RSYNC",
@@ -674,6 +716,7 @@ func executeStealthBackupRun(profile string, args []string) error {
 		}
 		fmt.Fprintf(os.Stderr, "[!] Note: using macOS openrsync (%s); install GNU rsync ('brew install rsync') for full remote --log-file support.\n", localRsyncBin)
 	}
+	noProgressExplicitlyDisabled := noProgressOverrideSet && noProgressOverride == 0
 
 	// Acquire atomic per-(profile, job) overlap guard for EVERY backup run (watchdog on or off).
 	if !isBackupGuardPlatformSupported() {
@@ -838,6 +881,9 @@ func executeStealthBackupRun(profile string, args []string) error {
 		historyDir := folder.DeriveHistoryDir(manifest.RemoteBase, dateStr)
 		destLogPath := folder.DeriveRemoteLogPath(manifest.RemoteBase, datetimeStr)
 
+		folderManifest := manifest
+		folderNoProgressTimeout := effectiveNoProgressTimeout
+		srcFSType := ""
 		if !isPull {
 			// #nosec G703
 			if fi, statErr := os.Stat(localDir); statErr != nil || !fi.IsDir() {
@@ -848,6 +894,22 @@ func executeStealthBackupRun(profile string, args []string) error {
 				}
 				return backupFolderRunStats{ExitCode: 1}, &nonRetryableBackupError{
 					Err: fmt.Errorf("local source directory does not exist for alias %q (<path>)", folderAlias),
+				}
+			}
+
+			srcFSType = detectFilesystemType(localDir)
+			if isNetworkFilesystemType(srcFSType) {
+				if probeErr := probeDirectoryResponsive(localDir, networkMountPreFlightTimeout); probeErr != nil {
+					return backupFolderRunStats{ExitCode: 1}, &nonRetryableBackupError{
+						Err: fmt.Errorf("network mount (%s) for alias=%s failed pre-flight read probe (%v) — remount the share before retrying", srcFSType, folderAlias, probeErr),
+					}
+				}
+				var notes []string
+				folderManifest, folder, folderNoProgressTimeout, notes = applyNetworkMountSafeguards(
+					manifest, folder, srcFSType, effectiveNoProgressTimeout, noProgressExplicitlyDisabled, localIsOpenrsync,
+				)
+				if len(notes) > 0 {
+					fmt.Fprintf(errWriter, "[i] Network mount (%s) detected for alias=%s: %s.\n", srcFSType, folderAlias, strings.Join(notes, "; "))
 				}
 			}
 		}
@@ -902,12 +964,12 @@ func executeStealthBackupRun(profile string, args []string) error {
 			}
 			defer cleanupStage()
 
-			rsyncArgs := buildDirectLocalRsyncArgs(manifest, folder, stageDir, strings.TrimSpace(historyDir) != "", strings.TrimSpace(destLogPath) != "", dryRun, effectiveVerbose)
+			rsyncArgs := buildDirectLocalRsyncArgs(folderManifest, folder, stageDir, strings.TrimSpace(historyDir) != "", strings.TrimSpace(destLogPath) != "", dryRun, effectiveVerbose)
 			// #nosec G204 G702
 			cmd := exec.Command(localRsyncBin, rsyncArgs...)
 			cmd.Dir = stageDir
 			cmd.ExtraFiles = []*os.File{excludePipeRead}
-			cmd.Env = buildDirectLocalRsyncEnv(manifest)
+			cmd.Env = buildDirectLocalRsyncEnv(folderManifest)
 
 			runErr, abortedErr := runCommandWithWatchdog(
 				cmd,
@@ -915,13 +977,18 @@ func executeStealthBackupRun(profile string, args []string) error {
 				stderrFilter,
 				runGuard,
 				progressTracker,
-				effectiveNoProgressTimeout,
+				folderNoProgressTimeout,
 				folderAlias,
 				nil,
 			)
 			_ = excludePipeRead.Close()
 
 			if abortedErr != nil {
+				if isNetworkFilesystemType(srcFSType) {
+					if postErr := probeDirectoryResponsive(localDir, networkMountPostStallTimeout); postErr != nil {
+						fmt.Fprintf(errWriter, "[!] Post-stall check: network mount (%s) for alias=%s is unresponsive (%v) — unmount/remount the share (e.g. 'umount -f') before retrying.\n", srcFSType, folderAlias, postErr)
+					}
+				}
 				if !abortedErr.TerminationConfirmed {
 					guardTerminationUnconfirmed = true
 				}
@@ -1023,7 +1090,7 @@ func executeStealthBackupRun(profile string, args []string) error {
 			return session.Wait()
 		}
 
-		sockPath, waitBridgeErr, cleanupBridge, bErr := startStealthStdioBridge(manifest, folder, now, sshRunner, stderrFilter)
+		sockPath, waitBridgeErr, cleanupBridge, bErr := startStealthStdioBridge(folderManifest, folder, now, sshRunner, stderrFilter)
 		if bErr != nil {
 			_ = excludePipeRead.Close()
 			return backupFolderRunStats{ExitCode: 1}, bErr
@@ -1032,17 +1099,17 @@ func executeStealthBackupRun(profile string, args []string) error {
 		var rsyncArgs []string
 		var cmdDir string
 		if isPull {
-			rsyncArgs = buildStealthSSHPullRsyncArgs(manifest, folder, stageDir, strings.TrimSpace(historyDir) != "", strings.TrimSpace(destLogPath) != "", dryRun, effectiveVerbose)
+			rsyncArgs = buildStealthSSHPullRsyncArgs(folderManifest, folder, stageDir, strings.TrimSpace(historyDir) != "", strings.TrimSpace(destLogPath) != "", dryRun, effectiveVerbose)
 			cmdDir = stageDir
 		} else {
-			rsyncArgs = buildLocalStealthRsyncArgs(manifest, selfExe, dryRun, effectiveVerbose, folder)
+			rsyncArgs = buildLocalStealthRsyncArgs(folderManifest, selfExe, dryRun, effectiveVerbose, folder)
 			cmdDir = localDir
 		}
 		// #nosec G204 G702
 		cmd := exec.Command(localRsyncBin, rsyncArgs...)
 		cmd.Dir = cmdDir
 		cmd.ExtraFiles = []*os.File{excludePipeRead}
-		cmd.Env = buildLocalStealthRsyncEnv(manifest, selfExe, sockPath)
+		cmd.Env = buildLocalStealthRsyncEnv(folderManifest, selfExe, sockPath)
 
 		runErr, abortedErr := runCommandWithWatchdog(
 			cmd,
@@ -1050,7 +1117,7 @@ func executeStealthBackupRun(profile string, args []string) error {
 			stderrFilter,
 			runGuard,
 			progressTracker,
-			effectiveNoProgressTimeout,
+			folderNoProgressTimeout,
 			folderAlias,
 			func() {
 				cleanupBridge()
@@ -1064,6 +1131,11 @@ func executeStealthBackupRun(profile string, args []string) error {
 
 		if abortedErr != nil {
 			cleanupBridge()
+			if !isPull && isNetworkFilesystemType(srcFSType) {
+				if postErr := probeDirectoryResponsive(localDir, networkMountPostStallTimeout); postErr != nil {
+					fmt.Fprintf(errWriter, "[!] Post-stall check: network mount (%s) for alias=%s is unresponsive (%v) — unmount/remount the share (e.g. 'umount -f') before retrying.\n", srcFSType, folderAlias, postErr)
+				}
+			}
 			if !abortedErr.TerminationConfirmed {
 				guardTerminationUnconfirmed = true
 			}

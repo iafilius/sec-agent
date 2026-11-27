@@ -4,12 +4,88 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
+
+const (
+	defaultNetworkMountRsyncTimeout      = 180
+	defaultNetworkMountNoProgressTimeout = 15 * time.Minute
+	networkMountPreFlightTimeout         = 5 * time.Second
+	networkMountPostStallTimeout         = 3 * time.Second
+)
+
+var smbAutoExcludes = []string{"$RECYCLE.BIN", "System Volume Information", "Thumbs.db"}
+
+// detectFilesystemType returns the lowercase macOS filesystem type name for path
+// (e.g. "apfs", "exfat", "smbfs", "nfs", "afpfs", "webdav") via unix.Statfs.
+func detectFilesystemType(path string) string {
+	var st unix.Statfs_t
+	if err := unix.Statfs(path, &st); err != nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, ch := range st.Fstypename {
+		if ch == 0 {
+			break
+		}
+		b.WriteByte(byte(ch))
+	}
+	return strings.ToLower(strings.TrimSpace(b.String()))
+}
+
+func isNetworkFilesystemType(fsType string) bool {
+	switch strings.ToLower(strings.TrimSpace(fsType)) {
+	case "smbfs", "cifs", "nfs", "afpfs", "webdav":
+		return true
+	default:
+		return false
+	}
+}
+
+func isSMBFilesystemType(fsType string) bool {
+	switch strings.ToLower(strings.TrimSpace(fsType)) {
+	case "smbfs", "cifs":
+		return true
+	default:
+		return false
+	}
+}
+
+// probeDirectoryResponsive verifies that dir responds to a lightweight directory read
+// (os.Open + Readdirnames(1)) within timeout, failing fast on frozen SMB/NFS mounts.
+func probeDirectoryResponsive(dir string, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = networkMountPreFlightTimeout
+	}
+	errCh := make(chan error, 1)
+	go func() {
+		// #nosec G304 G703
+		f, err := os.Open(dir)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		_, rErr := f.Readdirnames(1)
+		_ = f.Close()
+		if rErr != nil && rErr != io.EOF {
+			errCh <- rErr
+			return
+		}
+		errCh <- nil
+	}()
+	select {
+	case err := <-errCh:
+		return err
+	case <-time.After(timeout):
+		return fmt.Errorf("mount read probe timed out after %s (unresponsive network mount)", timeout)
+	}
+}
 
 // verifyLocalBackupMount ensures that a local destination under /Volumes/<MountName>/...
 // points to an actually mounted filesystem (distinct statfs Fsid from /Volumes) rather than

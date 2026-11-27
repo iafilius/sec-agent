@@ -5,6 +5,15 @@ All notable changes to `sec-agent` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v2.23.0] - 2026-11-27
+
+### Added & Enhanced
+- **Network-Mounted Source Backup Hardening (`network-mount-backup-hardening`)**:
+  - Automatically detects network-mounted source filesystems on macOS (`smbfs`, `cifs`, `nfs`, `afpfs`, `webdav`) via `unix.Statfs` (`Fstypename`) and runs a bounded `5s` pre-flight directory read probe (`os.Open` + `Readdirnames(1)`) before spawning `rsync`, failing fast without retries if the mount is already wedged.
+  - Automatically appends Windows SMB system excludes (`$RECYCLE.BIN`, `System Volume Information`, `Thumbs.db`) when backing up `smbfs` or `cifs` sources so inaccessible recycle-bin or volume metadata trees cannot stall transfers.
+  - Automatically applies safe default stall timeouts on network-mounted sources when unset (`--timeout=180` and a `15m` no-progress watchdog on GNU `rsync`; gracefully skips the watchdog with a hint on macOS `openrsync`, while honoring explicit `--no-progress-timeout 0` overrides).
+  - Performs a bounded `3s` post-stall mount health probe on watchdog aborts and reports clearly when the underlying network mount has become unresponsive (advising `umount -f` and remounting).
+
 ## [v2.22.0] - 2026-11-25
 
 ### Added & Enhanced

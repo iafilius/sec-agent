@@ -1,10 +1,10 @@
 ---
 name: sec-agent-integration
 description: Use the sec-agent CLI utility to start background daemons, store secrets, run applications in isolated environments, migrate dotenv files, install AI skills, inspect snapshots, and manage backups.
-version: v2.22.0
+version: v2.23.0
 ---
 
-# sec-agent Secrets Management Integration (v2.22.0)
+# sec-agent Secrets Management Integration (v2.23.0)
 
 This skill enables AI coding agents and autonomous assistants to use the `sec-agent` CLI tool (v1.9.4+) to securely retrieve credentials, run application build/test/terraform pipelines in isolated process environments, migrate dotenv configuration files, install integration skills across IDEs, inspect point-in-time snapshots (`sec snapshot`), and manage KeePassXC `.kdbx` backups on macOS.
 
@@ -102,7 +102,7 @@ When `sec-agent` is updated on the workstation (e.g. via Homebrew or source rebu
 **CRITICAL RULE FOR AI ASSISTANTS**:
 1. **Dynamic Version Drift Detection**: When executing `sec status`, `sec status --quick`, or any CLI command, if the CLI output indicates:
    * An advisory upgrade notice (`[sec-agent] 💡 Active workspace AI skill instructions trail CLI version ... Run 'sec-agent skill update' to refresh.`), or
-   * A CLI version newer than this document's declared version (`v2.22.0`),
+   * A CLI version newer than this document's declared version (`v2.23.0`),
 2. **Immediate Update & Re-Read Obligation**:
    * Execute `sec-agent skill update` to refresh installed skills to the latest binary version.
    * Then **IMMEDIATELY INVOKE your file viewing tool** (e.g. `view_file`) on the installed skill path (such as `.agents/skills/sec-agent-integration/SKILL.md` or `~/.gemini/config/skills/sec-agent-integration/SKILL.md`) before taking further action. This purges stale cached instructions from the LLM conversation context and equips the agent with new commands, flags, and security rules.
@@ -853,6 +853,7 @@ exec sec - <<<'["backup","run","remote-box","--suggest-excludes"]'
   * Executes direct local `rsync` with SSH parity (`<Prefix>-History/<YYYY-MM-DD>` via `--backup --backup-dir`, destination `rsync_<slug>_<datetime>.log`, `/dev/fd/3` excludes, overlap guard, privacy-preserving output, and optional `--no-progress-timeout` watchdog).
   * **Fail-Closed `/Volumes` Mount Check**: Verifies `/Volumes/<MountName>` has a distinct `statfs` `Fsid` from `/Volumes` before creating directories or running `rsync`, preventing accidental writes to an unmounted stub directory.
   * **Additive Excludes & Exclusion-Candidate Monitor**: Folder-level excludes merge with job-level excludes (preserving `.DS_Store`, `.Trash*`, `._*`). Both local and SSH runs count permission/TCC/open errors privately by default; pass `--suggest-excludes` (or `--verbose`) when troubleshooting to print deduplicated relative paths and ready-to-run `sec backup add-folder <job> <folder> --exclude "..."` suggestions.
+  * **Automatic Network-Mount (`smbfs`/`nfs`) Hardening**: For network-mounted source folders (`smbfs`, `cifs`, `nfs`, `afpfs`, `webdav`), `sec-agent` runs a `5s` pre-flight read probe (fail-fast on frozen mounts), auto-excludes Windows SMB junk (`$RECYCLE.BIN`, `System Volume Information`, `Thumbs.db`), applies safe defaults (`--timeout=180` + `15m` watchdog on GNU `rsync`; override with `--no-progress-timeout 0`), and runs a `3s` post-stall mount diagnosis if the watchdog aborts.
   * **Zero Volume/Folder/Log Leakage in `ps aux` (Ephemeral `0700` Stage Dir)**: Direct local `rsync` runs inside an ephemeral mode-`0700` staging directory (`/tmp/s<rand>/`, removed on exit) using opaque single-letter symlinks (`s/`, `d/`, `<stageDir>/h`, `l`) so zero volume names, folder names, history dates, or log filenames appear in `ps aux`/`pstree`. Always invoke via `exec sec - <<<'[...]'` so the outer shell wrapper disappears from `pstree` in `<1ms`.
 * **The 6 Zero-Trace Guarantees**:
   1. **Zero `.zsh_history` Command/Path Exposure**: The operator or agent only runs `sec backup run <name>`, keeping sensitive folder names, IP addresses, and remote volume paths completely out of shell history.
